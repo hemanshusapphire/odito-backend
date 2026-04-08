@@ -4,7 +4,7 @@ import { JobService } from '../service/jobService.js';
 
 import AIScript from '../../aiVideo/models/aiScript.model.js';
 
-import { getEnvVar } from '../../config/env.js';
+import { getEnvVar } from '../../../config/env.js';
 
 
 
