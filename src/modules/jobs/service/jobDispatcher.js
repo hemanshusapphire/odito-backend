@@ -1058,9 +1058,7 @@ class JobDispatcher {
 
         userId: job.user_id.toString(),
 
-        sourceJobId: job.input_data?.source_job_id || '',
-
-        aiProjectId: job.input_data?.aiProjectId || null
+        sourceJobId: job.input_data?.source_job_id || ''
 
       };
 
