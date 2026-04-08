@@ -212,13 +212,7 @@ const startServer = async () => {
 
    */
 
-  const publicPath = path.resolve(
-
-    process.cwd(),
-
-    "public"
-
-  );
+  const publicPath = path.join(__dirname, "public");
 
 
 
