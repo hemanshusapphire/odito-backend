@@ -1,0 +1,1492 @@
+import SeoProject from '../model/SeoProject.js';
+import { ProjectLinksService } from '../service/projectLinks.service.js';
+import { ProjectPagesService } from '../service/projectPages.service.js';
+import { ProjectPerformanceService } from '../service/projectPerformance.service.js';
+import { ProjectSummaryService } from '../service/projectSummary.service.js';
+import { TechnicalChecksService } from '../service/technicalChecks.service.js';
+import { ProjectIssuesService } from '../service/projectIssues.service.js';
+import { GoogleVisibilityService } from '../service/googleVisibility.service.js';
+import { AIVisibilityService } from '../service/aiVisibility.service.js';
+
+import GoogleConnection from '../model/GoogleConnection.js';
+
+import mongoose from 'mongoose';
+
+import { getOnPageIssues as getOnPageIssuesService, getIssueUrls as getIssueUrlsService } from '../../../services/onPageIssuesService.js';
+
+// Get project links data
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to ProjectLinksService.getProjectLinks()
+export const getProjectLinks = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { page = 1, limit = 50, link_type, search } = req.query;
+
+    // TODO: REMOVE_AFTER_REFACTOR - Original controller logic below
+    // All business logic moved to ProjectLinksService.getProjectLinks()
+    // This maintains EXACT same API behavior while cleaning up controller
+    
+    const result = await ProjectLinksService.getProjectLinks(req.user._id, projectId, req.query);
+    
+    // Return EXACT same response format as before
+    return res.json(result);
+
+  } catch (error) {
+    console.error('Error getting project links:', error);
+    
+    // Handle custom errors from service (maintain exact same error responses)
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    
+    // Default error response (EXACT same as original)
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get project links',
+      error: error.message
+    });
+  }
+};
+
+
+
+
+// Get project pages data
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to ProjectPagesService.getProjectPages()
+export const getProjectPages = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { page = 1, limit = 50, status, search, sortBy, sortOrder, filter } = req.query;
+
+    // TODO: REMOVE_AFTER_REFACTOR - Original controller logic below
+    // All business logic moved to ProjectPagesService.getProjectPages()
+    // This maintains EXACT same API behavior while cleaning up controller
+    
+    const result = await ProjectPagesService.getProjectPages(req.user._id, projectId, req.query);
+    
+    // Return EXACT same response format as before
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting project pages:', error);
+    
+    // Handle custom errors from service (maintain exact same error responses)
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    
+    // Default error response (EXACT same as original)
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get project pages',
+      error: error.message
+    });
+  }
+};
+
+
+// Get project performance data
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to ProjectPerformanceService.getProjectPerformance()
+export const getProjectPerformance = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+
+    // TODO: REMOVE_AFTER_REFACTOR - Original controller logic below
+    // All business logic moved to ProjectPerformanceService.getProjectPerformance()
+    // This maintains EXACT same API behavior while cleaning up controller
+    
+    const result = await ProjectPerformanceService.getProjectPerformance(req.user._id, projectId);
+    
+    // Return EXACT same response format as before
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting project performance:', error);
+    
+    // Handle custom errors from service (maintain exact same error responses)
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    
+    // Default error response (EXACT same as original)
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get project performance',
+      error: error.message
+    });
+  }
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Get project summary for dashboard
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to ProjectSummaryService.getProjectSummary()
+export const getProjectSummary = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+
+    // TODO: REMOVE_AFTER_REFACTOR - Original controller logic below
+    // All business logic moved to ProjectSummaryService.getProjectSummary()
+    // This maintains EXACT same API behavior while cleaning up controller
+    
+    const result = await ProjectSummaryService.getProjectSummary(req.user._id, projectId);
+    
+    // Return EXACT same response format as before
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting project summary:', error);
+    
+    // Handle custom errors from service (maintain exact same error responses)
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    
+    // Default error response (EXACT same as original)
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get project summary',
+      error: error.message
+    });
+  }
+};
+
+
+
+
+
+// Get comprehensive technical checks for all pages
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to TechnicalChecksService.getTechnicalChecks()
+export const getTechnicalChecks = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+
+    const result = await TechnicalChecksService.getTechnicalChecks(req.user._id, projectId);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting technical checks:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get technical checks',
+      error: error.message
+    });
+  }
+};
+
+// Get detailed information for a specific technical check
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to TechnicalChecksService.getTechnicalCheckDetail()
+export const getTechnicalCheckDetail = async (req, res) => {
+  try {
+    const { id: projectId, checkId } = req.params;
+
+    const result = await TechnicalChecksService.getTechnicalCheckDetail(req.user._id, projectId, checkId);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting technical check detail:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get technical check detail',
+      error: error.message
+    });
+  }
+};
+
+// Get project issues grouped by page URL
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to ProjectIssuesService.getProjectIssuesByPage()
+export const getProjectIssuesByPage = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    
+    const result = await ProjectIssuesService.getProjectIssuesByPage(req.user._id, projectId);
+    return res.status(200).json(result);
+    
+  } catch (error) {
+    console.error('Error getting project issues by page:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get project issues by page',
+      error: error.message
+    });
+  }
+};
+
+
+// Get issues for a specific page URL
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to ProjectIssuesService.getPageIssues()
+export const getPageIssues = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { page_url } = req.query;
+
+    if (!page_url) {
+      return res.status(400).json({
+        success: false,
+        message: 'page_url parameter is required'
+      });
+    }
+
+    const result = await ProjectIssuesService.getPageIssues(req.user._id, projectId, page_url);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting page issues:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+
+
+        message: 'page_url parameter is required'
+
+
+
+
+
+
+
+      });
+
+
+
+
+
+
+
+    }
+
+
+
+
+
+
+
+    if (!projectId) {
+
+
+
+
+
+
+
+      return res.status(400).json({
+
+
+
+
+
+
+
+        success: false,
+
+
+
+
+
+
+
+        message: 'projectId parameter is required'
+
+
+
+
+
+
+
+      });
+
+
+
+
+
+
+
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    // Verify project belongs to user (consistent with other functions)
+
+
+
+    const project = await SeoProject.findById(projectId);
+
+
+
+
+
+
+
+    if (!project) {
+
+
+
+      console.log('❌ Project not found:', projectId);
+
+
+
+      return res.status(404).json({
+
+
+
+        success: false,
+
+
+
+        message: 'Project not found'
+
+
+
+      });
+
+
+
+    }
+
+
+
+
+
+
+
+    // Check if user owns this project
+
+
+
+    if (project.user_id.toString() !== req.user._id.toString()) {
+
+
+
+      console.log('❌ Access denied for user:', req.user._id);
+
+
+
+      return res.status(403).json({
+
+
+
+        success: false,
+
+
+
+        message: 'Access denied'
+
+
+
+      });
+
+
+
+    }
+
+
+
+
+
+
+
+    console.log('✅ Project validated:', project.project_name);
+
+
+
+
+
+
+
+    // Get page score from seo_page_scores collection (same source as subpages table)
+
+
+
+    const pageScore = await db.collection('seo_page_scores')
+
+
+
+      .findOne({
+
+
+
+        projectId: projectIdObj,
+
+
+
+        page_url: decodedPageUrl
+
+
+
+      });
+
+
+
+
+
+
+
+    const pageScoreValue = pageScore ? pageScore.page_score : 0;
+
+
+
+
+
+
+
+    console.log('📊 Page score found:', { page_url: decodedPageUrl, score: pageScoreValue });
+
+
+
+
+
+
+
+    // Get page data from seo_page_data collection (this contains all the page data we need)
+
+
+
+    const pageData = await db.collection('seo_page_data')
+
+
+
+      .findOne({
+
+
+
+        projectId: projectIdObj,
+
+
+
+        url: decodedPageUrl
+
+
+
+      });
+
+
+
+
+
+
+
+    // Get screenshot from seo_first_snapshot collection (this contains screenshot metadata)
+
+
+
+    const pageScreenshot = await db.collection('seo_first_snapshot')
+
+
+
+      .findOne({
+
+
+
+        project_id: projectIdObj,   // ✅ FIXED: was projectId
+
+
+
+        $or: [
+
+
+
+          { url: decodedPageUrl },
+
+
+
+          { final_url: decodedPageUrl },
+
+
+
+          { canonical_url: decodedPageUrl }
+
+
+
+        ]
+
+
+
+      });
+
+
+
+
+
+
+
+    console.log("🧪 PAGE SCREENSHOT RAW:", pageScreenshot);
+
+
+
+
+
+
+
+    // Get issues for specific page URL
+
+
+
+    const issues = await db.collection('seo_page_issues')
+
+
+
+      .find({
+
+
+
+        projectId: projectIdObj,
+
+
+
+        page_url: decodedPageUrl
+
+
+
+      })
+
+
+
+      .sort({ created_at: -1 })
+
+
+
+      .toArray();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    console.log('📊 Found issues for page:', { page_url: decodedPageUrl, count: issues.length });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    // Format issues for frontend
+
+
+
+
+
+
+
+    const formattedIssues = issues.map(issue => ({
+
+
+
+
+
+
+
+      id: issue._id.toString(),
+
+
+
+
+
+
+
+      issue_message: issue.issue_message,
+
+
+
+
+
+
+
+      rule_id: issue.rule_id,
+
+
+
+
+
+
+
+      severity: issue.severity,
+
+
+
+
+
+
+
+      category: issue.category,
+
+
+
+
+
+
+
+      issue_code: issue.issue_code,
+
+
+
+
+
+
+
+      detected_value: issue.detected_value,
+
+
+
+
+
+
+
+      expected_value: issue.expected_value,
+
+
+
+
+
+
+
+      data_key: issue.data_key,
+
+
+
+
+
+
+
+      data_path: issue.data_path,
+
+
+
+
+
+
+
+      created_at: issue.created_at
+
+
+
+
+
+
+
+    }));
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    // Extract page data if available
+
+
+
+
+
+
+
+    const data = pageData ? {
+
+
+
+
+
+
+
+      title: pageData.title,
+
+
+
+
+
+
+
+      meta_description: pageData.meta_tags?.description?.[0] || '',
+
+
+
+
+
+
+
+      word_count: pageData.content?.word_count,
+
+
+
+
+
+
+
+      language: pageData.html_lang,
+
+
+
+
+
+
+
+      size: JSON.stringify(pageData).length, // Approximate size in bytes
+
+
+
+
+
+
+
+      status_code: pageData.http_status_code,
+
+
+
+
+
+
+
+      response_time: pageData.response_time_ms
+
+
+
+
+
+
+
+    } : null;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    // Build page_data_preview translation layer (READ-ONLY mapping)
+
+
+
+
+
+
+
+    const page_data_preview = pageData ? {
+
+
+
+
+
+
+
+      title: pageData.title,
+
+
+
+
+
+
+
+      meta_description: pageData.meta_tags?.description?.[0] || null,
+
+
+
+
+
+
+
+      viewport: pageData.meta_tags?.viewport?.[0] || null,
+
+
+
+
+
+
+
+      robots: pageData.meta_tags?.robots?.[0] || null,
+
+
+
+
+
+
+
+      content_text: pageData.content?.text || null,
+
+
+
+
+
+
+
+      word_count: pageData.content?.word_count || 0,
+
+
+
+
+
+
+
+      headings: pageData.content?.headings || {},
+
+
+
+
+
+
+
+      images: pageData.images || [],
+
+
+
+
+
+
+
+      tracking: pageData.tracking || {},
+
+
+
+
+
+
+
+      structured_data: pageData.structured_data || [],
+
+
+
+
+
+
+
+      og_tags: pageData.social?.open_graph || {},
+
+
+
+
+
+
+
+      twitter_tags: pageData.social?.twitter || {},
+
+
+
+
+
+
+
+      url: pageData.url || null,
+
+
+
+
+
+
+
+      hreflangs: pageData.hreflangs || [],
+
+
+
+
+
+
+
+      doctype: pageData.doctype || null,
+
+
+
+
+
+
+
+      meta_tags: pageData.meta_tags || {}
+
+
+
+
+
+
+
+    } : null;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    // Extract metadata if available
+
+
+
+
+
+
+
+    const metadata = pageData ? {
+
+
+
+
+
+
+
+      url: pageData.url,
+
+
+
+
+
+
+
+      http_status_code: pageData.http_status_code,
+
+
+
+
+
+
+
+      response_time_ms: pageData.response_time_ms,
+
+
+
+
+
+
+
+      crawledAt: pageData.scrapedAt || pageData.scraped_at,
+
+
+
+
+
+
+
+      crawl_status: pageData.scrape_status,
+
+
+
+
+
+
+
+      seo_status: pageData.extraction_status
+
+
+
+
+
+
+
+    } : null;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    const responseData = {
+
+
+
+      page_url: decodedPageUrl,
+
+
+
+      page_score: pageScoreValue, // Add page score from same source as subpages table
+
+
+
+      page_metadata: metadata,
+
+
+
+      page_screenshot: pageScreenshot
+
+
+
+        ? (() => {
+
+
+
+          // Normalize path to ensure browser-valid URL
+
+
+
+          const rawPath = pageScreenshot.screenshot_path;
+
+
+
+          const normalizedPath = rawPath
+
+
+
+            .replace(/\\/g, '/')                 // windows → unix
+
+
+
+            .replace(/^(\.\.\/)+/, '')           // remove ../
+
+
+
+            .replace(/^.*storage\//, 'storage/'); // force public root
+
+
+
+
+
+
+
+          const screenshotUrl = `${req.protocol}://${req.get('host')}/${normalizedPath}`;
+
+
+
+          console.log('🔗 Normalized screenshot URL:', screenshotUrl);
+
+
+
+
+
+
+
+          return {
+
+
+
+            screenshot_path: screenshotUrl,
+
+
+
+            final_url: pageScreenshot.final_url,
+
+
+
+            canonical_url: pageScreenshot.canonical_url,
+
+
+
+            scroll_height: pageScreenshot.scroll_height,
+
+
+
+            captured_at: pageScreenshot.captured_at
+
+
+
+          };
+
+
+
+        })()
+
+
+
+        : null,
+
+
+
+      page_data: data,
+
+
+
+      page_data_preview: page_data_preview,
+
+
+
+      issues: formattedIssues,
+
+
+
+      summary: {
+
+
+
+        totalIssues: formattedIssues.length
+
+
+
+      }
+
+
+
+    };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    res.status(200).json({
+
+
+
+
+
+
+
+      success: true,
+
+
+
+
+
+
+
+      data: responseData
+
+
+
+
+
+
+
+    });
+
+
+
+
+// Get project issues
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to ProjectIssuesService.getProjectIssues()
+export const getProjectIssues = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { page = 1, limit = 1000, category, severity, search } = req.query;
+
+    const result = await ProjectIssuesService.getProjectIssues(req.user._id, projectId, req.query);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting project issues:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get project issues',
+      error: error.message
+    });
+  }
+};
+
+
+
+// Disconnect Google Visibility
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to GoogleVisibilityService.disconnectGoogleVisibility()
+export const disconnectGoogleVisibility = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+
+    const result = await GoogleVisibilityService.disconnectGoogleVisibility(req.user._id, projectId);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error disconnecting Google visibility:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to disconnect Google visibility',
+      error: error.message
+    });
+  }
+};
+
+// Get Google Visibility status
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to GoogleVisibilityService.getGoogleVisibilityStatus()
+export const getGoogleVisibilityStatus = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+
+    const result = await GoogleVisibilityService.getGoogleVisibilityStatus(req.user._id, projectId);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting Google visibility status:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get Google visibility status',
+      error: error.message
+    });
+  }
+};
+
+// Connect Google Visibility
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to GoogleVisibilityService.connectGoogleVisibility()
+export const connectGoogleVisibility = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { propertyUrl } = req.body;
+
+    const result = await GoogleVisibilityService.connectGoogleVisibility(req.user._id, projectId, propertyUrl);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error connecting Google visibility:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to connect Google visibility',
+      error: error.message
+    });
+  }
+};
+
+// Get AI Visibility Entity Graph
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to AIVisibilityService.getAIVisibilityEntityGraph()
+export const getAIVisibilityEntityGraph = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+
+    const result = await AIVisibilityService.getAIVisibilityEntityGraph(req.user._id, projectId);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting AI visibility entity graph:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get AI visibility entity graph',
+      error: error.message
+    });
+  }
+};
+
+// Get AI Visibility Page
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to AIVisibilityService.getAIVisibilityPage()
+export const getAIVisibilityPage = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { page_url } = req.query;
+
+    const result = await AIVisibilityService.getAIVisibilityPage(req.user._id, projectId, page_url);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting AI visibility page:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get AI visibility page',
+      error: error.message
+    });
+  }
+};
+
+// Get AI Visibility Pages
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to AIVisibilityService.getAIVisibilityPages()
+export const getAIVisibilityPages = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+
+    const result = await AIVisibilityService.getAIVisibilityPages(req.user._id, projectId, req.query);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting AI visibility pages:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get AI visibility pages',
+      error: error.message
+    });
+  }
+};
+
+// Get AI Visibility Worst Pages
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to AIVisibilityService.getAIVisibilityWorstPages()
+export const getAIVisibilityWorstPages = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { limit = 10 } = req.query;
+
+    const result = await AIVisibilityService.getAIVisibilityWorstPages(req.user._id, projectId, limit);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting AI visibility worst pages:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get AI visibility worst pages',
+      error: error.message
+    });
+  }
+};
+
+// Get Standalone AI Visibility Pages
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to AIVisibilityService.getStandaloneAIVisibilityPages()
+export const getStandaloneAIVisibilityPages = async (req, res) => {
+  try {
+    const result = await AIVisibilityService.getStandaloneAIVisibilityPages(req.user._id, req.query);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting standalone AI visibility pages:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get standalone AI visibility pages',
+      error: error.message
+    });
+  }
+};
+
+// Get Page Score
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to AIVisibilityService.getPageScore()
+export const getPageScore = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { page_url } = req.query;
+
+    const result = await AIVisibilityService.getPageScore(req.user._id, projectId, page_url);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting page score:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get page score',
+      error: error.message
+    });
+  }
+};
+
+// Get AI Visibility Page Issues
+// REFACTORED: Now uses service layer - Phase 2 Refactoring
+// Original logic moved to AIVisibilityService.getAIVisibilityPageIssues()
+export const getAIVisibilityPageIssues = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { page_url } = req.query;
+
+    const result = await AIVisibilityService.getAIVisibilityPageIssues(req.user._id, projectId, page_url);
+    return res.status(200).json(result);
+
+  } catch (error) {
+    console.error('Error getting AI visibility page issues:', error);
+    if (error.statusCode && error.response) {
+      return res.status(error.statusCode).json(error.response);
+    }
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get AI visibility page issues',
+      error: error.message
+    });
+  }
+};
+
