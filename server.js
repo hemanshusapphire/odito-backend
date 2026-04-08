@@ -212,7 +212,24 @@ const startServer = async () => {
 
    */
 
-  const publicPath = path.join(__dirname, "public");
+  // Robust path resolution for both local and production
+  let publicPath;
+  
+  // Check if we're in production with different directory structure
+  const possiblePaths = [
+    path.join(__dirname, "public"),  // Local development
+    path.resolve("/root/odito/odito_backend/public"),  // Production hardcoded
+    path.resolve(__dirname, "../odito_backend/public"),  // Production relative
+  ];
+  
+  publicPath = possiblePaths.find(p => fs.existsSync(p));
+  
+  if (!publicPath) {
+    console.error("❌ Public directory not found! Tried:", possiblePaths);
+    throw new Error("Public directory not found");
+  }
+  
+  console.log("📂 Using public path:", publicPath);
 
 
 
