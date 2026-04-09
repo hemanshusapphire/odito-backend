@@ -219,22 +219,82 @@ export async function generateProjectPDF(projectId, userId, options = {}) {
     console.log(`[PUPPETEER_PDF] [3/5] ✅ Report page loaded`);
 
     // ─── Step 4: Wait for data to fully load ─────────────────────────────
-    console.log(`[PUPPETEER_PDF] [4/5] Waiting for report data to load...`);
+    console.log(`[PUPPETEER_PDF] [4/5] WAITING FOR PAGE READY`);
 
     try {
-      // Wait for the #report-loaded marker
+      // First wait for the #report-loaded marker (main page data)
+      console.log(`[PUPPETEER_PDF] WAITING FOR #report-loaded marker`);
       await page.waitForSelector('#report-loaded', {
         timeout: 60_000
       });
-      console.log(`[PUPPETEER_PDF] [4/5] ✅ Report data fully loaded`);
+      console.log(`[PUPPETEER_PDF] ✅ #report-loaded marker found`);
     } catch (error) {
       console.error(`[PUPPETEER_PDF] ⚠️  #report-loaded marker not found after 60s`);
       console.error(`[PUPPETEER_PDF] Error: ${error.message}`);
       // Continue anyway - maybe the data is loaded but marker is missing
     }
 
-    // Additional wait for dynamic content to render
-    await page.waitForTimeout(3000);
+    // CRITICAL: Wait for global PDF readiness flag (component data)
+    console.log(`[PUPPETEER_PDF] WAITING FOR __PDF_READY__ flag`);
+    
+    // Add debug logging for readiness status
+    try {
+      const readinessStatus = await page.evaluate(() => {
+        if (typeof window !== 'undefined' && window.__PDF_READY__ !== undefined) {
+          return {
+            ready: window.__PDF_READY__ === true,
+            value: window.__PDF_READY__,
+            timestamp: Date.now()
+          };
+        }
+        return { ready: false, value: undefined, message: '__PDF_READY__ not found' };
+      });
+      
+      console.log(`[PUPPETEER_PDF] DEBUG - Initial readiness status:`, readinessStatus);
+      
+      await page.waitForFunction(() => window.__PDF_READY__ === true, {
+        timeout: 30_000
+      });
+      
+      console.log(`[PUPPETEER_PDF] ✅ PAGE READY DETECTED - __PDF_READY__ flag is true`);
+      
+      // Final status check
+      const finalStatus = await page.evaluate(() => {
+        return {
+          ready: window.__PDF_READY__ === true,
+          value: window.__PDF_READY__,
+          timestamp: Date.now()
+        };
+      });
+      console.log(`[PUPPETEER_PDF] DEBUG - Final readiness status:`, finalStatus);
+      
+    } catch (error) {
+      console.error(`[PUPPETEER_PDF] ⚠️  __PDF_READY__ flag not found after 30s`);
+      console.error(`[PUPPETEER_PDF] Error: ${error.message}`);
+      
+      // Debug: Check what's actually in the window
+      try {
+        const debugInfo = await page.evaluate(() => {
+          return {
+            hasWindow: typeof window !== 'undefined',
+            hasPDFReady: typeof window.__PDF_READY__ !== 'undefined',
+            pdfReadyValue: window.__PDF_READY__,
+            allKeys: Object.keys(window).filter(k => k.includes('PDF') || k.includes('ready')).slice(0, 10)
+          };
+        });
+        console.error(`[PUPPETEER_PDF] DEBUG - Window state:`, debugInfo);
+      } catch (debugErr) {
+        console.error(`[PUPPETEER_PDF] DEBUG - Could not check window state: ${debugErr.message}`);
+      }
+      
+      console.error(`[PUPPETEER_PDF] Continuing anyway - PDF may have loading states`);
+      // Additional fallback wait
+      await page.waitForTimeout(5000);
+    }
+
+    // Final wait for any remaining dynamic content to render
+    console.log(`[PUPPETEER_PDF] CAPTURING SCREENSHOT after readiness confirmation`);
+    await page.waitForTimeout(1000);
 
     // ─── Step 5: Generate PDF directly ───────────────────────────────────
     console.log(`[PUPPETEER_PDF] [5/5] Generating PDF...`);
