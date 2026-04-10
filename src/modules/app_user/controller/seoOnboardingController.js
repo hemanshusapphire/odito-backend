@@ -48,10 +48,16 @@ export const generateKeywords = async (req, res) => {
 
     LoggerUtil.info('Generate keywords request', { subType, location, country });
 
+    // Forward Authorization header to Python worker
+    const headers = { 'Content-Type': 'application/json' };
+    if (req.headers.authorization) {
+      headers.Authorization = req.headers.authorization;
+    }
+
     // Forward to Python worker
     const response = await fetch(`${getPythonWorkerUrl()}/api/onboarding/generate-keywords`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         sub_type: subType.trim(),
         location: location?.trim() || null,
@@ -261,6 +267,12 @@ export const checkRanking = async (req, res) => {
       headers.Authorization = req.headers.authorization;
     }
 
+    console.log('🔍 DEBUG: Sending to Python worker:', {
+      url: `${getPythonWorkerUrl()}/api/onboarding/check-ranking`,
+      payload: pythonPayload,
+      headers: headers
+    });
+
     const response = await fetch(`${getPythonWorkerUrl()}/api/onboarding/check-ranking`, {
       method: 'POST',
       headers,
@@ -281,14 +293,24 @@ export const checkRanking = async (req, res) => {
 
     const data = await response.json();
 
+    console.log('🔍 DEBUG: Python worker response:', {
+      status: response.status,
+      ok: response.ok,
+      data: data
+    });
+
     LoggerUtil.info('Ranking check completed', { resultsCount: data.results?.length });
 
-    return res.status(200).json({
+    const finalResponse = {
       success: true,
       data: {
         results: data.results || []
       }
-    });
+    };
+
+    console.log('🔍 DEBUG: Final response to frontend:', finalResponse);
+
+    return res.status(200).json(finalResponse);
 
   } catch (error) {
     LoggerUtil.error('Check ranking error', error);

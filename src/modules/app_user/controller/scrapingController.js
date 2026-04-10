@@ -320,9 +320,16 @@ export const cancelAudit = async (req, res) => {
     for (const jobId of jobIds) {
       try {
         LoggerUtil.debug(`Sending cancel request for job: ${jobId}`);
+        
+        // Forward Authorization header to Python worker
+        const headers = { 'Content-Type': 'application/json' };
+        if (req.headers.authorization) {
+          headers.Authorization = req.headers.authorization;
+        }
+        
         const response = await fetch(`${pythonWorkerUrl}/jobs/cancel`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ jobId: jobId.toString() })
         });
 
