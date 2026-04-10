@@ -273,44 +273,70 @@ export const checkRanking = async (req, res) => {
       headers: headers
     });
 
-    const response = await fetch(`${getPythonWorkerUrl()}/api/onboarding/check-ranking`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(pythonPayload)
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      LoggerUtil.error('Python worker ranking check failed', {
-        status: response.status,
-        detail: errorData.detail
+    try {
+      const response = await fetch(`${getPythonWorkerUrl()}/api/onboarding/check-ranking`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(pythonPayload)
       });
-      return res.status(502).json({
+
+      // Parse response safely
+      let responseData;
+      try {
+        const responseText = await response.text();
+        responseData = responseText ? JSON.parse(responseText) : {};
+      } catch (parseError) {
+        LoggerUtil.error('Failed to parse Python worker response', {
+          status: response.status,
+          parseError: parseError.message
+        });
+        return res.status(502).json({
+          success: false,
+          message: 'Invalid response from ranking service'
+        });
+      }
+
+      if (!response.ok) {
+        LoggerUtil.error('Python worker ranking check failed', {
+          status: response.status,
+          statusText: response.statusText,
+          errorData: responseData
+        });
+        return res.status(502).json({
+          success: false,
+          message: responseData.detail || responseData.message || 'Failed to check rankings'
+        });
+      }
+
+      console.log('🔍 DEBUG: Python worker response:', {
+        status: response.status,
+        ok: response.ok,
+        data: responseData
+      });
+
+      LoggerUtil.info('Ranking check completed', { resultsCount: responseData.results?.length });
+
+      const finalResponse = {
+        success: true,
+        data: {
+          results: responseData.results || []
+        }
+      };
+
+      console.log('🔍 DEBUG: Final response to frontend:', finalResponse);
+
+      return res.status(200).json(finalResponse);
+
+    } catch (fetchError) {
+      LoggerUtil.error('Network error calling Python worker', {
+        error: fetchError.message,
+        url: `${getPythonWorkerUrl()}/api/onboarding/check-ranking`
+      });
+      return res.status(503).json({
         success: false,
-        message: errorData.detail || 'Failed to check rankings'
+        message: 'Ranking service temporarily unavailable'
       });
     }
-
-    const data = await response.json();
-
-    console.log('🔍 DEBUG: Python worker response:', {
-      status: response.status,
-      ok: response.ok,
-      data: data
-    });
-
-    LoggerUtil.info('Ranking check completed', { resultsCount: data.results?.length });
-
-    const finalResponse = {
-      success: true,
-      data: {
-        results: data.results || []
-      }
-    };
-
-    console.log('🔍 DEBUG: Final response to frontend:', finalResponse);
-
-    return res.status(200).json(finalResponse);
 
   } catch (error) {
     LoggerUtil.error('Check ranking error', error);
