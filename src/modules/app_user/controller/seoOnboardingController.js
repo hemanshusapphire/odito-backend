@@ -255,9 +255,15 @@ export const checkRanking = async (req, res) => {
       url: `${getPythonWorkerUrl()}/api/onboarding/check-ranking`
     });
 
+    // Forward Authorization header to Python worker
+    const headers = { 'Content-Type': 'application/json' };
+    if (req.headers.authorization) {
+      headers.Authorization = req.headers.authorization;
+    }
+
     const response = await fetch(`${getPythonWorkerUrl()}/api/onboarding/check-ranking`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(pythonPayload)
     });
 
