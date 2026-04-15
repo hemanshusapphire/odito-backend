@@ -17,13 +17,6 @@ export async function searchBusiness(req, res) {
   try {
     const { businessName, businessLocation } = req.body;
     
-    console.log('[BUSINESS_CONTROLLER] Search request', {
-      businessName,
-      businessLocation,
-      userAgent: req.get('User-Agent'),
-      ip: req.ip
-    });
-    
     // Validate required fields
     if (!businessName || !businessName.trim()) {
       return res.status(400).json({
@@ -42,10 +35,6 @@ export async function searchBusiness(req, res) {
     // Search for businesses using Google Places API
     const rawResults = await searchBusinesses(businessName.trim(), businessLocation.trim());
     
-    console.log('[BUSINESS_CONTROLLER] Raw search results', {
-      resultsCount: rawResults.length
-    });
-    
     if (rawResults.length === 0) {
       return res.json({
         success: true,
@@ -62,13 +51,6 @@ export async function searchBusiness(req, res) {
     
     // Check if results are good enough
     const hasGoodMatches = hasGoodResults(rankedResults);
-    
-    console.log('[BUSINESS_CONTROLLER] Ranked results', {
-      originalCount: rawResults.length,
-      rankedCount: rankedResults.length,
-      hasGoodMatches,
-      topScore: rankedResults[0]?.rankingScore || 0
-    });
     
     // Return response
     res.json({

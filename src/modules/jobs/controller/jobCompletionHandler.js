@@ -146,7 +146,7 @@ async function handleJobCompletion(updatedJob, stats, requestId) {
  */
 async function sendReportEmailForFinalJob(job, requestId) {
   // Only send email for final job types
-  const finalJobTypes = ['SEO_SCORING', 'AI_VISIBILITY_SCORING'];
+  const finalJobTypes = ['SEO_SCORING'];
   
   if (!finalJobTypes.includes(job.jobType)) {
     console.log(`[EMAIL:${requestId}] Skipping email - not a final job type | jobType=${job.jobType}`);

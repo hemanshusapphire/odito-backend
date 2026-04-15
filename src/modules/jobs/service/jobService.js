@@ -1202,9 +1202,7 @@ export class JobService {
 
         input_data: {
 
-          source_job_id: aiVisibilityAnalysisJob._id.toString(),
-
-          aiProjectId: aiVisibilityAnalysisJob.input_data?.aiProjectId || null
+          source_job_id: aiVisibilityAnalysisJob._id.toString()
 
         },
 
@@ -1326,9 +1324,7 @@ export class JobService {
 
       projectId: pageScrapingJob.project_id,
 
-      sourceJobId: pageScrapingJob._id,
-
-      hasAiProjectId: !!pageScrapingJob.input_data?.aiProjectId
+      sourceJobId: pageScrapingJob._id
 
     });
 
@@ -1344,9 +1340,7 @@ export class JobService {
 
       input_data: {
 
-        source_job_id: pageScrapingJob._id.toString(),
-
-        aiProjectId: pageScrapingJob.input_data?.aiProjectId
+        source_job_id: pageScrapingJob._id.toString()
 
       },
 
@@ -1842,7 +1836,7 @@ export class JobService {
 
           // Count discovered links from AI discovery - use correct field name
 
-          internalLinks = await seo_ai_internal_links.countDocuments({ aiProjectId: projectId });
+          internalLinks = await seo_ai_internal_links.countDocuments({ projectId: projectId });
 
           externalLinks = 0; // AI discovery doesn't track external separately
 

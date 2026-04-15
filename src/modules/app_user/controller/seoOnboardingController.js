@@ -107,26 +107,6 @@ export const checkRanking = async (req, res) => {
   try {
     const { domain, keywords, location, country = 'US', language = 'en', businessLocation } = req.body;
 
-    // 🚨 STEP 1: DEBUG INCOMING REQUEST
-    console.log("🚨 RANKING CHECK - INCOMING REQUEST:", {
-      domain,
-      keywords,
-      location,
-      country,
-      language,
-      businessLocation,
-      fullBody: req.body
-    });
-
-    // CRITICAL LOG: Capture keywords received at ranking check
-    console.log('🔍 DEBUG: Ranking check received keywords:', {
-      requestKeywords: keywords,
-      keywordsType: typeof keywords,
-      keywordsLength: keywords?.length,
-      keywordsString: JSON.stringify(keywords),
-      fullBody: req.body
-    });
-
     if (!domain || typeof domain !== 'string') {
       return res.status(400).json({
         success: false,
@@ -148,23 +128,19 @@ export const checkRanking = async (req, res) => {
 
     // Helper function: Extract location code from lat/lng with fallback
     const getLocationCodeFromLatLng = (lat, lng, address) => {
-      console.log("🚨 EXTRACTING LOCATION FROM COORDINATES:", { lat, lng, address });
       
       // Simple fallback logic for now (can be enhanced with real API later)
       if (address && address.toLowerCase().includes('india')) {
-        console.log("🚨 DETECTED INDIA FROM ADDRESS -> USING INDIA LOCATION CODE");
         return 2036; // India location code
       }
       
       // Default to US if no specific location detected
-      console.log("🚨 NO SPECIFIC LOCATION DETECTED -> USING US FALLBACK");
       return 2840; // US location code
     };
 
     try {
       // Priority 1: Business location from Google Places (most accurate)
       if (businessLocation && businessLocation.lat && businessLocation.lng) {
-        console.log("🚨 USING BUSINESS LOCATION FOR MAPPING");
         locationCode = getLocationCodeFromLatLng(
           businessLocation.lat, 
           businessLocation.lng, 
@@ -179,7 +155,6 @@ export const checkRanking = async (req, res) => {
       }
       // Priority 2: Provided location object
       else if (location && location.lat && location.lng) {
-        console.log("🚨 USING PROVIDED LOCATION FOR MAPPING");
         locationCode = getLocationCodeFromLatLng(
           location.lat, 
           location.lng, 
@@ -194,7 +169,6 @@ export const checkRanking = async (req, res) => {
       }
       // Priority 3: Country-based fallback
       else {
-        console.log("🚨 FALLING BACK TO COUNTRY-BASED MAPPING");
         locationCode = COUNTRY_TO_LOCATION_CODE[country?.toUpperCase()] || 2840;
         mappingMethod = 'country_fallback';
         finalCountry = country;
@@ -213,27 +187,10 @@ export const checkRanking = async (req, res) => {
       mappingMethod = 'emergency_fallback';
     }
 
-    console.log("🚨 FINAL LOCATION CODE SELECTED:", {
-      locationCode,
-      mappingMethod,
-      finalCountry,
-      originalCountry: country,
-      isUsingUSFallback: locationCode === 2840 && finalCountry?.toUpperCase() !== 'US'
-    });
-
-    if (locationCode === 2840 && finalCountry?.toUpperCase() !== 'US') {
-      console.warn("⚠️ WARNING: Using US fallback for non-US country:", finalCountry);
-    }
-
     LoggerUtil.info('Check ranking request', { domain, keywords, country: finalCountry, locationCode });
 
     // CRITICAL LOG: Capture keywords before sending to Python worker
     const cleanedKeywords = keywords.map(k => k.trim());
-    console.log('🔍 DEBUG: Keywords before Python worker:', {
-      originalKeywords: keywords,
-      cleanedKeywords,
-      cleanedKeywordsString: JSON.stringify(cleanedKeywords)
-    });
 
     // Forward to Python worker
     const pythonPayload = {
@@ -243,35 +200,11 @@ export const checkRanking = async (req, res) => {
       language_code: language?.toLowerCase() || 'en'
     };
 
-    // 🚨 STEP 4: FINAL PAYLOAD VALIDATION & DEBUG
-    console.log("🚨 PYTHON PAYLOAD READY:", {
-      payload: pythonPayload,
-      locationCodeValid: !!locationCode,
-      locationCodeType: typeof locationCode,
-      keywordsValid: !!cleanedKeywords && cleanedKeywords.length > 0,
-      domainValid: !!pythonPayload.domain
-    });
-
-    // 🚨 STEP 5: KEYWORDS SENT TO PYTHON WORKER
-    console.log("🚨 KEYWORDS SENT TO PYTHON:", {
-      originalKeywords: keywords,
-      cleanedKeywords,
-      pythonPayload,
-      payloadString: JSON.stringify(pythonPayload),
-      url: `${getPythonWorkerUrl()}/api/onboarding/check-ranking`
-    });
-
     // Forward Authorization header to Python worker
     const headers = { 'Content-Type': 'application/json' };
     if (req.headers.authorization) {
       headers.Authorization = req.headers.authorization;
     }
-
-    console.log('🔍 DEBUG: Sending to Python worker:', {
-      url: `${getPythonWorkerUrl()}/api/onboarding/check-ranking`,
-      payload: pythonPayload,
-      headers: headers
-    });
 
     try {
       const response = await fetch(`${getPythonWorkerUrl()}/api/onboarding/check-ranking`, {

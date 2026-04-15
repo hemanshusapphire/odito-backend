@@ -190,24 +190,6 @@ class JobDispatcher {
 
 
 
-      console.log(`🚀 [DISPATCH] Starting job dispatch | jobId=${job._id}`);
-
-      console.log(`🔍 [DISPATCH] Environment check:`);
-
-      console.log(`🔍 [DISPATCH] PYTHON_WORKER_URL: ${process.env.PYTHON_WORKER_URL}`);
-
-      console.log(`🔍 [DISPATCH] this.pythonBaseURL: ${this.pythonBaseURL}`);
-
-      console.log(`🚀 [DISPATCH] URL: ${dispatchUrl}`);
-
-      console.log(`🚀 [DISPATCH] Payload:`, JSON.stringify(dispatchPayload, null, 2));
-
-
-
-      console.log(`📤 [DISPATCH] Sending HTTP request to Python worker...`);
-
-      
-
       const response = await axios.post(dispatchUrl, dispatchPayload, {
 
         timeout: 120000,
@@ -878,7 +860,7 @@ class JobDispatcher {
 
       }, {
 
-        timeout: process.env.WORKER_TIMEOUT || 300000,
+        timeout: process.env.WORKER_TIMEOUT || 600000,
 
         headers: {
 
@@ -960,9 +942,7 @@ class JobDispatcher {
 
         projectId: job.project_id ? job.project_id.toString() : null,
 
-        userId: job.user_id.toString(),
-
-        aiProjectId: job.input_data?.aiProjectId?.toString() || null
+        userId: job.user_id.toString()
 
       };
 
@@ -971,8 +951,6 @@ class JobDispatcher {
       console.log("[DISPATCH] AI_VISIBILITY payload:", {
 
         projectId: payload.projectId,
-
-        aiProjectId: payload.aiProjectId,
 
         hasInputData: !!job.input_data
 

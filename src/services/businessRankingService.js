@@ -100,14 +100,6 @@ function calculateRankingScore(business, searchName, searchLocation) {
   // Calculate weighted score
   const score = (nameSimilarity * 0.5) + (locationMatch * 0.3) + (ratingNormalized * 0.2);
   
-  console.log('[BUSINESS_RANKING] Score calculation', {
-    business: business.name,
-    nameSimilarity,
-    locationMatch,
-    ratingNormalized,
-    finalScore: score
-  });
-  
   return {
     ...business,
     rankingScore: score
@@ -124,20 +116,11 @@ function calculateRankingScore(business, searchName, searchLocation) {
  */
 export function rankBusinessResults(businesses, searchName, searchLocation, maxResults = 5) {
   try {
-    console.log('[BUSINESS_RANKING] Starting ranking process', {
-      totalBusinesses: businesses.length,
-      searchName,
-      searchLocation,
-      maxResults
-    });
-    
     if (!Array.isArray(businesses) || businesses.length === 0) {
-      console.log('[BUSINESS_RANKING] No businesses to rank');
       return [];
     }
     
     if (!searchName || !searchLocation) {
-      console.log('[BUSINESS_RANKING] Missing search criteria, returning unsorted results');
       return businesses.slice(0, maxResults);
     }
     
@@ -156,14 +139,6 @@ export function rankBusinessResults(businesses, searchName, searchLocation, maxR
     
     // Return top results
     const topResults = filteredResults.slice(0, maxResults);
-    
-    console.log('[BUSINESS_RANKING] Ranking completed', {
-      originalCount: businesses.length,
-      filteredCount: filteredResults.length,
-      returnedCount: topResults.length,
-      topScore: topResults[0]?.rankingScore || 0,
-      bottomScore: topResults[topResults.length - 1]?.rankingScore || 0
-    });
     
     return topResults;
     

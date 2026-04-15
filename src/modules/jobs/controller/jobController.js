@@ -134,10 +134,7 @@ export const failJob = async (req, res) => {
     console.log(`[ERROR] Job failed | jobId=${jobId} | reason="${errorObj.message}"`);
 
     // 🔥 CRITICAL: Update AIVisibilityProject status for AI jobs
-    if (updatedJob.jobType && (
-      updatedJob.jobType === JOB_TYPES.AI_VISIBILITY ||
-      updatedJob.jobType === JOB_TYPES.AI_VISIBILITY_SCORING
-    )) {
+    if (updatedJob.jobType && updatedJob.jobType === JOB_TYPES.AI_VISIBILITY) {
       try {
         const aiProjectUpdate = await AIVisibilityProject.findOneAndUpdate(
           { aiJobId: updatedJob._id },

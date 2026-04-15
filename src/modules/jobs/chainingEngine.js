@@ -508,62 +508,24 @@ class ChainingEngine {
           console.log(`[CHAINING:${requestId}] Final audit completion emitted | projectId=${updatedJob.project_id}`);
 
           // Update project crawl_status to COMPLETED after PAGE_ANALYSIS completes (best-effort)
-          const project = await SeoProject.findById(updatedJob.project_id);
-          const analysisCompletionTime = new Date();
-          const auditDurationMs = project?.audit_started_at
-            ? analysisCompletionTime.getTime() - project.audit_started_at.getTime()
-            : 0;
+          try {
+            const project = await SeoProject.findById(updatedJob.project_id);
+            const analysisCompletionTime = new Date();
+            const auditDurationMs = project?.audit_started_at
+              ? analysisCompletionTime.getTime() - project.audit_started_at.getTime()
+              : 0;
 
-          await SeoProject.findByIdAndUpdate(updatedJob.project_id, {
-            crawl_status: 'completed',
-            pages_analyzed: stats?.pagesAnalyzed || stats?.totalPages || 0,
-            total_issues: stats?.issuesFound || 0,
-            last_analysis_at: analysisCompletionTime,
-            audit_duration_ms: Math.max(0, auditDurationMs)
-          });
-          console.log(`[CHAINING:${requestId}] Project crawl_status updated | projectId=${updatedJob.project_id} | status=completed | pages_analyzed=${stats?.pagesAnalyzed || stats?.totalPages || 0} | audit_duration_ms=${auditDurationMs}ms`);
-          break;
-
-        case JOB_TYPES.AI_VISIBILITY_SCORING:
-          // Update AIVisibilityProject with final scoring results
-          const aiProjectId = updatedJob.input_data?.aiProjectId;
-          if (aiProjectId) {
-            const currentProject = await AIVisibilityProject.findById(aiProjectId);
-            if (currentProject) {
-              const aiProjectUpdate = await AIVisibilityProject.findOneAndUpdate(
-                { _id: aiProjectId, version: currentProject.version, aiStatus: { $ne: 'completed' } },
-                {
-                  $set: {
-                    aiStatus: 'completed',
-                    completedAt: new Date(),
-                    lastActivityAt: new Date(),
-                    'summary.overallScore': stats?.overallScore || 0,
-                    'summary.grade': stats?.grade || 'F',
-                    'summary.totalIssues': stats?.totalIssues || 0,
-                    'summary.highSeverityIssues': stats?.highSeverityIssues || 0,
-                    'summary.mediumSeverityIssues': stats?.mediumSeverityIssues || 0,
-                    'summary.lowSeverityIssues': stats?.lowSeverityIssues || 0,
-                    'summary.pagesScored': stats?.pagesScored || 0,
-                    'summary.totalPages': stats?.totalPages || 0
-                  },
-                  $inc: { version: 1 }
-                },
-                { new: true }
-              );
-              
-              if (aiProjectUpdate) {
-                console.log(`[CHAINING:${requestId}] AI project final scoring completed | aiProjectId=${aiProjectUpdate._id} | score=${stats?.overallScore || 0}`);
-              }
-
-              // Emit AI completion event
-              auditProgressService.emitCompleted(updatedJob.project_id, {
-                projectId: updatedJob.project_id,
-                jobId: updatedJob._id,
-                jobType: updatedJob.jobType,
-                message: "AI visibility scoring completed successfully"
-              });
-              console.log(`[CHAINING:${requestId}] AI completion event emitted | projectId=${updatedJob.project_id}`);
-            }
+            await SeoProject.findByIdAndUpdate(updatedJob.project_id, {
+              crawl_status: 'completed',
+              pages_analyzed: stats?.pagesAnalyzed || stats?.totalPages || 0,
+              total_issues: stats?.issuesFound || 0,
+              last_analysis_at: analysisCompletionTime,
+              audit_duration_ms: Math.max(0, auditDurationMs)
+            });
+            console.log(`[CHAINING:${requestId}] Project crawl_status updated | projectId=${updatedJob.project_id} | status=completed | pages_analyzed=${stats?.pagesAnalyzed || stats?.totalPages || 0} | audit_duration_ms=${auditDurationMs}ms`);
+          } catch (statusError) {
+            console.error(`[CHAINING_ERROR:${requestId}] Project status update failed | jobType=${jobType} | reason="${statusError.message}"`);
+            // Don't fail the chaining - project status updates are best-effort
           }
           break;
       }

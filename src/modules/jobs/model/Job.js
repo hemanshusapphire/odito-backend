@@ -8,24 +8,18 @@ const jobSchema = new mongoose.Schema({
   },
   project_id: {
     type: mongoose.Schema.Types.ObjectId,
-    required: function () {
-      return !this.input_data?.aiProjectId; // Required for SEO jobs, optional for AI jobs
-    },
+    required: true,
     ref: 'SeoProject'
   },
   entityType: {
     type: String,
-    required: function () {
-      return !this.input_data?.aiProjectId; // Required for SEO jobs, optional for AI jobs
-    },
+    required: true,
     enum: ['project'],
     default: 'project'
   },
   entityId: {
     type: mongoose.Schema.Types.ObjectId,
-    required: function () {
-      return !this.input_data?.aiProjectId; // Required for SEO jobs, optional for AI jobs
-    },
+    required: true,
     ref: 'SeoProject'
   },
   user_id: {

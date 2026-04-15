@@ -11,7 +11,7 @@ class ProjectStatusService {
 
   /**
    * Dispatcher: update project status based on the completed job's type.
-   * Only LINK_DISCOVERY, PAGE_SCRAPING, PAGE_ANALYSIS, and AI_VISIBILITY_SCORING trigger updates.
+   * Only LINK_DISCOVERY, PAGE_SCRAPING, and PAGE_ANALYSIS trigger updates.
    *
    * @param {Object} updatedJob - The completed job document
    * @param {Object} stats - Stats payload from the worker
@@ -29,10 +29,6 @@ class ProjectStatusService {
         break;
       case JOB_TYPES.PAGE_ANALYSIS:
         await this.updateOnPageAnalysisComplete(updatedJob.project_id, stats, requestId);
-        break;
-      case JOB_TYPES.AI_VISIBILITY_SCORING:
-        console.log(`[PROJECT_STATUS:${requestId}] Routing to AI_VISIBILITY_SCORING handler | projectId=${updatedJob.project_id}`);
-        await this.updateOnAiVisibilityScoringComplete(updatedJob.project_id, stats, requestId);
         break;
       default:
         // No project status update for other job types
@@ -111,54 +107,6 @@ class ProjectStatusService {
     }
   }
 
-  /**
-   * Update project after AI_VISIBILITY_SCORING completes.
-   * Merges AI visibility summary into the main SeoProject document.
-   *
-   * @param {string} projectId - SeoProject _id
-   * @param {Object} stats - Stats payload from AI visibility scoring worker
-   * @param {string} requestId - Request trace ID for logging
-   */
-  async updateOnAiVisibilityScoringComplete(projectId, stats, requestId) {
-    try {
-      console.log(`[AI_INTEGRATION:${requestId}] Merging AI visibility results | projectId=${projectId}`);
-      console.log(`[AI_INTEGRATION:${requestId}] AI stats received:`, stats);
-
-      // Prepare AI visibility data structure for project document
-      const aiVisibilityData = {
-        score: Math.round(stats?.website_score || 0),
-        pages_scored: stats?.pages_scored || 0,
-        categories: stats?.categories || {},
-        scoring_version: stats?.scoring_version || 'v2',
-        last_ai_analysis_at: new Date()
-      };
-
-      // Add AI summary text based on score
-      if (aiVisibilityData.score >= 80) {
-        aiVisibilityData.summary = "Excellent AI visibility. Your brand appears frequently and prominently in AI-generated search results.";
-      } else if (aiVisibilityData.score >= 60) {
-        aiVisibilityData.summary = "Good AI visibility. Your brand appears in AI search results but could benefit from improved entity optimization.";
-      } else if (aiVisibilityData.score >= 40) {
-        aiVisibilityData.summary = "Moderate AI visibility. Your brand has limited presence in AI-generated search results.";
-      } else {
-        aiVisibilityData.summary = "Low AI visibility. Your brand rarely appears in AI-generated search results and needs significant optimization.";
-      }
-
-      // Update project with AI visibility data
-      await SeoProject.findByIdAndUpdate(projectId, {
-        $set: {
-          ai_visibility: aiVisibilityData,
-          last_ai_analysis_at: new Date()
-        }
-      });
-
-      console.log(`[AI_INTEGRATION:${requestId}] AI visibility merged into project | projectId=${projectId} | score=${aiVisibilityData.score}`);
-      console.log(`[AI_INTEGRATION:${requestId}] AI summary added to project:`, projectId);
-
-    } catch (statusError) {
-      console.error(`[AI_INTEGRATION_ERROR:${requestId}] Failed to merge AI visibility | reason="${statusError.message}"`);
-    }
-  }
 }
 
 export default new ProjectStatusService();

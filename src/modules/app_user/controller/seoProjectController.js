@@ -9,16 +9,6 @@ import mongoose from 'mongoose';
 
 // Create a new SEO project
 const createSeoProject = async (req, res) => {
-  // 🚨 STEP 1: FRONTEND → BACKEND REQUEST CHECK
-  console.log("🚨 BACKEND ENTRY RAW REQUEST:", {
-    headers: req.headers,
-    body: req.body,
-    keywords: req.body?.keywords,
-    keywordsType: typeof req.body?.keywords,
-    fullUrl: req.originalUrl,
-    method: req.method
-  });
-
   const { 
     project_name, 
     main_url, 
@@ -32,15 +22,6 @@ const createSeoProject = async (req, res) => {
     scrape_frequency = 'manual',
     status = 'draft'
   } = req.body;
-
-  // CRITICAL LOG: Capture keywords received at backend
-  console.log('🔍 DEBUG: Backend received keywords:', {
-    requestKeywords: keywords,
-    keywordsType: typeof keywords,
-    keywordsLength: keywords?.length,
-    keywordsString: JSON.stringify(keywords),
-    fullBody: req.body
-  });
 
   LoggerUtil.info('Create project request received', { userId: req.user?._id });
   LoggerUtil.debug('Request body', req.body);
@@ -84,11 +65,6 @@ const createSeoProject = async (req, res) => {
 
     // CRITICAL LOG: Capture keywords before saving to DB
     const processedKeywords = keywords.map(k => k.trim()).filter(k => k.length >= 2);
-    console.log('🔍 DEBUG: Keywords before DB save:', {
-      originalKeywords: keywords,
-      processedKeywords,
-      processedKeywordsString: JSON.stringify(processedKeywords)
-    });
 
     // Create the SEO project with new schema
     const seoProject = new SeoProject({
@@ -108,13 +84,7 @@ const createSeoProject = async (req, res) => {
 
     const savedProject = await seoProject.save();
 
-    // CRITICAL LOG: Capture keywords after DB save
-    console.log('🔍 DEBUG: Keywords after DB save:', {
-      savedProjectId: savedProject._id,
-      savedKeywords: savedProject.keywords,
-      savedKeywordsString: JSON.stringify(savedProject.keywords)
-    });
-
+    
     res.status(201).json({
       success: true,
       message: 'SEO Project created successfully',
