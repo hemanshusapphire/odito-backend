@@ -23,19 +23,31 @@ class JobFallbackService {
    * @param {Function} createNextJobAtomically - Atomic job creation guard
    */
   async fallbackToPageScraping(updatedJob, requestId, createNextJobAtomically) {
-    console.log(`[FALLBACK:${requestId}] Skipping TECHNICAL_DOMAIN, creating PAGE_SCRAPING directly`);
+    const usePullModel = process.env.USE_PULL_MODEL === 'true';
+    console.log(`[FALLBACK:${requestId}] Skipping TECHNICAL_DOMAIN, creating PAGE_SCRAPING directly | mode=${usePullModel ? 'PULL' : 'PUSH'}`);
     try {
       const pageScrapingJob = await createNextJobAtomically(updatedJob, JOB_TYPES.PAGE_SCRAPING, requestId);
       if (pageScrapingJob) {
-        const dispatchedJob = await jobService.atomicallyDispatchJob(pageScrapingJob._id);
-        if (dispatchedJob) {
+        if (usePullModel) {
+          // PULL model: job remains pending, worker will claim
+          console.log(`[FALLBACK:${requestId}] [PULL] PAGE_SCRAPING queued for polling | jobId=${pageScrapingJob._id}`);
           auditProgressService.emitStageChanged(updatedJob._id.toString(), {
             from: 'LINK_DISCOVERY',
             to: 'PAGE_SCRAPING',
             newJobId: pageScrapingJob._id.toString()
           });
-          await jobDispatcher.dispatchPageScrapingJob(dispatchedJob);
-          console.log(`[FALLBACK:${requestId}] PAGE_SCRAPING dispatched | jobId=${dispatchedJob._id}`);
+        } else {
+          // PUSH model: dispatch to worker
+          const dispatchedJob = await jobService.atomicallyDispatchJob(pageScrapingJob._id);
+          if (dispatchedJob) {
+            auditProgressService.emitStageChanged(updatedJob._id.toString(), {
+              from: 'LINK_DISCOVERY',
+              to: 'PAGE_SCRAPING',
+              newJobId: pageScrapingJob._id.toString()
+            });
+            await jobDispatcher.dispatchPageScrapingJob(dispatchedJob);
+            console.log(`[FALLBACK:${requestId}] PAGE_SCRAPING dispatched | jobId=${dispatchedJob._id}`);
+          }
         }
       }
     } catch (fallbackError) {

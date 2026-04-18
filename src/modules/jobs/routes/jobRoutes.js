@@ -542,4 +542,49 @@ router.post('/:jobId/progress', async (req, res) => {
   }
 });
 
+// GET /jobs/claim - Claim a job for PULL model processing
+router.get('/claim', async (req, res) => {
+  try {
+    const { job_type } = req.query;
+    
+    if (!job_type) {
+      return res.status(400).json({
+        success: false,
+        message: 'job_type parameter is required'
+      });
+    }
+    
+    console.log(`[CLAIM DEBUG] Requested job_type: ${job_type}`);
+    console.log(`[CLAIM DEBUG] Searching for pending jobs...`);
+    
+    const job = await jobService.claimJob(job_type);
+    
+    if (!job) {
+      console.log(`📭 No jobs available for type: ${job_type}`);
+      return res.status(204).send(); // 204 No Content - correct HTTP semantics
+    }
+    
+    console.log(`✅ Job claimed: ${job._id} (${job.jobType})`);
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        job_id: job._id,
+        jobType: job.jobType,
+        projectId: job.project_id,
+        input_data: job.input_data,
+        status: job.status
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Failed to claim job:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to claim job',
+      error: error.message
+    });
+  }
+});
+
 export default router;

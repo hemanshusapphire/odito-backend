@@ -140,6 +140,8 @@ export class JobService {
 
     const config = JOB_TYPE_CONFIG[jobType];
 
+    const usePullModel = process.env.USE_PULL_MODEL === 'true';
+
 
 
     const job = new Job({
@@ -156,7 +158,7 @@ export class JobService {
 
       input_data,
 
-      status: 'pending',
+      status: 'pending',  // ALWAYS 'pending' - never 'processing' on creation
 
       priority: priority || config.priority || 5,
 
@@ -165,6 +167,11 @@ export class JobService {
       max_attempts: config.maxAttempts || 3,
 
     });
+
+
+
+    // SAFEGUARD: Log mode for debugging
+    console.log(`[JOB_CREATION] Creating job | jobType=${jobType} | status=pending | mode=${usePullModel ? 'PULL' : 'PUSH'}`);
 
 
 
@@ -1458,6 +1465,22 @@ export class JobService {
 
     const Job = mongoose.model('Job');
 
+    const usePullModel = process.env.USE_PULL_MODEL === 'true';
+
+
+
+    // SAFEGUARD: Prevent dispatch in PULL model
+
+    if (usePullModel) {
+
+      console.error(`[DISPATCH] ❌ CRITICAL: atomicallyDispatchJob called in PULL mode | jobId=${jobId} | This should NEVER happen!`);
+
+      console.error(`[DISPATCH] Jobs should remain 'pending' for workers to claim. Skipping dispatch.`);
+
+      return null;
+
+    }
+
 
 
     console.log(`[DISPATCH] Atomic dispatch requested | jobId=${jobId}`);
@@ -1790,8 +1813,6 @@ export class JobService {
 
       try {
 
-        const AIVisibilityProject = require('../ai_visibility/model/AIVisibilityProject.js');
-
         aiProjectData = await AIVisibilityProject.findOne({ _id: projectId });
 
         isStandalone = aiProjectData?.isStandalone || false;
@@ -1824,7 +1845,7 @@ export class JobService {
 
         try {
 
-          const db = require('../../config/database');
+          const db = mongoose.connection.db;
 
           const seo_ai_internal_links = db.collection('seo_ai_internal_links');
 
@@ -2137,6 +2158,76 @@ export class JobService {
 
 
     return result;
+
+  }
+
+
+
+  /**
+
+   * Claim a job for PULL model processing
+
+   * @param {string} workerType - Type of worker claiming the job
+
+   * @returns {Promise<Object|null>} Claimed job or null
+
+   */
+
+  async claimJob(workerType) {
+
+    try {
+
+      // Job is already imported as ES module at top of file
+
+      const job = await Job.findOneAndUpdate(
+
+        { 
+
+          status: 'pending', 
+
+          jobType: workerType,
+
+          $or: [
+
+            { claimed_at: { $lt: new Date(Date.now() - 5 * 60 * 1000) } },
+
+            { claimed_at: null }
+
+          ]
+
+        },
+
+        { 
+
+          $set: { 
+
+            status: 'processing', 
+
+            claimed_at: new Date(),
+
+            started_at: new Date(),
+
+            claimed_by: process.env.WORKER_ID || 'unknown'
+
+          }
+
+        },
+
+        { new: true, sort: { priority: -1, created_at: 1 } }
+
+      );
+
+      
+
+      return job;
+
+    } catch (error) {
+
+      console.error('Failed to claim job:', error);
+
+      throw error;
+
+    }
 
   }
 

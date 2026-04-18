@@ -16,6 +16,9 @@ class JobDispatcher {
 
   constructor() {
 
+    // PULL/PULL model feature flag
+    this.usePullModel = process.env.USE_PULL_MODEL === 'true';
+
     // Validate required environment variables
 
     const pythonWorkerUrl = process.env.PYTHON_WORKER_URL;
@@ -157,111 +160,61 @@ class JobDispatcher {
    */
 
   async dispatchLinkDiscoveryJob(job) {
-
     try {
-
       // Update job status to processing first
-
       await jobService.updateJobStatus(job._id, 'PROCESSING', {
-
         started_at: new Date(),
-
         last_attempted_at: new Date()
-
       });
 
-
-
-      // Direct HTTP call to Python worker
-
+      // Direct HTTP call to Python worker - NON-BLOCKING with shorter timeout
       const dispatchUrl = `${this.pythonBaseURL}/api/jobs/link-discovery`;
-
       const dispatchPayload = {
-
         jobId: job._id.toString(),
-
         projectId: job.project_id.toString(),
-
         userId: job.user_id.toString(),
-
         main_url: job.input_data.main_url
-
       };
 
-
-
+      // Fire-and-forget dispatch - only wait for acceptance, not completion
       const response = await axios.post(dispatchUrl, dispatchPayload, {
-
-        timeout: 120000,
-
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
         headers: {
-
           'Content-Type': 'application/json'
-
         }
-
       });
 
-
-
-      console.log(`✅ [DISPATCH] Request successful | status=${response.status}`);
-
-      console.log(`✅ [DISPATCH] Response:`, JSON.stringify(response.data, null, 2));
-
-
+      console.log(`✅ [DISPATCH] Job accepted by worker | status=${response.status}`);
+      console.log(`✅ [DISPATCH] Job ${job._id} dispatched successfully`);
 
       return {
-
         success: true,
-
-        jobId: job._id
-
+        jobId: job._id,
+        dispatched: true  // Worker will callback on completion
       };
 
     } catch (error) {
-
       console.error(`❌ [DISPATCH] Request failed | jobId=${job._id}`);
-
       console.error(`❌ [DISPATCH] Error details:`, {
-
         message: error.message,
-
         code: error.code,
-
         status: error.response?.status,
-
         statusText: error.response?.statusText,
-
         data: error.response?.data
-
       });
-
-
 
       // Mark job as failed if dispatch fails
-
       await jobService.updateJobStatus(job._id, 'FAILED', {
-
         completed_at: new Date(),
-
         error_message: `Dispatch failed: ${error.message}`
-
       });
 
-
-
       return {
-
         success: false,
-
         jobId: job._id,
-
         error: error.message
-
       };
-
     }
-
   }
 
 
@@ -280,41 +233,65 @@ class JobDispatcher {
 
     try {
 
-      // Job should already be marked as dispatched atomically
+      if (this.usePullModel) {
 
-      // Just send the HTTP request to Python
+        // PULL model: mark as pending, worker will poll
 
-      const response = await axios.post(`${this.pythonBaseURL}/api/jobs/page-scraping`, {
+        await jobService.updateJobStatus(job._id, 'pending');
 
-        jobId: job._id.toString(),
+        console.log(`✅ [PULL] Job queued for polling | jobId=${job._id}`);
 
-        projectId: job.project_id.toString(),
+        return {
 
-        userId: job.user_id.toString(),
+          success: true,
 
-        urls: job.input_data.urls
+          jobId: job._id,
 
-      }, {
+          dispatched: false
 
-        timeout: 600000,
+        };
 
-        headers: {
+      } else {
 
-          'Content-Type': 'application/json'
+        // Existing PUSH logic (unchanged)
 
-        }
+        const response = await axios.post(`${this.pythonBaseURL}/api/jobs/page-scraping`, {
 
-      });
+          jobId: job._id.toString(),
+
+          projectId: job.project_id.toString(),
+
+          userId: job.user_id.toString(),
+
+          urls: job.input_data.urls
+
+        }, {
+
+          timeout: 30000,  // Reduced to 30s - only wait for job acceptance
+
+          headers: {
+
+            'Content-Type': 'application/json'
+
+          }
+
+        });
 
 
 
-      return {
+        console.log(`✅ [DISPATCH] PAGE_SCRAPING job accepted by worker | jobId=${job._id}`);
 
-        success: true,
+        return {
 
-        jobId: job._id
+          success: true,
 
-      };
+          jobId: job._id,
+
+          dispatched: true  // Worker will callback on completion
+
+        };
+
+      }
 
     } catch (error) {
 
@@ -364,6 +341,26 @@ class JobDispatcher {
 
     try {
 
+      if (this.usePullModel) {
+
+        // PULL model: mark as pending, worker will poll
+
+        await jobService.updateJobStatus(job._id, 'pending');
+
+        console.log(`✅ [PULL] PAGE_ANALYSIS job queued for polling | jobId=${job._id}`);
+
+        return {
+
+          success: true,
+
+          jobId: job._id,
+
+          dispatched: false
+
+        };
+
+      }
+
       // Job should already be marked as dispatched atomically
 
       // Just send the HTTP request to Python
@@ -380,7 +377,7 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 300000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 
@@ -464,7 +461,7 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 300000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 
@@ -532,6 +529,26 @@ class JobDispatcher {
 
     try {
 
+      if (this.usePullModel) {
+
+        // PULL model: mark as pending, worker will poll
+
+        await jobService.updateJobStatus(job._id, 'pending');
+
+        console.log(`✅ [PULL] PERFORMANCE_MOBILE job queued for polling | jobId=${job._id}`);
+
+        return {
+
+          success: true,
+
+          jobId: job._id,
+
+          dispatched: false
+
+        };
+
+      }
+
       console.log(`[DEBUG] dispatchPerformanceMobileJob called with jobId=${job._id}`);
 
 
@@ -558,7 +575,7 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 300000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 
@@ -632,6 +649,26 @@ class JobDispatcher {
 
     try {
 
+      if (this.usePullModel) {
+
+        // PULL model: mark as pending, worker will poll
+
+        await jobService.updateJobStatus(job._id, 'pending');
+
+        console.log(`✅ [PULL] PERFORMANCE_DESKTOP job queued for polling | jobId=${job._id}`);
+
+        return {
+
+          success: true,
+
+          jobId: job._id,
+
+          dispatched: false
+
+        };
+
+      }
+
       console.log(`[DEBUG] dispatchPerformanceDesktopJob called with jobId=${job._id}`);
 
 
@@ -658,7 +695,7 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 300000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 
@@ -732,6 +769,26 @@ class JobDispatcher {
 
     try {
 
+      if (this.usePullModel) {
+
+        // PULL model: mark as pending, worker will poll
+
+        await jobService.updateJobStatus(job._id, 'pending');
+
+        console.log(`✅ [PULL] HEADLESS_ACCESSIBILITY job queued for polling | jobId=${job._id}`);
+
+        return {
+
+          success: true,
+
+          jobId: job._id,
+
+          dispatched: false
+
+        };
+
+      }
+
       console.log(`[DEBUG] dispatchHeadlessAccessibilityJob called with jobId=${job._id}`);
 
 
@@ -744,7 +801,7 @@ class JobDispatcher {
 
       // Job should already be marked as dispatched atomically
 
-      // Just send the HTTP request to Python
+      // Just send the HTTP request to Python - NON-BLOCKING
 
       const response = await axios.post(dispatchUrl, {
 
@@ -760,7 +817,7 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 300000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 
@@ -772,7 +829,7 @@ class JobDispatcher {
 
 
 
-      console.log(`[DEBUG] HEADLESS_ACCESSIBILITY HTTP response status: ${response.status}`);
+      console.log(`✅ [DISPATCH] HEADLESS_ACCESSIBILITY job accepted by worker | jobId=${job._id}`);
 
 
 
@@ -780,7 +837,9 @@ class JobDispatcher {
 
         success: true,
 
-        jobId: job._id
+        jobId: job._id,
+
+        dispatched: true  // Worker will callback on completion
 
       };
 
@@ -860,7 +919,7 @@ class JobDispatcher {
 
       }, {
 
-        timeout: process.env.WORKER_TIMEOUT || 600000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 
@@ -964,7 +1023,7 @@ class JobDispatcher {
 
       const response = await axios.post(`${this.pythonBaseURL}/api/jobs/ai-visibility`, payload, {
 
-        timeout: 600000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 
@@ -1048,7 +1107,7 @@ class JobDispatcher {
 
       const response = await axios.post(`${this.pythonBaseURL}/api/jobs/ai-visibility-scoring`, payload, {
 
-        timeout: 300000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 
@@ -1138,7 +1197,7 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 240000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 
@@ -1218,7 +1277,7 @@ class JobDispatcher {
 
       }, {
 
-        timeout: process.env.WORKER_TIMEOUT || 300000,
+        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
 
         headers: {
 

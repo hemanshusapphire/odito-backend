@@ -331,13 +331,13 @@ class ChainingEngine {
         return;
       }
 
-      // 2. Atomically mark as dispatched
-      console.log(`[${logPrefix}:${requestId}] Calling atomicallyDispatchJob for jobId=${nextJob._id}`);
-      const dispatchedJob = await jobService.atomicallyDispatchJob(nextJob._id);
-
-      console.log(`[${logPrefix}:${requestId}] Dispatch result:`, dispatchedJob ? `SUCCESS (jobId=${dispatchedJob._id})` : 'NULL (already dispatched)');
-
-      if (dispatchedJob) {
+      // 2. In PULL model: job remains pending, worker will claim it
+      //    In PUSH model: atomically mark as dispatched and send to worker
+      const usePullModel = process.env.USE_PULL_MODEL === 'true';
+      
+      if (usePullModel) {
+        console.log(`[${logPrefix}:${requestId}] [PULL] Job created with status=pending | worker will claim | jobId=${nextJob._id}`);
+        
         // 3. Emit stage transition event
         console.log(`[${logPrefix}:${requestId}] Emitting stageChanged event from=${stageFrom} to=${nextJobType}`);
         auditProgressService.emitStageChanged(updatedJob._id.toString(), {
@@ -345,25 +345,41 @@ class ChainingEngine {
           to: nextJobType,
           newJobId: nextJob._id.toString()
         });
-
-        // 4. Dispatch to worker
-        console.log(`[${logPrefix}:${requestId}] Calling _dispatchToWorker for ${nextJobType}`);
-        await this._dispatchToWorker(nextJobType, dispatchedJob);
-        console.log(`[${logPrefix}:${requestId}] ${nextJobType} dispatched | jobId=${dispatchedJob._id}`);
-
-        // 5. After-dispatch chaining (e.g., additional jobs after a specific dispatch)
-        const afterJobs = stageConfig.afterDispatch?.[nextJobType];
-        if (afterJobs) {
-          console.log(`[${logPrefix}:${requestId}] Processing afterDispatch jobs for ${nextJobType}:`, afterJobs);
-          for (const afterType of afterJobs) {
-            await this._createAndDispatchJob(
-              afterType, updatedJob, sourceJob, stageFrom,
-              { atomicGuard: false }, requestId, false
-            );
-          }
-        }
       } else {
-        console.log(`[${logPrefix}:${requestId}] ${nextJobType} already dispatched | jobId=${nextJob._id}`);
+        // PUSH model: atomically mark as dispatched
+        console.log(`[${logPrefix}:${requestId}] [PUSH] Calling atomicallyDispatchJob for jobId=${nextJob._id}`);
+        const dispatchedJob = await jobService.atomicallyDispatchJob(nextJob._id);
+
+        console.log(`[${logPrefix}:${requestId}] Dispatch result:`, dispatchedJob ? `SUCCESS (jobId=${dispatchedJob._id})` : 'NULL (already dispatched)');
+
+        if (dispatchedJob) {
+          // 3. Emit stage transition event
+          console.log(`[${logPrefix}:${requestId}] Emitting stageChanged event from=${stageFrom} to=${nextJobType}`);
+          auditProgressService.emitStageChanged(updatedJob._id.toString(), {
+            from: stageFrom,
+            to: nextJobType,
+            newJobId: nextJob._id.toString()
+          });
+
+          // 4. Dispatch to worker
+          console.log(`[${logPrefix}:${requestId}] Calling _dispatchToWorker for ${nextJobType}`);
+          await this._dispatchToWorker(nextJobType, dispatchedJob);
+          console.log(`[${logPrefix}:${requestId}] ${nextJobType} dispatched | jobId=${dispatchedJob._id}`);
+
+          // 5. After-dispatch chaining (e.g., additional jobs after a specific dispatch)
+          const afterJobs = stageConfig.afterDispatch?.[nextJobType];
+          if (afterJobs) {
+            console.log(`[${logPrefix}:${requestId}] Processing afterDispatch jobs for ${nextJobType}:`, afterJobs);
+            for (const afterType of afterJobs) {
+              await this._createAndDispatchJob(
+                afterType, updatedJob, sourceJob, stageFrom,
+                { atomicGuard: false }, requestId, false
+              );
+            }
+          }
+        } else {
+          console.log(`[${logPrefix}:${requestId}] ${nextJobType} already dispatched | jobId=${nextJob._id}`);
+        }
       }
 
     } catch (error) {
@@ -460,11 +476,19 @@ class ChainingEngine {
    * Uses JOB_DISPATCH_MAP to call the correct dispatcher method.
    */
   async _dispatchToWorker(jobType, job) {
+    console.log(`[DISPATCH_DEBUG] _dispatchToWorker called | jobType=${jobType} | jobId=${job._id}`);
+    console.log(`[DISPATCH_DEBUG] USE_PULL_MODEL=${process.env.USE_PULL_MODEL}`);
+    
     const dispatchFn = createJobDispatchMap()[jobType];
     if (!dispatchFn) {
       throw new Error(`No dispatcher for job type: ${jobType}`);
     }
-    return await dispatchFn(job);
+    
+    console.log(`[DISPATCH_DEBUG] Dispatching ${jobType} | jobId=${job._id}`);
+    const result = await dispatchFn(job);
+    console.log(`[DISPATCH_DEBUG] Dispatch result for ${jobType} | dispatched=${result?.dispatched} | success=${result?.success}`);
+    
+    return result;
   }
 
   /**

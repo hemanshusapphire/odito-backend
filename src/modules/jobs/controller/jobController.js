@@ -168,6 +168,7 @@ export const failJob = async (req, res) => {
     // 🔥 CRITICAL: If TECHNICAL_DOMAIN fails, continue pipeline to PAGE_SCRAPING
     if (updatedJob.jobType === JOB_TYPES.TECHNICAL_DOMAIN) {
       console.log(`[FALLBACK] TECHNICAL_DOMAIN failed, continuing pipeline to PAGE_SCRAPING | jobId=${jobId}`);
+      const usePullModel = process.env.USE_PULL_MODEL === 'true';
       try {
         const sourceJobId = updatedJob.input_data?.source_job_id;
         let sourceJob = updatedJob;
@@ -181,17 +182,28 @@ export const failJob = async (req, res) => {
 
         const pageScrapingJob = await jobService.createAndDispatchPageScrapingJob(sourceJob);
         if (pageScrapingJob) {
-          const dispatchedJob = await jobService.atomicallyDispatchJob(pageScrapingJob._id);
-          if (dispatchedJob) {
+          if (usePullModel) {
+            // PULL model: job remains pending, worker will claim
+            console.log(`[FALLBACK] [PULL] PAGE_SCRAPING queued for polling | jobId=${pageScrapingJob._id}`);
             auditProgressService.emitStageChanged(jobId, {
               from: 'TECHNICAL_DOMAIN',
               to: 'PAGE_SCRAPING',
               newJobId: pageScrapingJob._id.toString()
             });
-            jobDispatcher.dispatchPageScrapingJob(dispatchedJob).catch(error => {
-              console.error(`[ERROR] PAGE_SCRAPING dispatch failed | jobId=${dispatchedJob._id} | reason="${error.message}"`);
-            });
-            console.log(`[FALLBACK] PAGE_SCRAPING created after TECHNICAL_DOMAIN failure | jobId=${pageScrapingJob._id}`);
+          } else {
+            // PUSH model: dispatch to worker
+            const dispatchedJob = await jobService.atomicallyDispatchJob(pageScrapingJob._id);
+            if (dispatchedJob) {
+              auditProgressService.emitStageChanged(jobId, {
+                from: 'TECHNICAL_DOMAIN',
+                to: 'PAGE_SCRAPING',
+                newJobId: pageScrapingJob._id.toString()
+              });
+              jobDispatcher.dispatchPageScrapingJob(dispatchedJob).catch(error => {
+                console.error(`[ERROR] PAGE_SCRAPING dispatch failed | jobId=${dispatchedJob._id} | reason="${error.message}"`);
+              });
+              console.log(`[FALLBACK] PAGE_SCRAPING created after TECHNICAL_DOMAIN failure | jobId=${pageScrapingJob._id}`);
+            }
           }
         }
       } catch (fallbackError) {

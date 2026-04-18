@@ -40,7 +40,8 @@ export const validateEnvironment = () => {
   const recommended = [
     'GEMINI_API_KEY',
     'SENDGRID_API_KEY',
-    'STRIPE_SECRET_KEY'
+    'STRIPE_SECRET_KEY',
+    'USE_PULL_MODEL'  // PULL model feature flag
   ];
 
   const warnings = [];
@@ -79,7 +80,8 @@ export const logConfiguration = () => {
     STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY ? '***CONFIGURED***' : 'NOT_SET',
     PYTHON_WORKER_URL: process.env.PYTHON_WORKER_URL,
     VIDEO_WORKER_URL: process.env.VIDEO_WORKER_URL,
-    BACKEND_URL: process.env.BACKEND_URL
+    BACKEND_URL: process.env.BACKEND_URL,
+    USE_PULL_MODEL: process.env.USE_PULL_MODEL || 'false'
   };
 
   console.log('🔧 Environment Configuration:');

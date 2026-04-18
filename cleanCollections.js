@@ -66,3 +66,5 @@ const cleanCollections = async () => {
 
 // Run the cleaning process
 cleanCollections().catch(console.error);
+
+

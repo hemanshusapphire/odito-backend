@@ -94,6 +94,46 @@ jobSchema.index({ user_id: 1, created_at: -1 });
 jobSchema.index({ jobType: 1, status: 1 });
 jobSchema.index({ entityType: 1, entityId: 1, status: 1 });
 
+// Pre-save validation to prevent incorrect state transitions
+jobSchema.pre('save', function(next) {
+  const usePullModel = process.env.USE_PULL_MODEL === 'true';
+  
+  // In PULL mode, jobs should never be created with processing status
+  if (usePullModel && this.isNew && this.status === 'processing') {
+    console.error(`[JOB_VALIDATION] ❌ CRITICAL: Job created with status='processing' in PULL mode | jobId=${this._id} | jobType=${this.jobType}`);
+    console.error(`[JOB_VALIDATION] Jobs must be created with status='pending' in PULL mode. Correcting to 'pending'.`);
+    this.status = 'pending';
+  }
+  
+  // In PULL mode, jobs should never have dispatchedAt set on creation
+  if (usePullModel && this.isNew && this.dispatchedAt) {
+    console.error(`[JOB_VALIDATION] ❌ CRITICAL: Job created with dispatchedAt set in PULL mode | jobId=${this._id} | jobType=${this.jobType}`);
+    console.error(`[JOB_VALIDATION] dispatchedAt should only be set by worker claim. Removing dispatchedAt.`);
+    this.dispatchedAt = null;
+  }
+  
+  // Validate status transitions
+  const validTransitions = {
+    'pending': ['processing', 'failed', 'retrying'],
+    'processing': ['completed', 'failed', 'retrying'],
+    'retrying': ['processing', 'failed'],
+    'completed': [],
+    'failed': ['pending', 'retrying']
+  };
+  
+  if (!this.isNew && this.isModified('status')) {
+    const previousStatus = this._doc.status;
+    const allowedTransitions = validTransitions[previousStatus] || [];
+    
+    if (!allowedTransitions.includes(this.status)) {
+      console.error(`[JOB_VALIDATION] ❌ Invalid status transition | jobId=${this._id} | jobType=${this.jobType} | from=${previousStatus} | to=${this.status}`);
+      console.error(`[JOB_VALIDATION] Allowed transitions from ${previousStatus}:`, allowedTransitions);
+    }
+  }
+  
+  next();
+});
+
 // AI Visibility duplicate prevention index
 jobSchema.index(
   {
