@@ -21,6 +21,7 @@ import videoDataRoutes from '../modules/video/routes/videoData.routes.js';
 import debugRoutes from '../modules/aiVideo/routes/debug.routes.js';
 import businessRoutes from '../modules/app_user/routes/businessRoutes.js';
 import externalRoutes from '../modules/external/routes/externalRoutes.js';
+import accessibilityRoutes from '../modules/accessibility/routes/accessibilityRoutes.js';
 
 const router = express.Router();
 
@@ -66,5 +67,7 @@ router.use('/video', videoDataRoutes);
 router.use('/debug', debugRoutes);
 // External onboarding routes (no auth required)
 router.use('/external', externalRoutes);
+// Accessibility issues routes
+router.use('/accessibility', accessibilityRoutes);
 
 export default router;

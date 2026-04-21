@@ -1,26 +1,21 @@
 import mongoose from 'mongoose';
-import {
-  ISSUE_METADATA,
-  DEFAULT_DIFFICULTY,
-  AI_CONFIDENCE_FALLBACK,
-} from '../config/issueMetadata.js';
 
 const { ObjectId } = mongoose.Types;
 
 /**
- * Aggregate on-page issues for a project.
+ * Aggregate accessibility issues for a project.
  *
- * Uses a two-stage $group to avoid building huge $addToSet arrays
- * when a site has thousands of pages.
+ * Uses the same two-stage $group logic as On-Page issues
+ * to avoid building huge $addToSet arrays when a site has thousands of pages.
  *
- * Stage 1: deduplicate by (issue_code + page_url)
+ * Stage 1: deduplicate by (issue_code, page_url)
  * Stage 2: count distinct pages per issue_code
  */
-export async function getOnPageIssues(projectId) {
+export async function getAccessibilityIssues(projectId) {
   const db = mongoose.connection.db;
   const projectIdObj = new ObjectId(projectId);
 
-  // 1. Total pages analyzed
+  // 1. Total pages analyzed from seo_page_summary (same as On-Page)
   const totalPages = await db
     .collection('seo_page_summary')
     .countDocuments({ projectId: projectIdObj });
@@ -30,17 +25,17 @@ export async function getOnPageIssues(projectId) {
     .collection('seo_page_issues')
     .countDocuments({ 
       projectId: projectIdObj,
-      category: { $ne: 'Accessibility' }
+      category: 'Accessibility'
     });
 
-  // 3. Two-stage aggregation
+  // 3. Two-stage aggregation for accessibility issues only
   const rawIssues = await db
     .collection('seo_page_issues')
     .aggregate([
       { 
         $match: { 
           projectId: projectIdObj,
-          category: { $ne: 'Accessibility' }
+          category: 'Accessibility'
         } 
       },
 
@@ -54,7 +49,6 @@ export async function getOnPageIssues(projectId) {
           issue_message: { $first: '$issue_message' },
           severity: { $first: '$severity' },
           category: { $first: '$category' },
-          ai_confidence: { $first: '$ai_confidence' },
         },
       },
 
@@ -65,14 +59,13 @@ export async function getOnPageIssues(projectId) {
           issue_message: { $first: '$issue_message' },
           severity: { $first: '$severity' },
           category: { $first: '$category' },
-          ai_confidence: { $first: '$ai_confidence' },
           pages_affected: { $sum: 1 },
           total_occurrences: { $sum: 1 },
           affected_urls: { $push: '$_id.page_url' },
         },
       },
 
-      // Final projection - return all URLs (no sampling)
+      // Final projection
       {
         $project: {
           _id: 0,
@@ -80,7 +73,6 @@ export async function getOnPageIssues(projectId) {
           issue_message: 1,
           severity: 1,
           category: 1,
-          ai_confidence: 1,
           pages_affected: 1,
           total_occurrences: 1,
           affected_urls: 1,
@@ -91,43 +83,32 @@ export async function getOnPageIssues(projectId) {
     ])
     .toArray();
 
-  // 4. Enrich each issue
+  // 4. Enrich each issue with difficulty and impact
   const issues = rawIssues.map((issue) => {
-    const meta = ISSUE_METADATA[issue.issue_code];
+    // Map severity to difficulty (same logic as On-Page)
     let difficulty;
-    
-    // Use metadata difficulty if available, otherwise map from severity
-    if (meta && meta.difficulty) {
-      difficulty = meta.difficulty;
-    } else {
-      // Map severity to difficulty when metadata is not available
-      switch (issue.severity?.toLowerCase()) {
-        case 'high':
-        case 'critical':
-          difficulty = 'hard';
-          break;
-        case 'medium':
-        case 'warning':
-          difficulty = 'medium';
-          break;
-        case 'low':
-        case 'info':
-          difficulty = 'easy';
-          break;
-        default:
-          difficulty = DEFAULT_DIFFICULTY;
-      }
+    switch (issue.severity?.toLowerCase()) {
+      case 'high':
+      case 'critical':
+        difficulty = 'hard';
+        break;
+      case 'medium':
+      case 'warning':
+        difficulty = 'medium';
+        break;
+      case 'low':
+      case 'info':
+        difficulty = 'easy';
+        break;
+      default:
+        difficulty = 'medium';
     }
 
+    // Calculate impact percentage
     const impact_percentage =
       totalPages > 0
         ? Math.round(((issue.pages_affected / totalPages) * 100) * 10) / 10
         : 0;
-
-    const ai_confidence =
-      issue.ai_confidence != null
-        ? issue.ai_confidence
-        : AI_CONFIDENCE_FALLBACK[issue.severity] || AI_CONFIDENCE_FALLBACK.medium;
 
     const enrichedIssue = {
       issue_code: issue.issue_code,
@@ -138,8 +119,6 @@ export async function getOnPageIssues(projectId) {
       total_occurrences: issue.total_occurrences,
       impact_percentage,
       difficulty,
-      ai_confidence,
-      sample_pages: issue.sample_pages,
     };
 
     return enrichedIssue;
@@ -153,35 +132,4 @@ export async function getOnPageIssues(projectId) {
       total_pages_analyzed: totalPages,
     },
   };
-}
-
-/**
- * Get ALL affected URLs for a specific issue code
- */
-export async function getIssueUrls(projectId, issueCode) {
-  const db = mongoose.connection.db;
-  const projectIdObj = new ObjectId(projectId);
-
-  const urls = await db
-    .collection('seo_page_issues')
-    .aggregate([
-      { $match: { projectId: projectIdObj, issue_code: issueCode } },
-      {
-        $group: {
-          _id: '$page_url',
-          created_at: { $first: '$created_at' }
-        }
-      },
-      { $sort: { _id: 1 } },
-      {
-        $project: {
-          _id: 0,
-          page_url: '$_id',
-          created_at: 1
-        }
-      }
-    ])
-    .toArray();
-
-  return urls.map(item => item.page_url);
 }
