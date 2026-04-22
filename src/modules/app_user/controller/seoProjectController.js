@@ -646,9 +646,7 @@ const getProjectDashboard = async (req, res) => {
       seo_jobId: latestJob._id
     });
 
-    const externalLinksCount = await db.collection('seo_external_links').countDocuments({
-      seo_jobId: latestJob._id
-    });
+    const externalLinksCount = 0;  // External links disabled
 
     const socialLinksCount = await db.collection('seo_social_links').countDocuments({
       seo_jobId: latestJob._id

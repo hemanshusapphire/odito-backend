@@ -25,14 +25,12 @@ export class ProjectSummaryService {
     const db = mongoose.connection.db;
     const { ObjectId } = mongoose.Types;
 
-    // Get link counts directly from MongoDB collections (EXACT same logic)
+    // Get link counts directly from MongoDB collections (external links disabled)
     const internalLinksCount = await db.collection('seo_internal_links').countDocuments({
       projectId: new ObjectId(projectId)
     });
 
-    const externalLinksCount = await db.collection('seo_external_links').countDocuments({
-      projectId: new ObjectId(projectId)
-    });
+    const externalLinksCount = 0;  // External links disabled
 
     const socialLinksCount = await db.collection('seo_social_links').countDocuments({
       projectId: new ObjectId(projectId)
@@ -68,20 +66,19 @@ export class ProjectSummaryService {
     const { ObjectId } = mongoose.Types;
     const projectIdObj = new ObjectId(projectId);
 
-    // Get comprehensive statistics
+    // Get comprehensive statistics (external links disabled)
     const [
       internalLinksCount,
-      externalLinksCount,
       socialLinksCount,
       pagesCount,
       issuesCount
     ] = await Promise.all([
       db.collection('seo_internal_links').countDocuments({ projectId: projectIdObj }),
-      db.collection('seo_external_links').countDocuments({ projectId: projectIdObj }),
       db.collection('seo_social_links').countDocuments({ projectId: projectIdObj }),
       db.collection('seo_page_data').countDocuments({ projectId: projectIdObj }),
       db.collection('seo_page_issues').countDocuments({ projectId: projectIdObj })
     ]);
+    const externalLinksCount = 0;  // External links disabled
 
     return {
       success: true,

@@ -31,10 +31,9 @@ const resetProjectCrawlData = async (projectId) => {
 
     LoggerUtil.info(`Resetting crawl data for project | projectId=${projectId}`);
 
-    // Clear all crawl-related collections for this project
+    // Clear all crawl-related collections for this project (external links disabled)
     const collectionsToClear = [
       'seo_internal_links',
-      'seo_external_links',
       'seo_social_links',
       'seo_page_data',
       'seo_page_issues',

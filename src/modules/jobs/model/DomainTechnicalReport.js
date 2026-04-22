@@ -39,6 +39,10 @@ const domainTechnicalReportSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  llmsTxt: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
   sslValid: {
     type: Boolean,
     default: false

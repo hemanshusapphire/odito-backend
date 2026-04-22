@@ -46,7 +46,6 @@ export class PDFAggregationService {
         pageIssuesData,
         pageData,
         internalLinksData,
-        externalLinksData,
         socialLinksData,
         onpageIssuesData,
         performanceData
@@ -78,9 +77,8 @@ export class PDFAggregationService {
         // 9. Page data
         this.fetchPageData(db, projectIdObj),
         
-        // 10. Link data
+        // 10. Link data (external links disabled)
         this.fetchInternalLinksData(db, projectIdObj),
-        this.fetchExternalLinksData(db, projectIdObj),
         this.fetchSocialLinksData(db, projectIdObj),
         
         // 11. Performance data (for Core Web Vitals)
@@ -103,7 +101,7 @@ export class PDFAggregationService {
         },
         links: {
           internal: internalLinksData,
-          external: externalLinksData,
+          external: { total: 0, sourcePages: 0, uniqueDomains: 0, targetUrls: 0 },  // External links disabled
           social: socialLinksData
         },
         performance: performanceData,
@@ -621,26 +619,12 @@ export class PDFAggregationService {
    * Fetch external links data
    */
   static async fetchExternalLinksData(db, projectId) {
-    const stats = await db.collection('seo_external_links')
-      .aggregate([
-        { $match: { projectId } },
-        {
-          $group: {
-            _id: null,
-            totalLinks: { $sum: 1 },
-            uniqueSourcePages: { $addToSet: '$source_url' },
-            uniqueDomains: { $addToSet: { $toLower: '$domain' } },
-            uniqueTargetUrls: { $addToSet: '$target_url' }
-          }
-        }
-      ]).toArray();
-
-    const result = stats[0] || {};
+    // External links disabled - return empty data
     return {
-      total: result.totalLinks || 0,
-      sourcePages: result.uniqueSourcePages ? result.uniqueSourcePages.length : 0,
-      uniqueDomains: result.uniqueDomains ? result.uniqueDomains.length : 0,
-      targetUrls: result.uniqueTargetUrls ? result.uniqueTargetUrls.length : 0
+      total: 0,
+      sourcePages: 0,
+      uniqueDomains: 0,
+      targetUrls: 0
     };
   }
 

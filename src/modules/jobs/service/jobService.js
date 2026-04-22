@@ -1697,7 +1697,7 @@ export class JobService {
 
             internalLinksCount: job.result_data.internalLinksCount || 0,
 
-            externalLinksCount: job.result_data.externalLinksCount || 0,
+            externalLinksCount: 0,  // External links disabled
 
             socialLinksCount: job.result_data.socialLinksCount || 0,
 
@@ -1895,12 +1895,8 @@ export class JobService {
 
       } else {
 
-        // Original logic for SEO projects
-
+        // Original logic for SEO projects (external links disabled)
         discoveredTotal = (jobStats.LINK_DISCOVERY?.internalLinksCount || 0) +
-
-          (jobStats.LINK_DISCOVERY?.externalLinksCount || 0) +
-
           (jobStats.LINK_DISCOVERY?.socialLinksCount || 0);
 
 
@@ -1955,15 +1951,7 @@ export class JobService {
 
         );
 
-        externalLinks = resolveDiscoveredCount(
-
-          baseDiscoveredLinks.external_links,
-
-          baseDiscoveredLinks.external,
-
-          jobStats.LINK_DISCOVERY?.externalLinksCount ?? 0
-
-        );
+        externalLinks = 0;  // External links disabled
 
         socialLinks = resolveDiscoveredCount(
 

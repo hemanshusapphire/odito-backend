@@ -51,23 +51,10 @@ export class ProjectLinksService {
       allLinks.push(...internalLinks.map(link => ({ ...link, linkType: 'internal' })));
     }
 
-    // Get external links
+    // External links disabled - skip query
     if (!link_type || link_type === 'external') {
-      const externalQuery = { projectId: projectIdObj };
-      
-      if (search) {
-        externalQuery.$or = [
-          { sourceUrl: { $regex: search, $options: 'i' } },
-          { url: { $regex: search, $options: 'i' } }
-        ];
-      }
-
-      const externalLinks = await db.collection('seo_external_links')
-        .find(externalQuery)
-        .sort({ discoveredAt: -1 })
-        .toArray();
-
-      allLinks.push(...externalLinks.map(link => ({ ...link, linkType: 'external' })));
+      // Return empty results for external links
+      // External link analysis disabled to improve data quality and reduce processing time
     }
 
     // Get social links
@@ -91,9 +78,9 @@ export class ProjectLinksService {
 
     LoggerUtil.debug('Found links for current page', { count: allLinks.length });
 
-    // Get total counts for summary (EXACT same logic)
+    // Get total counts for summary (external links disabled)
     const internalCount = await db.collection('seo_internal_links').countDocuments({ projectId: projectIdObj });
-    const externalCount = await db.collection('seo_external_links').countDocuments({ projectId: projectIdObj });
+    const externalCount = 0;  // External links disabled
     const socialCount = await db.collection('seo_social_links').countDocuments({ projectId: projectIdObj });
 
     const summary = {

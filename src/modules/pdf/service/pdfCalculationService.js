@@ -165,6 +165,7 @@ export class PDFCalculationService {
 
   /**
    * Calculate Authority score from link data
+   * External links disabled - redistributed weight to internal/social links
    */
   static calculateAuthorityScore(links) {
     const internal = links?.internal || {};
@@ -174,21 +175,17 @@ export class PDFCalculationService {
     // Base score from link diversity
     let score = 0;
 
-    // Internal links (40% of authority)
+    // Internal links (60% of authority - increased from 40%)
     if (internal.total > 0) {
-      score += Math.min(40, internal.total / 10);
+      score += Math.min(60, internal.total / 6.67);
     }
 
-    // External links (40% of authority)
-    if (external.total > 0) {
-      const domainDiversity = Math.min(20, external.uniqueDomains * 2);
-      const volumeScore = Math.min(20, external.total / 5);
-      score += domainDiversity + volumeScore;
-    }
+    // External links disabled (0% of authority)
+    // External link analysis disabled to improve data quality and reduce processing time
 
-    // Social links (20% of authority)
+    // Social links (40% of authority - increased from 20%)
     if (social.total > 0) {
-      score += Math.min(20, social.platforms * 5);
+      score += Math.min(40, social.platforms * 10);
     }
 
     return Math.round(Math.min(100, score));
@@ -424,15 +421,15 @@ export class PDFCalculationService {
   }
 
   /**
-   * Calculate link metrics
+   * Calculate link metrics (external links disabled)
    */
   static calculateLinkMetrics(links) {
     const internal = links?.internal || {};
-    const external = links?.external || {};
+    const external = { total: 0, uniqueDomains: 0 };  // External links disabled
     const social = links?.social || {};
 
     return {
-      total: (internal.total || 0) + (external.total || 0) + (social.total || 0),
+      total: (internal.total || 0) + (social.total || 0),  // External excluded
       internal,
       external,
       social,
@@ -440,7 +437,7 @@ export class PDFCalculationService {
       diversity: {
         internalSourcePages: internal.sourcePages || 0,
         internalTargetPages: internal.targetPages || 0,
-        externalDomains: external.uniqueDomains || 0,
+        externalDomains: 0,  // External links disabled
         socialPlatforms: social.platforms || 0
       }
     };
