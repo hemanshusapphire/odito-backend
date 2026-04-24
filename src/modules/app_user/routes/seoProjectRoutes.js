@@ -10,7 +10,9 @@ import {
   deleteSeoProject,
   getProjectScrapingSummary,
   getProjectsNeedingScrape,
-  getProjectDashboard
+  getProjectDashboard,
+  getIssueCounts,
+  getProjectOverview
 } from '../controller/seoProjectController.js';
 import {
   getProjectLinks,
@@ -49,6 +51,10 @@ router.delete('/projects/:id', validateProjectAccess(), deleteSeoProject);
 // Scraping-related routes
 router.get('/projects/:id/scraping-summary', validateProjectAccess(), getProjectScrapingSummary);
 router.get('/projects-needing-scrape', getProjectsNeedingScrape);
+
+// NEW: Optimized dashboard routes
+router.get('/projects/:id/overview', validateProjectAccess(), getProjectOverview);
+router.get('/projects/:id/issue-counts', validateProjectAccess(), getIssueCounts);
 
 // Project data display routes
 router.get('/projects/:id/links', validateProjectAccess(), getProjectLinks);

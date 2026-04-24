@@ -5,6 +5,8 @@ import { JobService } from '../../jobs/service/jobService.js';
 import { JOB_TYPES } from '../../jobs/constants/jobTypes.js';
 import Job from '../../jobs/model/Job.js';
 import { ProjectPerformanceService } from '../service/projectPerformance.service.js';
+import { IssueCountsService } from '../service/issueCounts.service.js';
+import { TechnicalChecksService } from '../service/technicalChecks.service.js';
 import mongoose from 'mongoose';
 
 // Create a new SEO project
@@ -597,6 +599,81 @@ const getProjectsNeedingScrape = async (req, res) => {
   }
 };
 
+// Get issue counts for a project (lightweight - single collection query)
+const getIssueCounts = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+
+    // Verify project belongs to user
+    const project = await SeoProject.findById(projectId);
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found'
+      });
+    }
+
+    if (project.user_id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    const result = await IssueCountsService.getIssueCounts(projectId);
+    
+    res.status(200).json(result);
+
+  } catch (error) {
+    LoggerUtil.error('Error getting issue counts', error, { projectId: req.params.id });
+    return res.status(500).json(ResponseUtil.error('Failed to get issue counts', 500));
+  }
+};
+
+// Get unified project overview (combines project, performance, and technical data)
+const getProjectOverview = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+
+    // Verify project belongs to user
+    const project = await SeoProject.findById(projectId);
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found'
+      });
+    }
+
+    if (project.user_id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
+    // Execute all queries in parallel for maximum performance
+    const [performanceResult, technicalResult] = await Promise.all([
+      ProjectPerformanceService.getProjectPerformance(project),
+      TechnicalChecksService.getTechnicalChecks(project)
+    ]);
+
+    const overviewData = {
+      project: project.toObject(),
+      performance: performanceResult.success ? performanceResult.data : null,
+      technical: technicalResult.success ? technicalResult.data : null
+    };
+
+    res.status(200).json({
+      success: true,
+      data: overviewData
+    });
+
+  } catch (error) {
+    LoggerUtil.error('Error getting project overview', error, { projectId: req.params.id });
+    return res.status(500).json(ResponseUtil.error('Failed to get project overview', 500));
+  }
+};
+
 // Get project dashboard data
 const getProjectDashboard = async (req, res) => {
   try {
@@ -860,5 +937,7 @@ export {
   getProjectScrapingSummary,
   getProjectsNeedingScrape,
   getProjectDashboard,
-  getProjectScreenshot
+  getProjectScreenshot,
+  getIssueCounts,
+  getProjectOverview
 };
