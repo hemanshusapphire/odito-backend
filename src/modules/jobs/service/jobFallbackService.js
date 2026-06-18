@@ -34,7 +34,8 @@ class JobFallbackService {
           auditProgressService.emitStageChanged(updatedJob._id.toString(), {
             from: 'LINK_DISCOVERY',
             to: 'PAGE_SCRAPING',
-            newJobId: pageScrapingJob._id.toString()
+            newJobId: pageScrapingJob._id.toString(),
+            projectId: updatedJob.project_id?.toString()
           });
         } else {
           // PUSH model: dispatch to worker
@@ -43,7 +44,8 @@ class JobFallbackService {
             auditProgressService.emitStageChanged(updatedJob._id.toString(), {
               from: 'LINK_DISCOVERY',
               to: 'PAGE_SCRAPING',
-              newJobId: pageScrapingJob._id.toString()
+              newJobId: pageScrapingJob._id.toString(),
+              projectId: updatedJob.project_id?.toString()
             });
             await jobDispatcher.dispatchPageScrapingJob(dispatchedJob);
             console.log(`[FALLBACK:${requestId}] PAGE_SCRAPING dispatched | jobId=${dispatchedJob._id}`);

@@ -32,7 +32,8 @@ import {
   getAIVisibilityEntityGraph,
   getIssueUrls,
   getTechnicalChecks,
-  getTechnicalCheckDetail
+  getTechnicalCheckDetail,
+  getProjectPreAudit
 } from '../controller/projectDataController.js';
 
 const router = express.Router();
@@ -74,6 +75,9 @@ router.get('/projects/:id/technical-checks/:checkId', validateProjectAccess(), g
 router.get('/projects/:id/google-visibility/status', validateProjectAccess(), getGoogleVisibilityStatus);
 router.get('/projects/:id/google-visibility/connect', validateProjectAccess(), connectGoogleVisibility);
 router.delete('/projects/:id/google-visibility/disconnect', validateProjectAccess(), disconnectGoogleVisibility);
+
+// Pre-audit route
+router.get('/projects/:id/pre-audit', validateProjectAccess(), getProjectPreAudit);
 
 // AI Visibility routes
 router.get('/projects/:id/ai-visibility/page', validateProjectAccess(), getAIVisibilityPage);

@@ -50,6 +50,14 @@ const seoProjectSchema = new mongoose.Schema({
     default: null
   },
 
+  // 🎯 SEO Scope — persisted from onboarding targetLevel selection
+  seo_scope: {
+    type: String,
+    enum: ['local', 'national'],
+    default: null,
+    index: true
+  },
+
   // 🌍 Location & Language
   location: {
     type: String,
@@ -60,7 +68,7 @@ const seoProjectSchema = new mongoose.Schema({
 
   country: {
     type: String,
-    default: 'US',
+    default: null,
     uppercase: true,
     minlength: 2,
     maxlength: 2
@@ -175,7 +183,7 @@ const seoProjectSchema = new mongoose.Schema({
 
   crawl_status: {
     type: String,
-    enum: ['pending', 'running', 'completed', 'failed', 'cancelled'],
+    enum: ['draft', 'pending', 'running', 'discovered', 'crawled', 'completed', 'failed', 'cancelled'],
     default: 'pending'
   },
 
@@ -227,6 +235,29 @@ const seoProjectSchema = new mongoose.Schema({
       type: String,
       required: false
     },
+    city: {
+      type: String,
+      required: false,
+      default: null
+    },
+    state: {
+      type: String,
+      required: false,
+      default: null
+    },
+    country: {
+      type: String,
+      required: false,
+      default: null
+    },
+    countryCode: {
+      type: String,
+      required: false,
+      uppercase: true,
+      minlength: 2,
+      maxlength: 2,
+      default: null
+    },
     website: {
       type: String,
       required: false
@@ -260,8 +291,45 @@ const seoProjectSchema = new mongoose.Schema({
   // Project source tracking
   source: {
     type: String,
-    enum: ['web', 'external', 'api', 'migration'],
+    enum: ['web', 'external', 'api', 'migration', 'website_manual'],
     default: 'web'
+  },
+
+  // 🌐 Onboarding Mode Tracking (NEW — Website Manual Fallback)
+  onboarding_mode: {
+    type: String,
+    enum: ['google_places', 'website_manual', 'external'],
+    default: 'google_places'
+  },
+
+  discovery_source: {
+    type: String,
+    enum: ['google_places', 'website_scrape', 'manual_entry', 'external_api'],
+    default: 'google_places'
+  },
+
+  // Reference to the Homepage Audit snapshot taken before project creation
+  pre_audit_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'HomepageAudit',
+    default: null,
+    index: true
+  },
+
+  // Extracted website metadata (populated when onboarding_mode = 'website_manual')
+  extracted_metadata: {
+    title: { type: String, default: null },
+    description: { type: String, default: null },
+    og_tags: { type: Object, default: null },
+    schema_org: { type: Object, default: null },
+    social_links: { type: [String], default: [] },
+    contact_info: {
+      email: { type: String, default: null },
+      phone: { type: String, default: null },
+      address: { type: String, default: null }
+    },
+    confidence: { type: Number, default: 0, min: 0, max: 100 },
+    extracted_at: { type: Date, default: null }
   }
 
 }, {
@@ -296,6 +364,9 @@ seoProjectSchema.index({ last_ai_analysis_at: -1 });
 seoProjectSchema.index({ industry: 1 });
 seoProjectSchema.index({ country: 1 });
 seoProjectSchema.index({ language: 1 });
+
+// Index for onboarding mode analytics
+seoProjectSchema.index({ onboarding_mode: 1 });
 
 // Pre-save middleware to process keywords
 seoProjectSchema.pre('save', function(next) {

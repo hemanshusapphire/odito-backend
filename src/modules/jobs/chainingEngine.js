@@ -8,12 +8,13 @@
 
 import { JobService } from './service/jobService.js';
 import auditProgressService from './service/auditProgressService.js';
+import taskVerificationService from '../tasks/service/TaskVerificationService.js';
+import auditHistoryService from '../audit_history/service/AuditHistoryService.js';
 import { JOB_TYPES, JOB_TYPE_CONFIG } from './constants/jobTypes.js';
 import JobDispatcher from './service/jobDispatcher.js';
 import jobDataService from './service/jobDataService.js';
 import { PIPELINE_CONFIG } from './pipelineConfig.js';
 import mongoose from 'mongoose';
-import SeoProject from '../app_user/model/SeoProject.js';
 import AIVisibilityProject from '../ai_visibility/model/AIVisibilityProject.js';
 
 const jobService = new JobService();
@@ -45,6 +46,7 @@ const JOB_CREATION_MAP = {
     priority: JOB_TYPE_CONFIG[JOB_TYPES.KEYWORD_RESEARCH].priority
   }),
   [JOB_TYPES.TECHNICAL_DOMAIN]: (src) => jobService.createAndDispatchTechnicalDomainJob(src),
+  [JOB_TYPES.URL_QUALIFICATION]: (src) => jobService.createAndDispatchUrlQualificationJob(src),
   [JOB_TYPES.PAGE_SCRAPING]: (src) => jobService.createAndDispatchPageScrapingJob(src),
   [JOB_TYPES.PAGE_ANALYSIS]: (src) => jobService.createAndDispatchPageAnalysisJob(src),
   [JOB_TYPES.PERFORMANCE_MOBILE]: (src) => jobService.createAndDispatchPerformanceMobileJob(src),
@@ -63,6 +65,7 @@ const createJobDispatchMap = () => {
     [JOB_TYPES.LINK_DISCOVERY]: (job) => jobDispatcher.dispatchLinkDiscoveryJob(job),
     [JOB_TYPES.KEYWORD_RESEARCH]: (job) => jobDispatcher.dispatchKeywordResearchJob(job),
     [JOB_TYPES.TECHNICAL_DOMAIN]: (job) => jobDispatcher.dispatchTechnicalDomainJob(job),
+    [JOB_TYPES.URL_QUALIFICATION]: (job) => jobDispatcher.dispatchUrlQualificationJob(job),
     [JOB_TYPES.PAGE_SCRAPING]: (job) => jobDispatcher.dispatchPageScrapingJob(job),
     [JOB_TYPES.PERFORMANCE_MOBILE]: (job) => jobDispatcher.dispatchPerformanceMobileJob(job),
     [JOB_TYPES.PERFORMANCE_DESKTOP]: (job) => jobDispatcher.dispatchPerformanceDesktopJob(job),
@@ -77,11 +80,18 @@ const createJobDispatchMap = () => {
 
 // ---------------------------------------------------------------------------
 // Job types that participate in the PAGE_ANALYSIS dependency gate.
-// When either completes, we check if both are resolved before proceeding.
+// When any of these completes, we check if all required conditions are met.
+//
+// Full audit gate:   PERFORMANCE_DESKTOP (completed) + HEADLESS_ACCESSIBILITY → PAGE_ANALYSIS
+// Verification gate: PAGE_SCRAPING (completed) + HEADLESS_ACCESSIBILITY (completed|failed)
+//                    Both are dispatched simultaneously in startVerification(), so either
+//                    can complete first. Adding PAGE_SCRAPING here ensures the gate re-fires
+//                    when PAGE_SCRAPING completes after HEADLESS already resolved.
 // ---------------------------------------------------------------------------
 const DEPENDENCY_GATE_TYPES = new Set([
   JOB_TYPES.PERFORMANCE_DESKTOP,
-  JOB_TYPES.HEADLESS_ACCESSIBILITY
+  JOB_TYPES.HEADLESS_ACCESSIBILITY,
+  JOB_TYPES.PAGE_SCRAPING,
 ]);
 
 class ChainingEngine {
@@ -110,15 +120,70 @@ class ChainingEngine {
     console.log(`[CHAINING:${requestId}] JOB_DISPATCH_MAP keys =`, Object.keys(createJobDispatchMap()));
     console.log(`[CHAINING:${requestId}] === END CONFIG DEBUG ===`);
 
-    // Special project status updates (moved from jobController)
-    await this._handleProjectStatusUpdates(updatedJob, stats, requestId);
+    // Project status updates are handled by projectStatusService.updateForJobType()
+    // in jobCompletionHandler.js — no duplicate call needed here.
 
     try {
+      // onComplete hook fires for ALL job types including terminal (next=[]).
+      // Used to emit audit:completed after SEO_SCORING writes final scores,
+      // so the frontend receives the event only after data is ready.
+      if (config?.hooks?.onComplete === 'emitCompleted') {
+        await this._emitCompletionEvent(updatedJob, stats, requestId);
+
+        // ── Task Verification ──────────────────────────────────────────
+        // After final scoring completes, verify all implemented tasks
+        // against fresh crawl data. Idempotent — safe to run after both
+        // SEO_SCORING and AI_VISIBILITY_SCORING independently.
+        if (updatedJob.project_id) {
+          try {
+            const verifyResult = await taskVerificationService.verifyImplementedTasks(
+              updatedJob.project_id, requestId
+            );
+            console.log(`[CHAINING:${requestId}] Task verification complete | verified=${verifyResult.verified} | reopened=${verifyResult.reopened}`);
+          } catch (verifyError) {
+            // Verification failure should never crash the pipeline
+            console.error(`[CHAINING:${requestId}] Task verification failed (non-fatal): ${verifyError.message}`);
+          }
+        }
+
+        // ── Audit History ──────────────────────────────────────────────
+        // Capture an immutable snapshot of this audit into audit_runs.
+        // Called after both SEO_SCORING and AI_VISIBILITY_SCORING — the
+        // service checks internally that both terminals are resolved before
+        // writing. Failure here is non-fatal and never blocks the pipeline.
+        if (updatedJob.project_id) {
+          try {
+            await auditHistoryService.captureIfComplete(
+              updatedJob.project_id,
+              requestId
+            );
+          } catch (historyError) {
+            console.error(`[CHAINING:${requestId}] Audit history capture failed (non-fatal): ${historyError.message}`);
+          }
+
+        }
+      }
+
+      // Verification mode: PAGE_SCRAPING must NOT chain to CRAWL_GRAPH.
+      // In a full audit, PAGE_SCRAPING → parallel(CRAWL_GRAPH, AI_VISIBILITY).
+      // In verification mode (detected via input_data.mode), CRAWL_GRAPH is skipped —
+      // the dependency gate now opens on HEADLESS_ACCESSIBILITY alone (no CRAWL_GRAPH,
+      // no PERFORMANCE_DESKTOP), so PAGE_ANALYSIS starts as soon as headless resolves.
+      const isVerificationMode = updatedJob.input_data?.mode === 'verification';
+      const isVerificationPageScraping = jobType === JOB_TYPES.PAGE_SCRAPING && isVerificationMode;
+
+      // Compute effective next-job list; filter CRAWL_GRAPH for verification PAGE_SCRAPING
+      let effectiveNext = config?.next ? [...config.next] : [];
+      if (isVerificationPageScraping) {
+        effectiveNext = effectiveNext.filter(t => t !== JOB_TYPES.CRAWL_GRAPH);
+        console.log(`[CHAINING:${requestId}] Verification mode: CRAWL_GRAPH excluded from PAGE_SCRAPING chain`);
+      }
+
       // No config or empty next → nothing to chain (but may have dependency gate)
-      if (!config || !config.next || config.next.length === 0) {
+      if (!config || effectiveNext.length === 0) {
         console.log(`[CHAINING:${requestId}] No direct chaining for jobType=${jobType}`);
       } else {
-        // Pre-chain hooks
+        // Pre-chain hooks (beforeChain only fires when there are next jobs)
         if (config.hooks?.beforeChain === 'emitCompleted') {
           await this._emitCompletionEvent(updatedJob, stats, requestId);
         }
@@ -129,25 +194,35 @@ class ChainingEngine {
           sourceJob = await jobDataService.resolveSourceJob(updatedJob);
         }
 
+        // forwardCanonicalUrls: extract canonicalUrls from this job's result_data
+        // and attach them to sourceJob so createAndDispatch* methods can propagate
+        // them into each downstream job's input_data without a second DB read.
+        if (config.forwardCanonicalUrls) {
+          const canonicalUrls = updatedJob.result_data?.canonicalUrls || [];
+          console.log(`[CHAINING:${requestId}] Forwarding canonicalUrls to downstream jobs | count=${canonicalUrls.length}`);
+          // Attach to sourceJob so all JOB_CREATION_MAP entries receive it
+          sourceJob._canonicalUrls = canonicalUrls;
+        }
+
         // Determine stageFrom (for progress events)
         const stageFrom = config.stageFrom || jobType;
 
         // Create and dispatch next jobs
-        console.log(`[CHAINING:${requestId}] config.next = ${JSON.stringify(config?.next)}`);
-        console.log(`[CHAINING:${requestId}] About to process ${config.next.length} next jobs`);
+        console.log(`[CHAINING:${requestId}] effectiveNext = ${JSON.stringify(effectiveNext)}`);
+        console.log(`[CHAINING:${requestId}] About to process ${effectiveNext.length} next jobs`);
 
         if (config.parallel) {
           console.log(`[CHAINING:${requestId}] === PARALLEL EXECUTION START ===`);
-          console.log(`[CHAINING:${requestId}] Processing ${config.next.length} parallel jobs`);
-          for (let i = 0; i < config.next.length; i++) {
-            const nextType = config.next[i];
+          console.log(`[CHAINING:${requestId}] Processing ${effectiveNext.length} parallel jobs`);
+          for (let i = 0; i < effectiveNext.length; i++) {
+            const nextType = effectiveNext[i];
             console.log(`[CHAINING:${requestId}] [PARALLEL ITERATION ${i}] nextType=${nextType}`);
             console.log(`[CHAINING:${requestId}] [PARALLEL ITERATION ${i}] JOB_CREATION_MAP[${nextType}] exists:`, !!JOB_CREATION_MAP[nextType]);
             console.log(`[CHAINING:${requestId}] [PARALLEL ITERATION ${i}] JOB_DISPATCH_MAP[${nextType}] exists:`, !!createJobDispatchMap()[nextType]);
           }
 
           await Promise.allSettled(
-            config.next.map((nextType, index) => {
+            effectiveNext.map((nextType, index) => {
               console.log(`[CHAINING:${requestId}] [PARALLEL MAP ${index}] Calling _createAndDispatchJob for nextType=${nextType}`);
               return this._createAndDispatchJob(nextType, updatedJob, sourceJob, stageFrom, config, requestId, false);
             })
@@ -155,9 +230,9 @@ class ChainingEngine {
           console.log(`[CHAINING:${requestId}] === PARALLEL EXECUTION COMPLETE ===`);
         } else {
           console.log(`[CHAINING:${requestId}] === SEQUENTIAL EXECUTION START ===`);
-          console.log(`[CHAINING:${requestId}] Processing ${config.next.length} sequential jobs`);
-          for (let i = 0; i < config.next.length; i++) {
-            const nextType = config.next[i];
+          console.log(`[CHAINING:${requestId}] Processing ${effectiveNext.length} sequential jobs`);
+          for (let i = 0; i < effectiveNext.length; i++) {
+            const nextType = effectiveNext[i];
             console.log(`[CHAINING:${requestId}] [SEQUENTIAL ITERATION ${i}] nextType=${nextType}`);
             console.log(`[CHAINING:${requestId}] [SEQUENTIAL ITERATION ${i}] JOB_CREATION_MAP[${nextType}] exists:`, !!JOB_CREATION_MAP[nextType]);
             console.log(`[CHAINING:${requestId}] [SEQUENTIAL ITERATION ${i}] JOB_DISPATCH_MAP[${nextType}] exists:`, !!createJobDispatchMap()[nextType]);
@@ -217,53 +292,97 @@ class ChainingEngine {
         return;
       }
 
-      // 2. PERFORMANCE_DESKTOP must be completed
-      const perfDesktop = await Job.findOne({
-        project_id: projectId,
-        jobType: JOB_TYPES.PERFORMANCE_DESKTOP,
-        status: 'completed'
-      });
-
-      if (!perfDesktop) {
-        console.log(`[GATE:${requestId}] PERFORMANCE_DESKTOP not yet completed — gate remains closed`);
-        return;
-      }
-
-      // 3. HEADLESS_ACCESSIBILITY must be completed or failed
-      const headlessA11y = await Job.findOne({
-        project_id: projectId,
-        jobType: JOB_TYPES.HEADLESS_ACCESSIBILITY,
-        status: { $in: ['completed', 'failed'] }
-      });
-
-      if (!headlessA11y) {
-        console.log(`[GATE:${requestId}] HEADLESS_ACCESSIBILITY not yet resolved — gate remains closed`);
-        return;
-      }
-
-      // 4. Both conditions met — create PAGE_ANALYSIS atomically
-      console.log(`[GATE:${requestId}] Both dependencies resolved — opening gate for PAGE_ANALYSIS`);
-
-      // Use the PAGE_SCRAPING job as the source for PAGE_ANALYSIS creation
-      // (it carries the URLs and project context)
+      // 2. Determine run mode by inspecting the PAGE_SCRAPING job's input_data.mode.
+      //
+      //    Verification mode: startVerification() creates PAGE_SCRAPING with
+      //      input_data.mode = 'verification'. Both PAGE_SCRAPING and HEADLESS are
+      //      dispatched simultaneously, so either can complete first. The gate must
+      //      require BOTH to resolve before opening.
+      //
+      //    Full audit mode: PERFORMANCE_DESKTOP is created downstream of CRAWL_GRAPH
+      //      and is the definitive gate signal. HEADLESS runs in parallel from
+      //      URL_QUALIFICATION. Gate opens only when PERF_DESKTOP is done.
       const pageScrapingJob = await Job.findOne({
+        project_id: projectId,
+        jobType: JOB_TYPES.PAGE_SCRAPING
+      });
+
+      const isVerificationMode = pageScrapingJob?.input_data?.mode === 'verification';
+      console.log(`[GATE:${requestId}] Mode detected: ${isVerificationMode ? 'verification' : 'full-audit'}`);
+
+      if (isVerificationMode) {
+        // ── Verification gate: PAGE_SCRAPING (completed) + HEADLESS (completed|failed) ──
+
+        // PAGE_SCRAPING must be completed
+        if (!pageScrapingJob || pageScrapingJob.status !== 'completed') {
+          console.log(`[GATE:${requestId}] PAGE_SCRAPING not yet completed — gate remains closed (verification mode)`);
+          return;
+        }
+
+        // HEADLESS_ACCESSIBILITY must be completed or failed
+        const headlessA11y = await Job.findOne({
+          project_id: projectId,
+          jobType: JOB_TYPES.HEADLESS_ACCESSIBILITY,
+          status: { $in: ['completed', 'failed'] }
+        });
+
+        if (!headlessA11y) {
+          console.log(`[GATE:${requestId}] HEADLESS_ACCESSIBILITY not yet resolved — gate remains closed (verification mode)`);
+          return;
+        }
+
+      } else {
+        // ── Full audit gate: PERFORMANCE_DESKTOP (completed) + HEADLESS (completed|failed) ──
+
+        const perfDesktop = await Job.findOne({
+          project_id: projectId,
+          jobType: JOB_TYPES.PERFORMANCE_DESKTOP
+        });
+
+        if (!perfDesktop) {
+          // PERFORMANCE_DESKTOP not yet created (CRAWL_GRAPH still running) — keep gate closed
+          console.log(`[GATE:${requestId}] PERFORMANCE_DESKTOP not yet created — gate remains closed (full audit)`);
+          return;
+        }
+
+        if (perfDesktop.status !== 'completed') {
+          console.log(`[GATE:${requestId}] PERFORMANCE_DESKTOP not yet completed — gate remains closed (full audit)`);
+          return;
+        }
+
+        const headlessA11y = await Job.findOne({
+          project_id: projectId,
+          jobType: JOB_TYPES.HEADLESS_ACCESSIBILITY,
+          status: { $in: ['completed', 'failed'] }
+        });
+
+        if (!headlessA11y) {
+          console.log(`[GATE:${requestId}] HEADLESS_ACCESSIBILITY not yet resolved — gate remains closed (full audit)`);
+          return;
+        }
+      }
+
+      // 3. All conditions met — create PAGE_ANALYSIS atomically
+      console.log(`[GATE:${requestId}] All dependencies resolved — opening gate for PAGE_ANALYSIS`);
+
+      // Reload PAGE_SCRAPING as completed source (already fetched above for verification;
+      // for full audit mode, re-query with status filter to be safe)
+      const completedPageScraping = await Job.findOne({
         project_id: projectId,
         jobType: JOB_TYPES.PAGE_SCRAPING,
         status: 'completed'
       });
 
-      if (!pageScrapingJob) {
+      if (!completedPageScraping) {
         console.error(`[GATE:${requestId}] Cannot find completed PAGE_SCRAPING job for project ${projectId}`);
         return;
       }
 
-      // Atomic creation + dispatch via the standard path
-      const stageFrom = JOB_TYPES.PAGE_SCRAPING;
       await this._createAndDispatchJob(
         JOB_TYPES.PAGE_ANALYSIS,
         completedJob,
-        pageScrapingJob,
-        stageFrom,
+        completedPageScraping,
+        JOB_TYPES.PAGE_SCRAPING,
         { atomicGuard: true },
         requestId,
         false
@@ -343,7 +462,8 @@ class ChainingEngine {
         auditProgressService.emitStageChanged(updatedJob._id.toString(), {
           from: stageFrom,
           to: nextJobType,
-          newJobId: nextJob._id.toString()
+          newJobId: nextJob._id.toString(),
+          projectId: updatedJob.project_id?.toString()
         });
       } else {
         // PUSH model: atomically mark as dispatched
@@ -358,7 +478,8 @@ class ChainingEngine {
           auditProgressService.emitStageChanged(updatedJob._id.toString(), {
             from: stageFrom,
             to: nextJobType,
-            newJobId: nextJob._id.toString()
+            newJobId: nextJob._id.toString(),
+            projectId: updatedJob.project_id?.toString()
           });
 
           // 4. Dispatch to worker
@@ -491,73 +612,6 @@ class ChainingEngine {
     return result;
   }
 
-  /**
-   * Handle special project status updates (moved from jobController)
-   */
-  async _handleProjectStatusUpdates(updatedJob, stats, requestId) {
-    const jobType = updatedJob.jobType;
-    
-    try {
-      switch (jobType) {
-        case JOB_TYPES.LINK_DISCOVERY:
-          // Update project crawl_status to DISCOVERED after LINK_DISCOVERY completes
-          await SeoProject.findByIdAndUpdate(updatedJob.project_id, {
-            crawl_status: 'discovered',
-            pages_discovered: stats?.discovered_links?.total || stats?.totalUrlsFound || 0
-          });
-          console.log(`[CHAINING:${requestId}] Project crawl_status updated | projectId=${updatedJob.project_id} | status=discovered | pages_discovered=${stats?.discovered_links?.total || stats?.totalUrlsFound || 0}`);
-          break;
-
-        case JOB_TYPES.PAGE_SCRAPING:
-          // Update project crawl_status to CRAWLED after PAGE_SCRAPING completes
-          await SeoProject.findByIdAndUpdate(updatedJob.project_id, {
-            crawl_status: 'crawled',
-            pages_crawled: stats?.crawled_pages?.successful || stats?.totalPages || 0
-          });
-          console.log(`[CHAINING:${requestId}] Project crawl_status updated | projectId=${updatedJob.project_id} | status=crawled | pages_crawled=${stats?.crawled_pages?.successful || stats?.totalPages || 0}`);
-          break;
-
-        case JOB_TYPES.PAGE_ANALYSIS:
-          // Emit completion event FIRST (never block on DB)
-          auditProgressService.emitCompleted(updatedJob.project_id, {
-            projectId: updatedJob.project_id,
-            jobId: updatedJob._id.toString(),
-            stats: stats,
-            summary: {
-              pages_analyzed: stats?.pagesAnalyzed || stats?.totalPages || 0,
-              issues_found: stats?.issuesFound || 0,
-              crawl_status: 'completed'
-            }
-          });
-          console.log(`[CHAINING:${requestId}] Final audit completion emitted | projectId=${updatedJob.project_id}`);
-
-          // Update project crawl_status to COMPLETED after PAGE_ANALYSIS completes (best-effort)
-          try {
-            const project = await SeoProject.findById(updatedJob.project_id);
-            const analysisCompletionTime = new Date();
-            const auditDurationMs = project?.audit_started_at
-              ? analysisCompletionTime.getTime() - project.audit_started_at.getTime()
-              : 0;
-
-            await SeoProject.findByIdAndUpdate(updatedJob.project_id, {
-              crawl_status: 'completed',
-              pages_analyzed: stats?.pagesAnalyzed || stats?.totalPages || 0,
-              total_issues: stats?.issuesFound || 0,
-              last_analysis_at: analysisCompletionTime,
-              audit_duration_ms: Math.max(0, auditDurationMs)
-            });
-            console.log(`[CHAINING:${requestId}] Project crawl_status updated | projectId=${updatedJob.project_id} | status=completed | pages_analyzed=${stats?.pagesAnalyzed || stats?.totalPages || 0} | audit_duration_ms=${auditDurationMs}ms`);
-          } catch (statusError) {
-            console.error(`[CHAINING_ERROR:${requestId}] Project status update failed | jobType=${jobType} | reason="${statusError.message}"`);
-            // Don't fail the chaining - project status updates are best-effort
-          }
-          break;
-      }
-    } catch (statusError) {
-      console.error(`[CHAINING_ERROR:${requestId}] Project status update failed | jobType=${jobType} | reason="${statusError.message}"`);
-      // Don't fail the chaining - project status updates are best-effort
-    }
-  }
 
   // ---------------------------------------------------------------------------
   // Hooks

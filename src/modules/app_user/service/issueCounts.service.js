@@ -24,19 +24,31 @@ export class IssueCountsService {
       
       LoggerUtil.info('Issue Counts API called', { projectId });
       
-      // Single aggregation query - optimized with proper indexing
+      // Two-stage aggregation — matches the deduplication used by On-Page, Accessibility,
+      // and the Python worker. Stage 1 collapses per-element duplicates (multiple raw
+      // docs with same issue_code+page_url) before counting so totalIssues equals
+      // project.total_issues.
       const result = await db.collection('seo_page_issues')
         .aggregate([
-          { 
-            $match: { projectId: projectIdObj } 
+          {
+            $match: { projectId: projectIdObj }
           },
+          // Stage 1 — deduplicate by (issue_code, page_url)
+          {
+            $group: {
+              _id: { issue_code: '$issue_code', page_url: '$page_url' },
+              severity: { $first: '$severity' },
+              status: { $first: '$status' },
+            }
+          },
+          // Stage 2 — count deduplicated issue-page pairs by severity
           {
             $group: {
               _id: null,
               totalIssues: { $sum: 1 },
               critical: {
                 $sum: {
-                  $cond: [{ $eq: ['$severity', 'high'] }, 1, 0]
+                  $cond: [{ $in: ['$severity', ['high', 'critical']] }, 1, 0]
                 }
               },
               warnings: {
@@ -46,20 +58,12 @@ export class IssueCountsService {
               },
               informational: {
                 $sum: {
-                  $cond: [
-                    { $in: ['$severity', ['low', 'info']] },
-                    1,
-                    0
-                  ]
+                  $cond: [{ $in: ['$severity', ['low', 'info']] }, 1, 0]
                 }
               },
               passed: {
                 $sum: {
-                  $cond: [
-                    { $in: ['$severity', ['low', 'info']] },
-                    1,
-                    0
-                  ]
+                  $cond: [{ $eq: ['$status', 'fixed'] }, 1, 0]
                 }
               }
             }

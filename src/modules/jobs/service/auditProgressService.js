@@ -27,9 +27,10 @@ class AuditProgressService {
       lastUpdated: new Date()
     });
 
-    // Emit to job-specific room
+    // Emit to job-specific room (include projectId if available for frontend filtering)
     io.to(`audit-${jobId}`).emit('audit:progress', {
       jobId,
+      projectId: progressData.projectId || null,
       ...progressData,
       timestamp: new Date()
     });
@@ -52,6 +53,7 @@ class AuditProgressService {
       percentage: 0,
       message: 'Your website crawling has been started',
       subtext: 'Initializing audit process',
+      projectId: jobData.projectId || jobData.project_id || null,
       jobData
     };
 
@@ -60,6 +62,7 @@ class AuditProgressService {
     // Also emit general started event
     io.to(`audit-${jobId}`).emit('audit:started', {
       jobId,
+      projectId: jobData.projectId || jobData.project_id || null,
       ...progressData,
       timestamp: new Date()
     });
@@ -135,6 +138,7 @@ class AuditProgressService {
       percentage: 0,
       message: 'An error occurred during the audit',
       subtext: error.message || 'Unknown error occurred',
+      projectId: error.projectId || error.project_id || null,
       error: {
         message: error.message,
         stack: error.stack
@@ -146,6 +150,7 @@ class AuditProgressService {
     // Also emit general error event
     io.to(`audit-${jobId}`).emit('audit:error', {
       jobId,
+      projectId: error.projectId || error.project_id || null,
       ...progressData,
       timestamp: new Date()
     });
@@ -170,6 +175,7 @@ class AuditProgressService {
       from: stageData.from,
       to: stageData.to,
       newJobId: stageData.newJobId,
+      projectId: stageData.projectId || stageData.project_id || null,
       timestamp: new Date()
     });
 

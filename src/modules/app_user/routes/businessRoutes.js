@@ -2,7 +2,8 @@ import express from 'express';
 import { 
   searchBusiness, 
   getBusinessDetails, 
-  healthCheck 
+  healthCheck,
+  extractFromWebsite
 } from '../controller/businessController.js';
 
 const router = express.Router();
@@ -13,6 +14,13 @@ const router = express.Router();
  * Body: { businessName: string, businessLocation: string }
  */
 router.post('/business/search', searchBusiness);
+
+/**
+ * POST /api/app_user/business/extract-from-website
+ * Extract business data from a website URL (manual fallback flow)
+ * Body: { url: string }
+ */
+router.post('/business/extract-from-website', extractFromWebsite);
 
 /**
  * GET /api/app_user/business/details/:placeId

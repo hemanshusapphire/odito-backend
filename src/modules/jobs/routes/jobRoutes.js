@@ -5,6 +5,7 @@ import { JobService } from '../service/jobService.js';
 import auditProgressService from '../service/auditProgressService.js';
 import DomainTechnicalReport from '../model/DomainTechnicalReport.js';
 import { AIGeneratedVideoService } from '../../video/services/aiGeneratedVideo.service.js';
+import HomepageAuditVideoService from '../../external/service/homepageAuditVideo.service.js';
 
 const router = express.Router();
 const jobService = new JobService();
@@ -106,6 +107,23 @@ router.post('/update-status', async (req, res) => {
         percentage: progressValue || 50,
         message: `${stepValue || 'Video generation'} in progress...`
       });
+
+      // Update HomepageAudit video status to PROCESSING
+      if (updatedJob.jobType === 'HOMEPAGE_VIDEO_GENERATION') {
+        console.log(`[VIDEO_ROUTES] 🎬 HOMEPAGE VIDEO PROCESSING DETECTED | jobId=${jobId}`);
+        try {
+          const auditId = updatedJob.input_data?.auditId;
+          if (auditId) {
+            const HomepageAudit = (await import('../../external/model/HomepageAudit.js')).default;
+            await HomepageAudit.findByIdAndUpdate(auditId, {
+              'video.status': 'PROCESSING'
+            });
+            console.log(`[VIDEO_ROUTES] ✅ Updated HomepageAudit video status to PROCESSING | auditId=${auditId}`);
+          }
+        } catch (hpError) {
+          console.error(`[VIDEO_ROUTES] ❌ Failed to update homepage video status to PROCESSING | jobId=${jobId}:`, hpError);
+        }
+      }
     }
 
     // Emit completion if job is completed
@@ -147,6 +165,22 @@ router.post('/update-status', async (req, res) => {
           // Don't fail the status update, just log the error
         }
       }
+
+      // Homepage Audit video completion — write result back into HomepageAudit.video
+      if (updatedJob.jobType === 'HOMEPAGE_VIDEO_GENERATION') {
+        console.log(`[VIDEO_ROUTES] 🎬 HOMEPAGE VIDEO COMPLETION DETECTED | jobId=${jobId}`);
+        try {
+          const auditId = updatedJob.input_data?.auditId;
+          await HomepageAuditVideoService.finalize(
+            jobId,
+            auditId,
+            { videoUrl: otherUpdateData.result_data?.videoUrl || null },
+            !!otherUpdateData.result_data?.videoUrl
+          );
+        } catch (hpError) {
+          console.error(`[VIDEO_ROUTES] ❌ Failed to finalize homepage video | jobId=${jobId}:`, hpError);
+        }
+      }
     }
 
     // Emit failure if job is failed
@@ -186,6 +220,17 @@ router.post('/update-status', async (req, res) => {
         } catch (videoError) {
           console.error(`[VIDEO_ROUTES] ❌ Failed to update video document to FAILED | jobId=${jobId}:`, videoError);
           // Don't fail the status update, just log the error
+        }
+      }
+
+      // Homepage Audit video failure — mark HomepageAudit.video as FAILED
+      if (updatedJob.jobType === 'HOMEPAGE_VIDEO_GENERATION') {
+        console.log(`[VIDEO_ROUTES] ❌ HOMEPAGE VIDEO FAILURE DETECTED | jobId=${jobId}`);
+        try {
+          const auditId = updatedJob.input_data?.auditId;
+          await HomepageAuditVideoService.finalize(jobId, auditId, null, false);
+        } catch (hpError) {
+          console.error(`[VIDEO_ROUTES] ❌ Failed to mark homepage video FAILED | jobId=${jobId}:`, hpError);
         }
       }
     }
@@ -367,7 +412,7 @@ router.post('/:jobId/summary', async (req, res) => {
 // POST /jobs/domain-technical-report - Store domain technical report data
 router.post('/domain-technical-report', async (req, res) => {
   try {
-    const { projectId, domain, robotsStatus, robotsExists, robotsContent, sitemapStatus, sitemapExists, sitemapContent, parsedSitemapUrlCount, llmsTxt, sslValid, sslExpiryDate, sslDaysRemaining, httpsRedirect, redirectChain, finalUrl } = req.body;
+    const { projectId, domain, robotsStatus, robotsExists, robotsContent, sitemapStatus, sitemapExists, sitemapContent, parsedSitemapUrlCount, llmsTxt, aiCrawlerSignals, sslValid, sslExpiryDate, sslDaysRemaining, httpsRedirect, redirectChain, finalUrl, frameworkType } = req.body;
 
     if (!projectId || !domain) {
       return res.status(400).json({
@@ -390,18 +435,20 @@ router.post('/domain-technical-report', async (req, res) => {
         sitemapContent: sitemapContent || '',
         parsedSitemapUrlCount: parsedSitemapUrlCount || 0,
         llmsTxt: llmsTxt || {},
+        aiCrawlerSignals: aiCrawlerSignals || {},
         sslValid: sslValid || false,
         sslExpiryDate: sslExpiryDate || null,
         sslDaysRemaining: sslDaysRemaining || null,
         httpsRedirect: httpsRedirect || false,
         redirectChain: redirectChain || [],
         finalUrl: finalUrl || null,
+        frameworkType: frameworkType || null,
         createdAt: new Date()
       },
       { upsert: true, new: true }
     );
 
-    console.log(`[API] Domain technical report stored | projectId=${projectId} | domain=${domain} | robotsExists=${robotsExists} | sitemapExists=${sitemapExists} | sslValid=${sslValid} | httpsRedirect=${httpsRedirect}`);
+    console.log(`[API] Domain technical report stored | projectId=${projectId} | domain=${domain} | robotsExists=${robotsExists} | sitemapExists=${sitemapExists} | sslValid=${sslValid} | httpsRedirect=${httpsRedirect} | framework=${frameworkType?.name || 'unknown'}`);
 
     return res.json({
       success: true,
@@ -499,18 +546,27 @@ router.post('/headless-accessibility-report', async (req, res) => {
 router.post('/:jobId/progress', async (req, res) => {
   try {
     const { jobId } = req.params;
-    const { percentage, step, message, subtext } = req.body;
+    const { percentage, step, message, subtext, projectId } = req.body;
 
     console.log(`📊 Progress update for job ${jobId}:`, { percentage, step, message });
 
-    // Validate job exists
-    const job = await jobService.getJobById(jobId);
-    if (!job) {
-      console.log(`❌ Job not found for progress update: ${jobId}`);
-      return res.status(404).json({
-        success: false,
-        message: 'Job not found'
-      });
+    // PERF: progress updates are pure websocket events — no persistence.
+    // The Python worker now sends projectId in the payload so we can emit
+    // without a per-update getJobById() database read (eliminating read
+    // amplification across the ~25 progress ticks per discovery run).
+    // Fall back to a lightweight lookup only when projectId is absent
+    // (backward compatibility with older workers).
+    let resolvedProjectId = projectId || null;
+    if (!resolvedProjectId) {
+      const job = await jobService.getJobById(jobId);
+      if (!job) {
+        console.log(`❌ Job not found for progress update: ${jobId}`);
+        return res.status(404).json({
+          success: false,
+          message: 'Job not found'
+        });
+      }
+      resolvedProjectId = job.project_id?.toString();
     }
 
     // Emit real-time progress update to frontend
@@ -519,7 +575,8 @@ router.post('/:jobId/progress', async (req, res) => {
       step: step || auditProgressService.mapStatusToStep('processing', percentage).step,
       percentage: Math.max(0, Math.min(100, percentage || 0)),
       message: message || `Processing... ${percentage || 0}%`,
-      subtext: subtext || auditProgressService.getStepSubtext(step)
+      subtext: subtext || auditProgressService.getStepSubtext(step),
+      projectId: resolvedProjectId
     });
 
     res.json({

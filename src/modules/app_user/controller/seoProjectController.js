@@ -8,6 +8,7 @@ import { ProjectPerformanceService } from '../service/projectPerformance.service
 import { IssueCountsService } from '../service/issueCounts.service.js';
 import { TechnicalChecksService } from '../service/technicalChecks.service.js';
 import mongoose from 'mongoose';
+import User from '../../user/model/User.js';
 
 // Create a new SEO project
 const createSeoProject = async (req, res) => {
@@ -18,11 +19,18 @@ const createSeoProject = async (req, res) => {
     business_type,
     industry,
     location,
-    country = 'US', 
-    language = 'en', 
+    country = null,
+    language = 'en',
     description,
     scrape_frequency = 'manual',
-    status = 'draft'
+    status = 'draft',
+    // Website Manual Fallback fields
+    onboarding_mode,
+    discovery_source,
+    extracted_metadata,
+    verified_business,
+    source,
+    seo_scope
   } = req.body;
 
   LoggerUtil.info('Create project request received', { userId: req.user?._id });
@@ -65,6 +73,18 @@ const createSeoProject = async (req, res) => {
       });
     }
 
+    // Reject if user has no credits remaining
+    const userDoc = await User.findById(req.user._id).select('credits').lean();
+    const monthly   = userDoc?.credits?.monthly   || 0;
+    const permanent = userDoc?.credits?.permanent || (typeof userDoc?.credits === 'number' ? userDoc.credits : 0);
+    if (monthly + permanent < 1) {
+      return res.status(403).json({
+        success: false,
+        code: 'INSUFFICIENT_CREDITS',
+        message: 'No credits remaining. Upgrade your plan to create a new project.'
+      });
+    }
+
     // CRITICAL LOG: Capture keywords before saving to DB
     const processedKeywords = keywords.map(k => k.trim()).filter(k => k.length >= 2);
 
@@ -77,16 +97,43 @@ const createSeoProject = async (req, res) => {
       business_type: business_type?.trim() || null,
       industry: industry?.trim() || null,
       location: location?.trim() || null,
-      country: country.toUpperCase(),
+      country: country?.toUpperCase() || null,
       language: language.toLowerCase(),
       description: description?.trim() || '',
       scrape_frequency: scrape_frequency || 'manual',
-      status: status || 'draft'
+      status: status || 'draft',
+      // Website Manual Fallback fields (optional, backward-compatible)
+      ...(onboarding_mode && { onboarding_mode }),
+      ...(discovery_source && { discovery_source }),
+      ...(extracted_metadata && { extracted_metadata }),
+      ...(verified_business && { verified_business }),
+      ...(source && { source }),
+      ...(seo_scope && { seo_scope })
     });
 
     const savedProject = await seoProject.save();
 
-    
+    // Link most recent Homepage Audit for this URL (non-blocking)
+    try {
+      const [{ default: HomepageAudit }, { normalizeUrl }] = await Promise.all([
+        import('../../external/model/HomepageAudit.js'),
+        import('../../../utils/normalizeUrl.js')
+      ]);
+      const normalizedUrl = normalizeUrl(savedProject.main_url);
+
+      const preAudit = await HomepageAudit.findOne({ url: normalizedUrl })
+        .sort({ created_at: -1 })
+        .lean();
+
+      if (preAudit) {
+        await SeoProject.findByIdAndUpdate(savedProject._id, { pre_audit_id: preAudit._id });
+        savedProject.pre_audit_id = preAudit._id;
+        LoggerUtil.info('Pre-audit linked to project', { projectId: savedProject._id, auditId: preAudit._id });
+      }
+    } catch (linkError) {
+      LoggerUtil.error('Failed to link pre-audit to project', linkError, { projectId: savedProject._id });
+    }
+
     res.status(201).json({
       success: true,
       message: 'SEO Project created successfully',
@@ -227,7 +274,8 @@ const getAllSeoProjects = async (req, res) => {
           project_age_days: 1,
           days_since_last_scrape: 1,
           created_at: 1,
-          updated_at: 1
+          updated_at: 1,
+          pre_audit_id: 1
         }
       },
       { $skip: skip },

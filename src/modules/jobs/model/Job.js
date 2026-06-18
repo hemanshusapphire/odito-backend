@@ -4,28 +4,30 @@ const jobSchema = new mongoose.Schema({
   jobType: {
     type: String,
     required: true,
-    enum: ['KEYWORD_RESEARCH', 'LINK_DISCOVERY', 'DOMAIN_PERFORMANCE', 'TECHNICAL_DOMAIN', 'PAGE_SCRAPING', 'CRAWL_GRAPH', 'PAGE_ANALYSIS', 'PERFORMANCE_MOBILE', 'PERFORMANCE_DESKTOP', 'HEADLESS_ACCESSIBILITY', 'SEO_SCORING', 'AI_VISIBILITY', 'AI_VISIBILITY_SCORING', 'VIDEO_GENERATION']
+    enum: ['KEYWORD_RESEARCH', 'LINK_DISCOVERY', 'DOMAIN_PERFORMANCE', 'TECHNICAL_DOMAIN', 'URL_QUALIFICATION', 'PAGE_SCRAPING', 'CRAWL_GRAPH', 'PAGE_ANALYSIS', 'PERFORMANCE_MOBILE', 'PERFORMANCE_DESKTOP', 'HEADLESS_ACCESSIBILITY', 'SEO_SCORING', 'AI_VISIBILITY', 'AI_VISIBILITY_SCORING', 'VIDEO_GENERATION', 'HOMEPAGE_VIDEO_GENERATION']
   },
+  // project_id / entityId are required for all project-scoped jobs.
+  // They are optional ONLY for non-project jobs like HOMEPAGE_VIDEO_GENERATION,
+  // which reference a HomepageAudit via input_data.auditId instead.
   project_id: {
     type: mongoose.Schema.Types.ObjectId,
-    required: true,
+    required: false,
     ref: 'SeoProject'
   },
   entityType: {
     type: String,
     required: true,
-    enum: ['project'],
+    enum: ['project', 'homepage_audit'],
     default: 'project'
   },
   entityId: {
     type: mongoose.Schema.Types.ObjectId,
-    required: true,
-    ref: 'SeoProject'
+    required: false
   },
   user_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true
+    required: false
   },
   input_data: {
     type: mongoose.Schema.Types.Mixed,

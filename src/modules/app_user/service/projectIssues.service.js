@@ -95,39 +95,26 @@ export class ProjectIssuesService {
       throw new ValidationError('page_url parameter is required');
     }
 
-    // Get page score from seo_page_scores collection
-    const pageScore = await db.collection('seo_page_scores')
-      .findOne({
-        projectId: projectIdObj,
-        page_url: decodedPageUrl
-      });
+    // Run all three queries in parallel — eliminates sequential round-trip latency
+    const [pageScore, pageData, pageIssues] = await Promise.all([
+      db.collection('seo_page_scores').findOne(
+        { projectId: projectIdObj, page_url: decodedPageUrl }
+      ),
+      // Projection excludes raw_html — only fields used in the response below
+      db.collection('seo_page_data').findOne(
+        { projectId: projectIdObj, url: decodedPageUrl },
+        { projection: { title: 1, meta_tags: 1, http_status_code: 1, content: 1, _id: 0 } }
+      ),
+      db.collection('seo_page_issues')
+        .find({ projectId: projectIdObj, page_url: decodedPageUrl })
+        .sort({ severity: -1, created_at: -1 })
+        .toArray()
+    ]);
+
+    const pageScreenshot = null; // Screenshots disabled for performance
 
     const pageScoreValue = pageScore ? pageScore.page_score : 0;
     LoggerUtil.debug('Page score found', { page_url: decodedPageUrl, score: pageScoreValue });
-
-    // Get page data from seo_page_data collection
-    const pageData = await db.collection('seo_page_data')
-      .findOne({
-        projectId: projectIdObj,
-        url: decodedPageUrl
-      });
-
-    // Get screenshot from seo_first_snapshot collection - DISABLED
-    const pageScreenshot = null; // Screenshots disabled for performance
-    // const pageScreenshot = await db.collection('seo_first_snapshot')
-    //   .findOne({
-    //     projectId: projectIdObj,
-    //     pageUrl: decodedPageUrl
-    //   });
-
-    // Get all issues for this specific page
-    const pageIssues = await db.collection('seo_page_issues')
-      .find({
-        projectId: projectIdObj,
-        page_url: decodedPageUrl
-      })
-      .sort({ severity: -1, created_at: -1 })
-      .toArray();
 
     LoggerUtil.debug('Found page issues', { 
       page_url: decodedPageUrl, 
@@ -161,7 +148,7 @@ export class ProjectIssuesService {
         } : null,
         page_data: pageData ? {
           title: pageData.title,
-          description: pageData.description,
+          meta_description: pageData.meta_tags?.description?.[0] || null,
           http_status_code: pageData.http_status_code,
           word_count: pageData.content?.word_count,
           headings: pageData.content?.headings,

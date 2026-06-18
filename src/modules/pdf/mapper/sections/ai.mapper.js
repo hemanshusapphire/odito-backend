@@ -33,11 +33,12 @@ export class AIMapper {
    * Transform AI visibility overview
    */
   static transformVisibility(aiMetrics, scores, grades) {
+    const categoryAverages = aiMetrics?.visibility?.summary?.categoryAverages || {};
     return {
       scores: {
         aiReadiness: scores.aiVisibility,
-        geoScore: Math.round(scores.aiVisibility * 0.9), // Slightly lower for GEO
-        aeoScore: Math.round(scores.aiVisibility * 0.85), // Lower for AEO
+        geoScore: Math.round(categoryAverages.geo_score ?? scores.aiVisibility),
+        aeoScore: Math.round(categoryAverages.aeo_score ?? scores.aiVisibility),
         aiseoScore: scores.aiVisibility
       },
       concepts: this.getAIConcepts(),
@@ -52,12 +53,12 @@ export class AIMapper {
     return {
       stats: {
         citationRate: this.calculateCitationRate(aiMetrics),
-        industryAverage: 43, // Industry benchmark
+        industryAverage: 43,
         gapToClose: this.calculateCitationGap(aiMetrics),
         platforms: 4
       },
       platforms: this.getPlatformData(aiMetrics),
-      signals: this.getCitationSignals()
+      signals: this.getCitationSignals(aiMetrics)
     };
   }
 
@@ -103,19 +104,23 @@ export class AIMapper {
   }
 
   /**
-   * Get schema types distribution
+   * Get schema types distribution from real aggregated data
    */
   static getSchemaTypes(ai) {
-    const types = [
-      { type: 'Article', count: 48, needed: 0 },
-      { type: 'WebPage', count: 31, needed: 0 },
-      { type: 'Organization', count: 1, needed: 1 },
-      { type: 'FAQPage', count: 0, needed: 31 },
-      { type: 'Product', count: 0, needed: 15 },
-      { type: 'Service', count: 0, needed: 12 }
-    ];
-    
-    return types;
+    const aggregates = ai?.visibility?.aggregates || {};
+    const totalPages = aggregates.totalPages || 0;
+    const pagesWithSchema = aggregates.pagesWithSchema || 0;
+    const missingSchema = Math.max(0, totalPages - pagesWithSchema);
+
+    const byRule = ai?.issues?.byRule || [];
+    const faqRule = byRule.find(r => r.ruleId === 'faq_schema_present');
+    const orgRule = byRule.find(r => r.ruleId === 'primary_organization_schema');
+
+    return [
+      { type: 'WebPage / Article', count: pagesWithSchema, needed: missingSchema },
+      { type: 'Organization', count: orgRule ? (totalPages - orgRule.pagesAffected) : null, needed: orgRule?.pagesAffected ?? null },
+      { type: 'FAQPage', count: null, needed: faqRule?.pagesAffected ?? null }
+    ].filter(t => t.count !== null || t.needed !== null);
   }
 
   /**
@@ -222,29 +227,46 @@ export class AIMapper {
   }
 
   /**
-   * Get platform citation data
+   * Get platform accessibility scores from real ai_accessibility signals
    */
   static getPlatformData(aiMetrics) {
-    const baseRate = this.calculateCitationRate(aiMetrics);
-    
+    const categoryAverages = aiMetrics?.visibility?.summary?.categoryAverages || {};
+    const accessibility = categoryAverages.ai_accessibility ?? null;
+
+    const INDUSTRY_BENCHMARK = 43;
+    const gap = (pct) => pct !== null ? `${Math.max(0, INDUSTRY_BENCHMARK - pct)}% gap` : 'N/A';
+
     return [
-      { name: 'ChatGPT', pct: Math.round(baseRate * 1.2), gap: '25% gap' },
-      { name: 'Perplexity', pct: Math.round(baseRate * 0.8), gap: '31% gap' },
-      { name: 'Gemini', pct: Math.round(baseRate * 1.5), gap: '19% gap' },
-      { name: 'Claude', pct: Math.round(baseRate * 0.6), gap: '35% gap' }
+      { name: 'GPTBot (OpenAI)', pct: accessibility, gap: gap(accessibility) },
+      { name: 'ClaudeBot (Anthropic)', pct: accessibility, gap: gap(accessibility) },
+      { name: 'Perplexity', pct: accessibility, gap: gap(accessibility) },
+      { name: 'Google-Extended (Gemini)', pct: accessibility, gap: gap(accessibility) }
     ];
   }
 
   /**
-   * Get citation signals analysis
+   * Get citation signals derived from real category and aggregation data
    */
-  static getCitationSignals() {
+  static getCitationSignals(ai) {
+    const aggregates = ai?.visibility?.aggregates || {};
+    const categoryAverages = ai?.visibility?.summary?.categoryAverages || {};
+    const totalPages = aggregates.totalPages || 1;
+    const pagesWithSchema = aggregates.pagesWithSchema || 0;
+    const schemaPct = Math.round((pagesWithSchema / totalPages) * 100);
+
+    const topicalAuthority = categoryAverages.topical_authority ?? null;
+    const voiceIntent = categoryAverages.voice_intent ?? null;
+    const citationProbability = categoryAverages.citation_probability ?? null;
+
+    const totalEntities = ai?.entities?.summary?.totalEntities || 0;
+    const kgStatus = totalEntities >= 10 ? 'Established' : totalEntities >= 5 ? 'Partial' : 'Not established';
+
     return [
-      ['Structured Data', '34% coverage', '+15-20%', 'Add JSON-LD to all pages'],
-      ['Knowledge Graph', 'Not Claimed', '+8-12%', 'Claim via Google GBP'],
-      ['FAQ Schema', '0% coverage', '+6-10%', 'Add FAQPage JSON-LD'],
-      ['Topical Authority', 'Partial', '+4-8%', 'Create entity hub pages'],
-      ['Conversational Content', '31% score', '+3-5%', 'Rewrite intros for GEO']
+      ['Structured Data', `${schemaPct}% coverage`, '+15-20%', 'Add JSON-LD to all pages'],
+      ['Knowledge Graph', kgStatus, '+8-12%', 'Expand entity coverage'],
+      ['Topical Authority', topicalAuthority !== null ? `${Math.round(topicalAuthority)}/100` : 'N/A', '+4-8%', 'Create entity hub pages'],
+      ['Citation Probability', citationProbability !== null ? `${Math.round(citationProbability)}/100` : 'N/A', '+6-10%', 'Improve authorship signals'],
+      ['Conversational Score', voiceIntent !== null ? `${Math.round(voiceIntent)}/100` : 'N/A', '+3-5%', 'Structure content for voice/AEO']
     ];
   }
 

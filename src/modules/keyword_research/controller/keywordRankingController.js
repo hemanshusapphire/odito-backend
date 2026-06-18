@@ -171,15 +171,22 @@ class KeywordRankingController {
    */
   async testRanking(req, res) {
     try {
-      const { domain = "wowinfotech.com", keywords = ["best software company in nashik", "best it company in nashik"] } = req.body;
+      const { domain, keywords, locationCode = 2840, language = 'en' } = req.body;
 
-      console.log(`[KEYWORD_RANKING_CONTROLLER] Test ranking | domain="${domain}" | keywords=${keywords.length}`);
+      if (!domain || !Array.isArray(keywords) || keywords.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'domain and keywords array are required for test ranking'
+        });
+      }
+
+      console.log(`[KEYWORD_RANKING_CONTROLLER] Test ranking | domain="${domain}" | keywords=${keywords.length} | locationCode=${locationCode}`);
 
       const result = await this.keywordRankingService.callRankingWorker({
         domain,
         keywords,
-        location: 'India',
-        language: 'en'
+        locationCode,
+        language
       });
 
       res.json({

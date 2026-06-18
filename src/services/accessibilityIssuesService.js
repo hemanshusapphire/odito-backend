@@ -20,15 +20,7 @@ export async function getAccessibilityIssues(projectId) {
     .collection('seo_page_summary')
     .countDocuments({ projectId: projectIdObj });
 
-  // 2. Total individual issue documents (for summary)
-  const totalIssuesFound = await db
-    .collection('seo_page_issues')
-    .countDocuments({ 
-      projectId: projectIdObj,
-      category: 'Accessibility'
-    });
-
-  // 3. Two-stage aggregation for accessibility issues only
+  // 2. Two-stage aggregation for accessibility issues only
   const rawIssues = await db
     .collection('seo_page_issues')
     .aggregate([
@@ -82,6 +74,12 @@ export async function getAccessibilityIssues(projectId) {
       { $sort: { pages_affected: -1 } },
     ])
     .toArray();
+
+  // 3. Derive total from aggregation — sum of pages_affected equals
+  // the count of distinct (issue_code, page_url) pairs, which matches
+  // the table display. Raw countDocuments was higher because per-element
+  // rules (alt text, contrast) generate multiple docs per page.
+  const totalIssuesFound = rawIssues.reduce((sum, issue) => sum + (issue.pages_affected || 0), 0);
 
   // 4. Enrich each issue with difficulty and impact
   const issues = rawIssues.map((issue) => {

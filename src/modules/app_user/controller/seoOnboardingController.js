@@ -1,33 +1,18 @@
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
-import { 
-  getBestLocationCode, 
-  getLocationCodeFromGooglePlaces,
-  getCacheStatus 
+import {
+  getBestLocationCode,
+  extractCountryCode,
+  COUNTRY_TO_LOCATION_CODE
 } from '../../../services/dataforseoLocationService.js';
 import SeoRanking from '../model/SeoRanking.js';
 import mongoose from 'mongoose';
-import axios from 'axios';
 
-/**
- * Python worker URL — the FastAPI server running onboarding endpoints.
- */
-// Function to get Python worker URL with validation
 const getPythonWorkerUrl = () => {
   const pythonWorkerUrl = process.env.PYTHON_WORKER_URL;
   if (!pythonWorkerUrl) {
     throw new Error('PYTHON_WORKER_URL environment variable is required');
   }
   return pythonWorkerUrl;
-};
-
-/**
- * Country → DataForSEO location code mapping (mirrors Python worker).
- */
-const COUNTRY_TO_LOCATION_CODE = {
-  US: 2840, IN: 2356, UK: 2826, GB: 2826,
-  CA: 2124, AU: 2036, DE: 2315, FR: 2250,
-  ES: 2246, IT: 2240, JP: 2132, BR: 2075,
-  MX: 2239, KR: 2131, RU: 2306,
 };
 
 
@@ -37,7 +22,7 @@ const COUNTRY_TO_LOCATION_CODE = {
 
 export const generateKeywords = async (req, res) => {
   try {
-    const { subType, location, country = 'US', language = 'en' } = req.body;
+    const { subType, location, lat, lng, country = null, language = 'en' } = req.body;
 
     if (!subType || typeof subType !== 'string' || subType.trim().length === 0) {
       return res.status(400).json({
@@ -48,20 +33,20 @@ export const generateKeywords = async (req, res) => {
 
     LoggerUtil.info('Generate keywords request', { subType, location, country });
 
-    // Forward Authorization header to Python worker
     const headers = { 'Content-Type': 'application/json' };
     if (req.headers.authorization) {
       headers.Authorization = req.headers.authorization;
     }
 
-    // Forward to Python worker
     const response = await fetch(`${getPythonWorkerUrl()}/api/onboarding/generate-keywords`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         sub_type: subType.trim(),
         location: location?.trim() || null,
-        country: country.toUpperCase(),
+        lat: typeof lat === 'number' ? lat : null,
+        lng: typeof lng === 'number' ? lng : null,
+        country: country?.toUpperCase() || null,
         language: language.toLowerCase()
       })
     });
@@ -105,7 +90,7 @@ export const generateKeywords = async (req, res) => {
 
 export const checkRanking = async (req, res) => {
   try {
-    const { domain, keywords, location, country = 'US', language = 'en', businessLocation } = req.body;
+    const { domain, keywords, location, country = null, language = 'en', businessLocation, seoScope = null, cityName = null } = req.body;
 
     if (!domain || typeof domain !== 'string') {
       return res.status(400).json({
@@ -121,84 +106,124 @@ export const checkRanking = async (req, res) => {
       });
     }
 
-    // 🚨 STEP 2: LOCATION CODE EXTRACTION & FALLBACK LOGIC
+    // STEP 2: LOCATION CODE EXTRACTION
+    // Normalise location: if it arrived as a plain string, wrap it so the
+    // object checks below don't silently fall through.
+    const locationObj = (location && typeof location === 'object' && location.lat && location.lng)
+      ? location
+      : null;
+
     let locationCode;
     let mappingMethod;
     let finalCountry = country;
 
-    // Helper function: Extract location code from lat/lng with fallback
-    const getLocationCodeFromLatLng = (lat, lng, address) => {
-      
-      // Simple fallback logic for now (can be enhanced with real API later)
-      if (address && address.toLowerCase().includes('india')) {
-        return 2036; // India location code
-      }
-      
-      // Default to US if no specific location detected
-      return 2840; // US location code
-    };
+    console.log('[LOCATION_TRACE] REQUEST', {
+      businessLocation,
+      country,
+      cityName,
+      seoScope
+    });
 
     try {
-      // Priority 1: Business location from Google Places (most accurate)
+      console.log('[LOCATION_TRACE] CONDITION', {
+        result: !!(businessLocation && businessLocation.lat && businessLocation.lng),
+        lat: businessLocation?.lat,
+        lng: businessLocation?.lng
+      });
+
+      // Priority 1: Google Places business location — city-name match via DataForSEO location_name
       if (businessLocation && businessLocation.lat && businessLocation.lng) {
-        locationCode = getLocationCodeFromLatLng(
-          businessLocation.lat, 
-          businessLocation.lng, 
-          businessLocation.address
+        console.log('[LOCATION_TRACE] ENTERING CITY NAME BRANCH');
+        console.log('[LOCATION_TRACE] CALLING getBestLocationCode', {
+          lat: businessLocation.lat,
+          lng: businessLocation.lng,
+          address: businessLocation.address,
+          country,
+          cityName
+        });
+        locationCode = await getBestLocationCode(
+          businessLocation.lat,
+          businessLocation.lng,
+          businessLocation.address,
+          country,
+          cityName  // Google Places locality component — primary city resolver
         );
-        mappingMethod = 'business_location';
-        
-        // Update country based on address
-        if (businessLocation.address && businessLocation.address.toLowerCase().includes('india')) {
-          finalCountry = 'IN';
-        }
+        console.log('[LOCATION_TRACE] RETURNED LOCATION CODE', locationCode);
+        mappingMethod = 'business_location_city_name';
+        finalCountry = extractCountryCode(businessLocation.address) || country;
       }
-      // Priority 2: Provided location object
-      else if (location && location.lat && location.lng) {
-        locationCode = getLocationCodeFromLatLng(
-          location.lat, 
-          location.lng, 
-          location.address
+      // Priority 2: Explicit location object with coordinates
+      else if (locationObj) {
+        locationCode = await getBestLocationCode(
+          locationObj.lat,
+          locationObj.lng,
+          locationObj.address,
+          country,
+          cityName
         );
-        mappingMethod = 'provided_location';
-        
-        // Update country based on address
-        if (location.address && location.address.toLowerCase().includes('india')) {
-          finalCountry = 'IN';
-        }
+        mappingMethod = 'provided_location_city_name';
+        finalCountry = extractCountryCode(locationObj.address) || country;
       }
-      // Priority 3: Country-based fallback
+      // Priority 3: Country-based fallback (National SEO path or no coordinates available)
       else {
-        locationCode = COUNTRY_TO_LOCATION_CODE[country?.toUpperCase()] || 2840;
+        locationCode = COUNTRY_TO_LOCATION_CODE[country?.toUpperCase()] ?? COUNTRY_TO_LOCATION_CODE['US'];
         mappingMethod = 'country_fallback';
         finalCountry = country;
+        console.log('[LOCATION_TRACE] Country-level fallback:', { locationCode, country });
       }
     } catch (error) {
-      console.error("🚨 ERROR IN LOCATION MAPPING, USING SAFE FALLBACK:", error);
-      locationCode = 2840; // Safe fallback to US
+      console.error('[LOCATION_TRACE] Error in location mapping, using country fallback:', error.message);
+      locationCode = COUNTRY_TO_LOCATION_CODE[country?.toUpperCase()] ?? COUNTRY_TO_LOCATION_CODE['US'];
       mappingMethod = 'error_fallback';
-      finalCountry = 'US';
+      finalCountry = country;
     }
 
-    // 🚨 STEP 3: VALIDATE LOCATION CODE IS DEFINED
     if (!locationCode || typeof locationCode !== 'number') {
-      console.error("🚨 CRITICAL: locationCode is still undefined, using emergency fallback");
-      locationCode = 2840; // Emergency fallback
+      // Emergency fallback — still try to use the correct country, not hardcoded US
+      locationCode = COUNTRY_TO_LOCATION_CODE[country?.toUpperCase()] ?? COUNTRY_TO_LOCATION_CODE['US'];
       mappingMethod = 'emergency_fallback';
     }
 
-    LoggerUtil.info('Check ranking request', { domain, keywords, country: finalCountry, locationCode });
+    LoggerUtil.info('Check ranking request', { domain, keywords, country: finalCountry, locationCode, seoScope });
 
-    // CRITICAL LOG: Capture keywords before sending to Python worker
-    const cleanedKeywords = keywords.map(k => k.trim());
+    // ── KEYWORD INTEGRITY ENFORCEMENT ──────────────────────────────────────
+    // Keywords MUST remain exactly as the user entered them.
+    // Location targeting uses DataForSEO's location_code parameter (resolved above via Haversine).
+    // DO NOT append city/location to keywords — DataForSEO handles geo-targeting via location_code.
+    const cleanedKeywords = keywords.map(k => k.trim()).filter(k => k.length > 0);
+
+    // Regression guard: detect if any keyword was accidentally mutated
+    for (let i = 0; i < cleanedKeywords.length; i++) {
+      if (cleanedKeywords[i] !== keywords[i]?.trim()) {
+        LoggerUtil.error('[KEYWORD_INTEGRITY] Keyword mismatch detected after cleaning', {
+          index: i,
+          original: keywords[i],
+          cleaned: cleanedKeywords[i]
+        });
+      }
+    }
+
+    // DATASEO PAYLOAD LOG — shows exactly what is sent to the SERP API
+    console.log('[DATASEO_PAYLOAD] Pre-request payload:', JSON.stringify({
+      domain: domain.trim(),
+      keywords: cleanedKeywords,
+      location_code: locationCode,
+      country: finalCountry,
+      language_code: language?.toLowerCase() || 'en',
+      seo_scope: seoScope,
+      keywords_preserved: true,
+      mapping_method: mappingMethod
+    }, null, 2));
 
     // Forward to Python worker
     const pythonPayload = {
       domain: domain.trim(),
       keywords: cleanedKeywords,
-      location_code: locationCode, // ✅ ALWAYS DEFINED NOW
+      location_code: locationCode,
       language_code: language?.toLowerCase() || 'en'
     };
+
+    console.log('[LOCATION_TRACE] PYTHON PAYLOAD', pythonPayload);
 
     // Forward Authorization header to Python worker
     const headers = { 'Content-Type': 'application/json' };
@@ -252,7 +277,9 @@ export const checkRanking = async (req, res) => {
       const finalResponse = {
         success: true,
         data: {
-          results: responseData.results || []
+          results: responseData.results || [],
+          location_code: locationCode,
+          mapping_method: mappingMethod
         }
       };
 
@@ -287,7 +314,7 @@ export const checkRanking = async (req, res) => {
 
 export const saveRanking = async (req, res) => {
   try {
-    const { projectId, domain, location, keywords } = req.body;
+    const { projectId, domain, location, keywords, locationCode, country, language, seoScope } = req.body;
 
     if (!projectId) {
       return res.status(400).json({
@@ -320,15 +347,36 @@ export const saveRanking = async (req, res) => {
 
     LoggerUtil.info('Save ranking request', { projectId, domain, keywordsCount: keywords.length });
 
+    console.log('[LOCATION_TRACE] SAVING LOCATION CODE', locationCode);
+
     const ranking = new SeoRanking({
       project_id: projectId,
       user_id: userId,
       domain: domain?.trim()?.toLowerCase() || '',
       location: location?.trim() || null,
-      keywords: keywords.map(kw => ({
-        keyword: kw.keyword?.trim() || '',
-        rank: kw.rank != null ? parseInt(kw.rank, 10) : null
-      }))
+      location_code: typeof locationCode === 'number' ? locationCode : null,
+      country: country?.toUpperCase() || null,
+      language: language?.toLowerCase() || 'en',
+      seo_scope: seoScope || null,
+      keywords: keywords.map(kw => {
+        const bestRank = kw.best_rank != null ? parseInt(kw.best_rank, 10)
+          : kw.rank != null ? parseInt(kw.rank, 10)
+            : null;
+        return {
+          keyword: kw.keyword?.trim() || '',
+          rank: bestRank,       // backward compat — always equals best_rank
+          best_rank: bestRank,
+          ranking_urls: Array.isArray(kw.ranking_urls)
+            ? kw.ranking_urls
+              .filter(u => u.rank != null && u.url)
+              .map(u => ({
+                rank: parseInt(u.rank, 10),
+                url: u.url.trim(),
+                type: u.type === 'homepage' ? 'homepage' : 'internal_page'
+              }))
+            : []
+        };
+      })
     });
 
     const saved = await ranking.save();
@@ -390,9 +438,9 @@ export const getProjectRankings = async (req, res) => {
       .limit(10)
       .lean();
 
-    LoggerUtil.info('Rankings retrieved successfully', { 
-      projectId, 
-      rankingsCount: rankings.length 
+    LoggerUtil.info('Rankings retrieved successfully', {
+      projectId,
+      rankingsCount: rankings.length
     });
 
     return res.status(200).json({

@@ -7,6 +7,12 @@
 
 import { callPythonWorker } from '../../../services/pythonWorkerService.js';
 import SeoRanking from '../../app_user/model/SeoRanking.js';
+import SeoProject from '../../app_user/model/SeoProject.js';
+import {
+  getBestLocationCode,
+  extractCountryCode,
+  COUNTRY_TO_LOCATION_CODE
+} from '../../../services/dataforseoLocationService.js';
 
 class KeywordRankingService {
   /**
@@ -14,15 +20,39 @@ class KeywordRankingService {
    * @param {Object} params - { userId, projectId, domain, keywords, location, language }
    * @returns {Object} Created ranking document
    */
-  async checkKeywordRankings({ userId, projectId, domain, keywords, location = 'India', language = 'en' }) {
+  async checkKeywordRankings({ userId, projectId, domain, keywords, language = 'en' }) {
     try {
-      console.log(`[KEYWORD_RANKING] Starting ranking check | projectId=${projectId} | domain="${domain}" | keywords=${keywords.length} | location="${location}"`);
+      // Resolve location_code from the project's stored geo data
+      let locationCode = 2840;
+      let resolvedCountry = 'US';
 
-      // Call Python worker to get rankings
+      if (projectId) {
+        try {
+          const project = await SeoProject.findById(projectId)
+            .select('country verified_business location')
+            .lean();
+
+          if (project) {
+            const vb = project.verified_business;
+            if (vb?.location?.lat && vb?.location?.lng) {
+              locationCode = await getBestLocationCode(vb.location.lat, vb.location.lng, vb.address);
+              resolvedCountry = extractCountryCode(vb.address) || project.country || 'US';
+            } else {
+              locationCode = COUNTRY_TO_LOCATION_CODE[project.country?.toUpperCase()] || 2840;
+              resolvedCountry = project.country || 'US';
+            }
+          }
+        } catch (projectErr) {
+          console.error(`[KEYWORD_RANKING] Failed to resolve location from project, using default | reason="${projectErr.message}"`);
+        }
+      }
+
+      console.log(`[KEYWORD_RANKING] Starting ranking check | projectId=${projectId} | domain="${domain}" | keywords=${keywords.length} | locationCode=${locationCode}`);
+
       const rankingResults = await this.callRankingWorker({
         domain,
         keywords,
-        location,
+        locationCode,
         language
       });
 
@@ -31,7 +61,9 @@ class KeywordRankingService {
         userId,
         projectId,
         domain,
-        location,
+        locationCode,
+        country: resolvedCountry,
+        language,
         keywords: rankingResults
       });
 
@@ -50,15 +82,15 @@ class KeywordRankingService {
    * @param {Object} params - { domain, keywords, location, language }
    * @returns {Array} Ranking results
    */
-  async callRankingWorker({ domain, keywords, location, language }) {
+  async callRankingWorker({ domain, keywords, locationCode, language }) {
     try {
       const payload = {
         action: 'check_keyword_rankings',
         data: {
           domain,
           keywords,
-          location,
-          language,
+          location_code: locationCode,
+          language_code: language,
           device: 'desktop',
           depth: 100
         }
@@ -85,9 +117,8 @@ class KeywordRankingService {
    * @param {Object} params - { userId, projectId, domain, location, keywords }
    * @returns {Object} Created ranking document
    */
-  async saveRankingResults({ userId, projectId, domain, location, keywords }) {
+  async saveRankingResults({ userId, projectId, domain, locationCode, country, language, keywords }) {
     try {
-      // Transform results for database
       const keywordData = keywords.map(result => ({
         keyword: result.keyword,
         rank: result.found ? result.rank : null
@@ -97,7 +128,9 @@ class KeywordRankingService {
         project_id: projectId,
         user_id: userId,
         domain: domain.toLowerCase(),
-        location,
+        location_code: locationCode,
+        country: country || 'US',
+        language: language || 'en',
         keywords: keywordData
       });
 

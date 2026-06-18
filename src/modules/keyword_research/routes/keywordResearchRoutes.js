@@ -1,24 +1,13 @@
 import express from 'express';
-import { startResearch, getKeywordIntelligence, getKeywordList, getKeywordDetail, debugKeywordData } from '../controller/keywordResearchController.js';
 import KeywordRankingController from '../controller/keywordRankingController.js';
+import auth from '../../user/middleware/auth.js';
 
 const router = express.Router();
 const rankingController = new KeywordRankingController();
 
-// POST /api/keywords/research - Start keyword research
-router.post('/research', startResearch);
+// 🔒 SECURITY: Apply authentication to all keyword routes
+router.use(auth);
 
-// GET /api/keywords/debug - Debug endpoint
-router.get('/debug', debugKeywordData);
-
-// GET /api/keywords/intelligence - Get summary statistics
-router.get('/intelligence', getKeywordIntelligence);
-
-// GET /api/keywords - Get paginated keyword list
-router.get('/', getKeywordList);
-
-// GET /api/keywords/:keyword - Get keyword details
-router.get('/:keyword', getKeywordDetail);
 
 // ========== Keyword Ranking Routes ==========
 

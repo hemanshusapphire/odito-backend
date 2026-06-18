@@ -7,8 +7,12 @@ import express from 'express';
 import { getVideoData, getPageVideoData, getSlideTemplate } from '../controller/videoData.controller.js';
 import { ScoreOnlyResponseService } from '../../../services/scoreOnlyResponse.service.js';
 import aiGeneratedVideoRoutes from './aiGeneratedVideo.routes.js';
+import auth from '../../user/middleware/auth.js';
 
 const router = express.Router();
+
+// 🔒 SECURITY: Apply authentication to all video data routes
+router.use(auth);
 
 // Apply score-only validation middleware to data routes only
 router.use('/data', ScoreOnlyResponseService.scoreOnlyMiddleware);

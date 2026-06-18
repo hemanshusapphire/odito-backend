@@ -1,5 +1,6 @@
 import { searchBusinesses } from '../../../services/googlePlacesService.js';
 import { rankBusinessResults, hasGoodResults } from '../../../services/businessRankingService.js';
+import { extractBusinessData } from '../../../services/websiteExtractionService.js';
 
 /**
  * Business Controller
@@ -179,8 +180,89 @@ export async function healthCheck(req, res) {
   }
 }
 
+/**
+ * Extract business data from a website URL
+ * Used when Google Places search fails to find the business
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+export async function extractFromWebsite(req, res) {
+  try {
+    const { url } = req.body;
+
+    if (!url || typeof url !== 'string' || !url.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Website URL is required',
+        error: 'MISSING_URL'
+      });
+    }
+
+    const userId = req.user?._id?.toString();
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+
+    console.log('[BUSINESS_CONTROLLER] Website extraction request', {
+      url: url.trim(),
+      userId
+    });
+
+    // Call extraction service (handles validation, rate limiting, caching, scraping)
+    const result = await extractBusinessData(url.trim(), userId);
+
+    if (!result.success) {
+      // Map error codes to HTTP status codes
+      const statusMap = {
+        'INVALID_URL': 400,
+        'RATE_LIMIT_EXCEEDED': 429,
+        'TIMEOUT': 504,
+        'SERVICE_UNAVAILABLE': 503,
+        'BAD_REQUEST': 400
+      };
+      const status = statusMap[result.error] || 500;
+
+      return res.status(status).json({
+        success: false,
+        message: result.message,
+        error: result.error
+      });
+    }
+
+    console.log('[BUSINESS_CONTROLLER] Extraction succeeded', {
+      url: result.source_url,
+      businessName: result.data?.businessName,
+      confidence: result.data?.confidence
+    });
+
+    return res.json({
+      success: true,
+      data: result.data,
+      source_url: result.source_url,
+      extracted_at: result.extracted_at
+    });
+
+  } catch (error) {
+    console.error('[BUSINESS_CONTROLLER] Website extraction failed', {
+      error: error.message,
+      stack: error.stack,
+      url: req.body?.url
+    });
+
+    res.status(500).json({
+      success: false,
+      message: 'Failed to extract business information. Please try again.',
+      error: 'INTERNAL_ERROR'
+    });
+  }
+}
+
 export default {
   searchBusiness,
   getBusinessDetails,
-  healthCheck
+  healthCheck,
+  extractFromWebsite
 };

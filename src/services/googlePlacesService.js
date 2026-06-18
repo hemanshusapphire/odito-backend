@@ -90,14 +90,40 @@ function getPlacesHttpClient() {
   }
   
   return axios.create({
-    baseURL: PLACES_API_URL,
+    baseURL: 'https://places.googleapis.com/v1/',
     headers: {
       'X-Goog-Api-Key': apiKey,
-      'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.websiteUri,places.location,places.internationalPhoneNumber',
       'Content-Type': 'application/json'
     },
     timeout: 30000 // 30 second timeout
   });
+}
+
+/**
+ * Calculate relative time description from a date
+ * @param {Date} date - Date to calculate from
+ * @returns {string} - Relative time description (e.g., "2 months ago")
+ */
+function calculateRelativeTime(date) {
+  if (!date) return 'Recently';
+  
+  const now = new Date();
+  const diffMs = now - date;
+  const diffSecs = Math.floor(diffMs / 1000);
+  const diffMins = Math.floor(diffSecs / 60);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+  const diffWeeks = Math.floor(diffDays / 7);
+  const diffMonths = Math.floor(diffDays / 30);
+  const diffYears = Math.floor(diffDays / 365);
+
+  if (diffSecs < 60) return 'Just now';
+  if (diffMins < 60) return `${diffMins} minute${diffMins === 1 ? '' : 's'} ago`;
+  if (diffHours < 24) return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`;
+  if (diffDays < 7) return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
+  if (diffWeeks < 4) return `${diffWeeks} week${diffWeeks === 1 ? '' : 's'} ago`;
+  if (diffMonths < 12) return `${diffMonths} month${diffMonths === 1 ? '' : 's'} ago`;
+  return `${diffYears} year${diffYears === 1 ? '' : 's'} ago`;
 }
 
 /**
@@ -106,39 +132,41 @@ function getPlacesHttpClient() {
  * @param {string} location - Location (city/area) to search in
  * @returns {Promise<Array>} - Array of normalized business results
  */
-export async function searchBusinesses(businessName, location) {
+export async function searchBusinesses(businessName, location = '') {
   try {
     console.log('[GOOGLE_PLACES] Searching for business', {
       businessName,
-      location
+      location: location || '(no location)'
     });
-    
+
     // Validate inputs
     if (!businessName || !businessName.trim()) {
       throw new Error('Business name is required');
     }
-    
-    if (!location || !location.trim()) {
-      throw new Error('Location is required');
-    }
-    
-    // Check cache first
-    const cacheKey = getCacheKey('search', businessName.trim().toLowerCase(), location.trim().toLowerCase());
+
+    // Check cache first (location may be empty — that's fine)
+    const cacheKey = getCacheKey('search', businessName.trim().toLowerCase(), (location || '').trim().toLowerCase());
     const cached = getCachedData(cacheKey);
     if (cached) {
       return cached;
     }
-    
-    // Construct search query
-    const searchQuery = `${businessName.trim()} in ${location.trim()}`;
+
+    // Construct search query — include location only when provided
+    const searchQuery = location && location.trim()
+      ? `${businessName.trim()} in ${location.trim()}`
+      : businessName.trim();
     
     const client = getPlacesHttpClient();
     
     const response = await withRetry(() => 
-      client.post('', {
+      client.post('places:searchText', {
         textQuery: searchQuery,
-        maxResultCount: 10, // Get more results for ranking
+        maxResultCount: 5,
         languageCode: 'en'
+      }, {
+        headers: {
+          'X-Goog-FieldMask': 'places.name,places.displayName,places.formattedAddress,places.websiteUri,places.internationalPhoneNumber,places.types,places.addressComponents,places.location'
+        }
       })
     );
     
@@ -155,20 +183,50 @@ export async function searchBusinesses(businessName, location) {
       return emptyResult;
     }
     
+    // Debug: log raw results
+    console.log('[GOOGLE_PLACES] Places Results:', JSON.stringify(response.data.places?.map(p => ({
+      name: p.name,
+      displayName: p.displayName?.text,
+      address: p.formattedAddress
+    })), null, 2));
+
     // Normalize the results
-    const normalizedResults = response.data.places.map(place => ({
-      placeId: place.name || '',
-      name: place.displayName?.text || place.displayName || '',
-      address: place.formattedAddress || '',
-      rating: place.rating || 0,
-      reviewCount: place.userRatingCount || 0,
-      website: place.websiteUri || '',
-      phone: place.internationalPhoneNumber || '',
-      location: place.location ? {
-        lat: place.location.latitude || 0,
-        lng: place.location.longitude || 0
-      } : { lat: 0, lng: 0 }
-    })).filter(result => result.name && result.address); // Filter out incomplete results
+    // In Places API v1, place.name is the resource name (e.g. "places/ChIJ...")
+    // This is the identifier needed for Place Details API
+    const normalizedResults = response.data.places.map(place => {
+      const placeResourceName = place.name || ''; // e.g. "places/ChIJxxxx"
+      console.log('[GOOGLE_PLACES] Selected Place:', {
+        resourceName: placeResourceName,
+        displayName: place.displayName?.text,
+        address: place.formattedAddress
+      });
+
+      // Extract city, state, country from addressComponents
+      const components = place.addressComponents || [];
+      const getComponent = (type) => components.find(c => c.types?.includes(type));
+      const city = getComponent('locality')?.longText
+        || getComponent('sublocality_level_1')?.longText
+        || null;
+      const state = getComponent('administrative_area_level_1')?.longText || null;
+      const countryComponent = getComponent('country');
+      const country = countryComponent?.longText || null;
+      const countryCode = countryComponent?.shortText?.toUpperCase() || null;
+
+      return {
+        placeId: placeResourceName,
+        name: place.displayName?.text || '',
+        address: place.formattedAddress || '',
+        city,
+        state,
+        country,
+        countryCode,
+        lat: place.location?.latitude ?? null,
+        lng: place.location?.longitude ?? null,
+        website: place.websiteUri || '',
+        phone: place.internationalPhoneNumber || '',
+        types: place.types || []
+      };
+    }).filter(result => result.name && result.address);
     
     // Cache the result
     setCachedData(cacheKey, normalizedResults);
@@ -208,6 +266,130 @@ export async function searchBusinesses(businessName, location) {
   }
 }
 
+/**
+ * Get detailed information about a specific place using Place Details API
+ * @param {string} placeId - The place resource name (e.g. "places/ChIJ...")
+ * @returns {Promise<Object>} - Detailed place information
+ */
+export async function getPlaceDetails(placeId) {
+  try {
+    console.log('[GOOGLE_PLACES] Fetching place details', { placeId });
+
+    if (!placeId || !placeId.trim()) {
+      throw new Error('Place ID is required');
+    }
+
+    // Check cache first
+    const cacheKey = getCacheKey('details', placeId.trim());
+    const cached = getCachedData(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY;
+    if (!apiKey) {
+      throw new Error('GOOGLE_PLACES_API_KEY environment variable is required');
+    }
+
+    // Place Details API (v1) - GET /v1/places/{placeId}
+    const placeResourceName = placeId.startsWith('places/') ? placeId : `places/${placeId}`;
+    const detailsUrl = `https://places.googleapis.com/v1/${placeResourceName}`;
+
+    const response = await withRetry(() =>
+      axios.get(detailsUrl, {
+        headers: {
+          'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': 'displayName,formattedAddress,internationalPhoneNumber,websiteUri,types,primaryType,rating,userRatingCount,reviews,googleMapsUri,location,addressComponents',
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      })
+    );
+
+    const place = response.data;
+
+    // Extract reviews (limit to top 5)
+    const reviews = (place.reviews || []).slice(0, 5).map(r => ({
+      author: r.authorAttribution?.displayName?.text || r.authorAttribution?.displayName || 'Anonymous',
+      rating: r.rating || 0,
+      text: r.originalText || r.text || '',
+      relative_time: r.publishTime ? calculateRelativeTime(new Date(r.publishTime)) : 'Recently'
+    }));
+
+    // Extract category safely (handle both string and object formats)
+    let category = '';
+    if (place.primaryType) {
+      category = typeof place.primaryType === 'string' 
+        ? place.primaryType 
+        : place.primaryType?.displayValue || place.primaryType?.text || '';
+    } else if (place.types && Array.isArray(place.types) && place.types.length > 0) {
+      const firstType = place.types[0];
+      category = typeof firstType === 'string'
+        ? firstType
+        : firstType?.displayValue || firstType?.text || '';
+    }
+
+    // Extract city, state, country from addressComponents
+    const detailComponents = place.addressComponents || [];
+    const getDetailComponent = (type) => detailComponents.find(c => c.types?.includes(type));
+    const detailCity = getDetailComponent('locality')?.longText
+      || getDetailComponent('sublocality_level_1')?.longText
+      || null;
+    const detailState = getDetailComponent('administrative_area_level_1')?.longText || null;
+    const detailCountryComp = getDetailComponent('country');
+    const detailCountry = detailCountryComp?.longText || null;
+    const detailCountryCode = detailCountryComp?.shortText?.toUpperCase() || null;
+
+    const result = {
+      name: place.displayName?.text || place.displayName || '',
+      address: place.formattedAddress || '',
+      city: detailCity,
+      state: detailState,
+      country: detailCountry,
+      countryCode: detailCountryCode,
+      phone: place.internationalPhoneNumber || '',
+      category: category.replace(/_/g, ' ').trim() || '',
+      website: place.websiteUri || '',
+      rating: place.rating || null,
+      total_reviews: place.userRatingCount || 0,
+      google_maps_url: place.googleMapsUri || '',
+      location: {
+        lat: place.location?.latitude || null,
+        lng: place.location?.longitude || null
+      },
+      reviews: reviews
+    };
+
+    // Cache the result
+    setCachedData(cacheKey, result);
+
+    console.log('[GOOGLE_PLACES] Place details fetched', {
+      placeId,
+      name: result.name
+    });
+
+    return result;
+
+  } catch (error) {
+    console.error('[GOOGLE_PLACES] Get place details failed', {
+      placeId,
+      error: error.message,
+      status: error.response?.status
+    });
+
+    if (error.response?.status === 403) {
+      throw new Error('Google Places API access denied. Check your API key.');
+    }
+
+    if (error.response?.status === 429) {
+      throw new Error('Google Places API quota exceeded. Please try again later.');
+    }
+
+    throw new Error(`Failed to get place details: ${error.message}`);
+  }
+}
+
 export default {
-  searchBusinesses
+  searchBusinesses,
+  getPlaceDetails
 };

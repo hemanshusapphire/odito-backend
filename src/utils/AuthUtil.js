@@ -40,4 +40,34 @@ export class AuthUtil {
 
     return project;
   }
+
+  /**
+   * Determine user landing page based on project existence
+   * @param {string} userId - User ID
+   * @returns {Promise<Object>} { hasProjects, redirectTo }
+   */
+  static async determineUserLandingPage(userId) {
+    if (!userId) {
+      return {
+        hasProjects: false,
+        redirectTo: '/onboarding'
+      };
+    }
+
+    try {
+      const projectCount = await SeoProject.countDocuments({ user_id: userId });
+      const hasProjects = projectCount > 0;
+      return {
+        hasProjects,
+        redirectTo: hasProjects ? '/dashboard' : '/onboarding'
+      };
+    } catch (error) {
+      console.error('Error determining landing page:', error);
+      return {
+        hasProjects: false,
+        redirectTo: '/onboarding'
+      };
+    }
+  }
 }
+

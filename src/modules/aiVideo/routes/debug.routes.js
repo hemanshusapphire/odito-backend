@@ -1,6 +1,7 @@
 /**
  * Debug Routes for AI Script Generation
  * Provides endpoints to debug data mapping issues
+ * 🔒 SECURITY: Disabled in production
  */
 
 import express from 'express';
@@ -9,6 +10,17 @@ import { UnifiedJsonService } from '../../pdf/service/unifiedJsonService.js';
 import { debugAuditFlow } from '../services/debugAuditFlow.service.js';
 
 const router = express.Router();
+
+// 🔒 SECURITY: Block all debug routes in production
+router.use((req, res, next) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({
+      success: false,
+      message: 'Debug routes are disabled in production'
+    });
+  }
+  next();
+});
 
 /**
  * 🔧 STEP 2: CREATE TEMP API - COMPLETE DEBUG FLOW

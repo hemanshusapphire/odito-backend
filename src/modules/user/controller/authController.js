@@ -1,5 +1,6 @@
 import { register, login, verifyEmailOTP, generateEmailOTP, resendVerificationEmail, formatCreditsForFrontend } from '../service/authService.js';
 import User from '../model/User.js';
+import { AuthUtil } from '../../../utils/AuthUtil.js';
 
 const getRoleName = (roleId) => {
   const roleMap = {
@@ -119,6 +120,8 @@ const getProfile = async (req, res) => {
       });
     }
 
+    const landingPage = await AuthUtil.determineUserLandingPage(user._id);
+
     res.status(200).json({
       success: true,
       data: {
@@ -133,7 +136,9 @@ const getProfile = async (req, res) => {
         lastLogin: user.lastLogin,
         isActive: user.isActive,
         credits: formatCreditsForFrontend(user),
-        subscription: user.subscription
+        subscription: user.subscription,
+        hasProjects: landingPage.hasProjects,
+        redirectTo: landingPage.redirectTo
       },
     });
   } catch (error) {

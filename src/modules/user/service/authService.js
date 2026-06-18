@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import User from '../model/User.js';
+import { AuthUtil } from '../../../utils/AuthUtil.js';
 
 const sendOTPEmail = async (email, otp) => {
   try {
@@ -18,6 +19,8 @@ const sendOTPEmail = async (email, otp) => {
         user: 'apikey',
         pass: process.env.SENDGRID_API_KEY,
       },
+      connectionTimeout: 5000,
+      socketTimeout:     5000,
     });
 
     const mailOptions = {
@@ -171,6 +174,8 @@ const verifyEmailOTP = async (email, otp) => {
   // Use the new markEmailVerified method
   await user.markEmailVerified();
 
+  const landingPage = await AuthUtil.determineUserLandingPage(user._id);
+
   return {
     message: 'Email verified successfully',
     user: {
@@ -181,7 +186,9 @@ const verifyEmailOTP = async (email, otp) => {
       roleId: user.roleId,
       isEmailVerified: user.isEmailVerified,
       credits: formatCreditsForFrontend(user),
-      subscription: user.subscription
+      subscription: user.subscription,
+      hasProjects: landingPage.hasProjects,
+      redirectTo: landingPage.redirectTo
     },
   };
 };
@@ -249,6 +256,7 @@ const login = async (email, password, rememberMe = false) => {
   await user.updateLastLogin();
 
   const token = generateToken(user._id, rememberMe);
+  const landingPage = await AuthUtil.determineUserLandingPage(user._id);
 
   return {
     user: {
@@ -261,7 +269,9 @@ const login = async (email, password, rememberMe = false) => {
       avatar: user.avatar,
       lastLogin: user.lastLogin,
       credits: formatCreditsForFrontend(user),
-      subscription: user.subscription
+      subscription: user.subscription,
+      hasProjects: landingPage.hasProjects,
+      redirectTo: landingPage.redirectTo
     },
     token,
   };

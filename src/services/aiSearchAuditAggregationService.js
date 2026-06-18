@@ -46,8 +46,11 @@ async function getAISearchAuditAggregation(projectId) {
           entity_coverage: { $avg: "$ai_visibility.dashboard_metrics.entity_coverage" },
           llm_indexability: { $avg: "$ai_visibility.dashboard_metrics.llm_indexability" },
           structured_data_depth: { $avg: "$ai_visibility.dashboard_metrics.structured_data_depth" },
-          entity_coverage_pct: { $avg: "$ai_visibility.dashboard_metrics.entity_coverage_pct" },
           geo_score: { $avg: "$ai_visibility.dashboard_metrics.geo_score" },
+          answer_readiness: { $avg: "$ai_visibility.dashboard_metrics.answer_readiness" },
+          snippet_opportunities: { $avg: "$ai_visibility.dashboard_metrics.snippet_opportunities" },
+          question_coverage: { $avg: "$ai_visibility.dashboard_metrics.question_coverage" },
+          structure_score: { $avg: "$ai_visibility.dashboard_metrics.structure_score" },
           total_pages: { $sum: 1 }
         }
       },
@@ -66,16 +69,17 @@ async function getAISearchAuditAggregation(projectId) {
           entity_coverage: { $ifNull: [{ $round: "$entity_coverage" }, 0] },
           llm_indexability: { $ifNull: [{ $round: "$llm_indexability" }, 0] },
           structured_data_depth: { $ifNull: [{ $round: "$structured_data_depth" }, 0] },
-          entity_coverage_pct: { $ifNull: [{ $round: "$entity_coverage_pct" }, 0] },
           geo_score: { $ifNull: [{ $round: "$geo_score" }, 0] },
+          answer_readiness: { $ifNull: [{ $round: "$answer_readiness" }, 0] },
+          snippet_opportunities: { $ifNull: [{ $round: "$snippet_opportunities" }, 0] },
+          question_coverage: { $ifNull: [{ $round: "$question_coverage" }, 0] },
+          structure_score: { $ifNull: [{ $round: "$structure_score" }, 0] },
           total_pages: { $ifNull: ["$total_pages", 0] }
         }
       }
     ]).toArray();
 
-    // Handle case where no documents found
     if (!aggregationResult || aggregationResult.length === 0) {
-      console.log(`[AI_SEARCH_AUDIT] No documents found for projectId: ${projectId}`);
       return {
         ai_readiness: 0,
         schema_coverage: 0,
@@ -87,16 +91,16 @@ async function getAISearchAuditAggregation(projectId) {
         entity_coverage: 0,
         llm_indexability: 0,
         structured_data_depth: 0,
-        entity_coverage_pct: 0,
         geo_score: 0,
-        total_pages: 0
+        answer_readiness: 0,
+        snippet_opportunities: 0,
+        question_coverage: 0,
+        structure_score: 0,
+        total_pages: 0,
       };
     }
 
-    const result = aggregationResult[0];
-    console.log(`[AI_SEARCH_AUDIT] Aggregation completed for projectId: ${projectId} | total_pages: ${result.total_pages}`);
-
-    return result;
+    return aggregationResult[0];
 
   } catch (error) {
     // Handle invalid ObjectId format
@@ -163,6 +167,10 @@ async function getAISearchAuditIssues(projectId) {
           pagesAffected: { $sum: 1 },
           category: { $first: "$category" },
           severity: { $first: "$severity" },
+          // New rich fields (with legacy fallbacks).
+          ruleTitle: { $first: { $ifNull: ["$title", "$message"] } },
+          ruleDescription: { $first: "$description" },
+          ruleRecommendation: { $first: "$recommendation" },
           message: { $first: "$message" },
           rule_score: { $avg: "$rule_score" },
           sampleUrls: { $push: "$page_url" }
@@ -174,7 +182,9 @@ async function getAISearchAuditIssues(projectId) {
         $project: {
           _id: 0,
           issueId: "$_id",
-          title: { $ifNull: ["$message", "$_id"] }, // Use message as title, fallback to rule_id
+          title: { $ifNull: ["$ruleTitle", "$_id"] }, // real issue title, fallback to rule_id
+          description: { $ifNull: ["$ruleDescription", ""] },
+          recommendation: { $ifNull: ["$ruleRecommendation", ""] },
           category: "$category",
           severity: "$severity",
           pagesAffected: "$pagesAffected",
@@ -211,13 +221,9 @@ async function getAISearchAuditIssues(projectId) {
       }
     ]).toArray();
 
-    // Handle case where no issues found
     if (!aggregationResult || aggregationResult.length === 0) {
-      console.log(`[AI_SEARCH_AUDIT_ISSUES] No issues found for projectId: ${projectId}`);
       return [];
     }
-
-    console.log(`[AI_SEARCH_AUDIT_ISSUES] Found ${aggregationResult.length} issues for projectId: ${projectId}`);
 
     return aggregationResult;
 
@@ -314,8 +320,6 @@ async function getAISearchAuditIssuePages(projectId, issueId, options = {}) {
         hasPrev: page > 1
       }
     };
-
-    console.log(`[AI_SEARCH_AUDIT_ISSUE_PAGES] ${issueId}: ${countResult} pages affected for projectId: ${projectId}`);
 
     return result;
 

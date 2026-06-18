@@ -11,7 +11,19 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:jobs": "node test-job-queue.mjs",
     "test:login": "node test-login.mjs",
-    "seed:jobs": "node seeds/jobTypesSeed.js"
+    "seed:jobs": "node seeds/jobTypesSeed.js",
+    "load:smoke":      "node load-tests/index.js --level=smoke",
+    "load:light":      "node load-tests/index.js --level=light",
+    "load:medium":     "node load-tests/index.js --level=medium",
+    "load:heavy":      "node load-tests/index.js --level=heavy",
+    "load:stress":     "node load-tests/index.js --level=stress",
+    "load:spike":      "node load-tests/index.js --level=spike",
+    "load:mixed":      "node load-tests/index.js --level=smoke --test=mixed",
+    "load:duplicate":  "node load-tests/index.js --test=duplicate",
+    "load:rate-limit": "node load-tests/index.js --test=rate-limit",
+    "load:soak":       "node load-tests/index.js --level=smoke --test=soak --gap=30",
+    "load:all":        "node load-tests/index.js --level=smoke --test=all",
+    "load:custom":     "node load-tests/index.js"
   },
   "keywords": [
     "api",
@@ -22,6 +34,7 @@
   "license": "ISC",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "axe-core": "^4.11.4",
     "axios": "^1.13.4",
     "bcryptjs": "^2.4.3",
     "cheerio": "^1.0.0-rc.12",
@@ -30,6 +43,7 @@
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "express-async-errors": "^3.1.1",
+    "express-rate-limit": "^8.4.1",
     "express-validator": "^7.3.1",
     "fastify": "^4.24.3",
     "google-auth-library": "^10.5.0",

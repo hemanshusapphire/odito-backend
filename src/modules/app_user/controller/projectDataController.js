@@ -8,6 +8,7 @@ import { TechnicalChecksService } from '../service/technicalChecks.service.js';
 import { ProjectIssuesService } from '../service/projectIssues.service.js';
 import { GoogleVisibilityService } from '../service/googleVisibility.service.js';
 import { AIVisibilityService } from '../service/aiVisibility.service.js';
+import { PreAuditService } from '../service/preAudit.service.js';
 
 import GoogleConnection from '../model/GoogleConnection.js';
 import mongoose from 'mongoose';
@@ -370,5 +371,22 @@ export const getOnPageIssues = async (req, res) => {
   } catch (error) {
     LoggerUtil.error('Error getting on-page issues', error, { projectId: req.params.id });
     return res.status(500).json(ResponseUtil.error('Failed to get on-page issues', 500));
+  }
+};
+
+// Get pre-audit snapshot linked to this project
+export const getProjectPreAudit = async (req, res) => {
+  try {
+    const service = new PreAuditService();
+    const result = await service.getPreAudit(req.params.id, req.user._id);
+
+    if (!result) {
+      return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    }
+
+    return res.json(ResponseUtil.success(result, 'Pre-audit retrieved successfully'));
+  } catch (error) {
+    LoggerUtil.error('Error getting pre-audit', error, { projectId: req.params.id });
+    return res.status(500).json(ResponseUtil.error('Failed to get pre-audit', 500));
   }
 };

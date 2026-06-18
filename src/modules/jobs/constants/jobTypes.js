@@ -27,6 +27,9 @@ export const JOB_TYPES = {
   PERFORMANCE_MOBILE: 'PERFORMANCE_MOBILE',
   PERFORMANCE_DESKTOP: 'PERFORMANCE_DESKTOP',
 
+  // URL Qualification — probes discovered URLs and emits canonical URL list
+  URL_QUALIFICATION: 'URL_QUALIFICATION',
+
   // Headless Accessibility Analysis
   HEADLESS_ACCESSIBILITY: 'HEADLESS_ACCESSIBILITY',
 
@@ -41,6 +44,9 @@ export const JOB_TYPES = {
 
   // Video Generation Jobs
   VIDEO_GENERATION: 'VIDEO_GENERATION',
+
+  // Homepage Audit Video Generation Jobs
+  HOMEPAGE_VIDEO_GENERATION: 'HOMEPAGE_VIDEO_GENERATION',
 };
 
 export const JOB_STATUS = {
@@ -106,6 +112,12 @@ export const JOB_TYPE_CONFIG = {
     timeout: 60000,        // 1 minute
     priority: 1,
     workerType: 'technical_domain'
+  },
+  [JOB_TYPES.URL_QUALIFICATION]: {
+    maxAttempts: 2,
+    timeout: 120000,       // 2 minutes (probe ~75 URLs at 8 s each, 20 concurrent)
+    priority: 1,
+    workerType: 'url_qualifier'
   },
   [JOB_TYPES.PAGE_SCRAPING]: {
     maxAttempts: 2,
@@ -174,6 +186,14 @@ export const JOB_TYPE_CONFIG = {
     timeout: 600000,       // 10 minutes for video generation
     priority: 6,            // Medium priority
     workerType: 'video_generator'
+  },
+
+  // Homepage Audit Video Generation Configuration
+  [JOB_TYPES.HOMEPAGE_VIDEO_GENERATION]: {
+    maxAttempts: 2,
+    timeout: 600000,       // 10 minutes for video generation
+    priority: 6,            // Medium priority — same lane as VIDEO_GENERATION
+    workerType: 'video_generator'  // SAME worker — one worker, multiple processors
   }
 };
 

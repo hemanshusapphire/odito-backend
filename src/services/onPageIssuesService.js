@@ -25,15 +25,7 @@ export async function getOnPageIssues(projectId) {
     .collection('seo_page_summary')
     .countDocuments({ projectId: projectIdObj });
 
-  // 2. Total individual issue documents (for summary)
-  const totalIssuesFound = await db
-    .collection('seo_page_issues')
-    .countDocuments({ 
-      projectId: projectIdObj,
-      category: { $ne: 'Accessibility' }
-    });
-
-  // 3. Two-stage aggregation
+  // 2. Two-stage aggregation
   const rawIssues = await db
     .collection('seo_page_issues')
     .aggregate([
@@ -90,6 +82,10 @@ export async function getOnPageIssues(projectId) {
       { $sort: { pages_affected: -1 } },
     ])
     .toArray();
+
+  // 3. Derive total from aggregation — consistent with Accessibility service.
+  // Raw countDocuments was higher because per-element rules create multiple docs per page.
+  const totalIssuesFound = rawIssues.reduce((sum, issue) => sum + (issue.pages_affected || 0), 0);
 
   // 4. Enrich each issue
   const issues = rawIssues.map((issue) => {

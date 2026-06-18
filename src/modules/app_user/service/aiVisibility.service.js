@@ -456,19 +456,26 @@ export class AIVisibilityService {
         };
       }
 
-      // Format AI issues to match AI Search Audit structure
+      // Format AI issues to match AI Search Audit structure.
+      // Prefer the new rich fields (title/description/...); fall back to legacy
+      // `message`/`rule_score` so historical issue docs still render.
       const formattedAIIssues = aiIssues.map(issue => ({
         id: issue._id.toString(),
         issueId: issue.rule_id, // e.g., 'aggregate_rating_schema'
         type: 'ai_visibility',
         category: issue.category,
         severity: issue.severity,
-        message: issue.message,
-        score: issue.rule_score,
+        status: issue.status || null,
+        title: issue.title || issue.message || issue.rule_id,
+        description: issue.description || issue.message || '',
+        message: issue.title || issue.message, // legacy alias
+        score: issue.rule_score ?? null,
+        confidence: issue.confidence ?? null,
+        evidence: issue.evidence || null,
         details: {
-          detected_value: issue.detected_value,
-          expected_value: issue.expected_value,
-          recommendation: issue.recommendation
+          detected_value: issue.detected_value ?? null,
+          expected_value: issue.expected_value ?? null,
+          recommendation: issue.recommendation || ''
         },
         createdAt: issue.created_at
       }));

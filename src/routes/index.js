@@ -22,7 +22,14 @@ import debugRoutes from '../modules/aiVideo/routes/debug.routes.js';
 import businessRoutes from '../modules/app_user/routes/businessRoutes.js';
 import externalRoutes from '../modules/external/routes/externalRoutes.js';
 import accessibilityRoutes from '../modules/accessibility/routes/accessibilityRoutes.js';
-
+import recommendationRoutes from '../modules/recommendations/routes/recommendationRoutes.js';
+import issueContextRoutes from '../modules/issue-context/routes/issueContextRoutes.js';
+import fixLogRoutes from '../modules/fix-logs/routes/fixLogRoutes.js';
+import taskRoutes from '../modules/tasks/routes/taskRoutes.js';
+import auditHistoryRoutes from '../modules/audit_history/routes/auditHistoryRoutes.js';
+import aiVisibilityHubRoutes from './hub/aiVisibilityHubRoutes.js';
+import aeoHubRoutes from './hub/aeoHubRoutes.js';
+import geoHubRoutes from './hub/geoHubRoutes.js';
 const router = express.Router();
 
 router.use('/auth', authRoutes);
@@ -67,7 +74,23 @@ router.use('/video', videoDataRoutes);
 router.use('/debug', debugRoutes);
 // External onboarding routes (no auth required)
 router.use('/external', externalRoutes);
+// Direct homepage-audit route for frontend compatibility
+router.use('/', externalRoutes);
 // Accessibility issues routes
 router.use('/accessibility', accessibilityRoutes);
+// AI Recommendation engine routes
+router.use('/recommendations', recommendationRoutes);
+// Issue Context Engine routes
+router.use('/issue-context', issueContextRoutes);
+// Fix tracking routes (deprecated — use /tasks instead)
+router.use('/fix-logs', fixLogRoutes);
+// Task lifecycle routes (new — replaces /fix-logs)
+router.use('/tasks', taskRoutes);
+// Audit history and comparison routes
+router.use('/projects', auditHistoryRoutes);
+// Hub routes — 4-Hub Architecture (additive; legacy /ai-visibility routes remain live)
+router.use('/hub/ai-visibility', aiVisibilityHubRoutes);
+router.use('/hub/aeo', aeoHubRoutes);
+router.use('/hub/geo', geoHubRoutes);
 
 export default router;

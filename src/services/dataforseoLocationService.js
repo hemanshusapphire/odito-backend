@@ -10,6 +10,14 @@ import axios from 'axios';
 // DataForSEO Locations API
 const DATASEO_LOCATIONS_API = 'https://api.dataforseo.com/v3/serp/google/locations';
 
+// Country-level fallback map — single source of truth for all JS consumers
+export const COUNTRY_TO_LOCATION_CODE = {
+  US: 2840, IN: 2356, UK: 2826, GB: 2826,
+  CA: 2124, AU: 2036, DE: 2315, FR: 2250,
+  ES: 2246, IT: 2240, JP: 2132, BR: 2075,
+  MX: 2239, KR: 2131, RU: 2306,
+};
+
 // In-memory cache for location data (refresh every 24 hours)
 let locationsCache = {
   data: null,
@@ -24,19 +32,24 @@ async function getDataForSEOLocations() {
   const now = Date.now();
   
   // Return cached data if still valid
-  if (locationsCache.data && 
-      locationsCache.lastFetch && 
+  if (locationsCache.data &&
+      locationsCache.lastFetch &&
       (now - locationsCache.lastFetch) < locationsCache.cacheDuration) {
     console.log('[DATASEO_LOCATIONS] Using cached location data');
+    console.log('[LOCATION_TRACE] LOCATION COUNT (from cache)', locationsCache.data.length);
     return locationsCache.data;
   }
 
   try {
     console.log('[DATASEO_LOCATIONS] Fetching fresh location data from DataForSEO API');
     
+    const login = process.env.DATAFORSEO_LOGIN || process.env.DATASEO_API_LOGIN || '';
+    const password = process.env.DATAFORSEO_PASSWORD || process.env.DATASEO_API_PASSWORD || '';
+    const credentials = Buffer.from(`${login}:${password}`).toString('base64');
+
     const response = await axios.get(DATASEO_LOCATIONS_API, {
       headers: {
-        'Authorization': `Bearer ${process.env.DATASEO_API_LOGIN}:${process.env.DATASEO_API_PASSWORD}`,
+        'Authorization': `Basic ${credentials}`,
         'Content-Type': 'application/json'
       },
       timeout: 30000
@@ -114,78 +127,114 @@ function extractCountryCode(address) {
 }
 
 /**
- * Get the best DataForSEO location_code for given lat/lng
+ * Get the country-level location_code fallback — never defaults to US unless country is explicitly US.
  */
-async function getBestLocationCode(userLat, userLng, userAddress = null) {
-  console.log('[DATASEO_LOCATIONS] Finding best location for:', {
-    lat: userLat,
-    lng: userLng,
-    address: userAddress
-  });
+function getCountryFallbackCode(countryCode, addressFallback = null) {
+  const code = countryCode?.toUpperCase() || extractCountryCode(addressFallback);
+  if (code && COUNTRY_TO_LOCATION_CODE[code]) {
+    return COUNTRY_TO_LOCATION_CODE[code];
+  }
+  console.warn('[DATASEO_LOCATIONS] No country code resolved, defaulting to US (2840)');
+  return COUNTRY_TO_LOCATION_CODE['US']; // 2840 — only reached when country is truly unknown
+}
+
+/**
+ * Extract city name from a Google Places formatted address string.
+ * Address format (Indian example):
+ *   "..., Thatte Nagar, Nashik, Maharashtra 422 001, India"
+ * Strategy: split by comma, strip country (last) and state+postal (second-to-last),
+ * return the next part as city.
+ */
+function extractCityFromAddress(address) {
+  if (!address) return null;
+  const parts = address.split(',').map(p => p.trim()).filter(Boolean);
+  // Need at least: [..., city, state+postal, country]
+  if (parts.length < 3) return null;
+  // Second-to-last part often contains a postal code (digits) — that is the state segment
+  const stateCandidate = parts[parts.length - 2];
+  if (/\d/.test(stateCandidate)) {
+    // Classic: [..., city, "State 000000", "Country"]
+    return parts[parts.length - 3] || null;
+  }
+  // Fallback: third from last
+  return parts[parts.length - 3] || null;
+}
+
+/**
+ * Resolve the best DataForSEO location_code via city-name matching.
+ *
+ * Root cause confirmed by runtime logs (2026-06-17):
+ *   ENTRIES WITH LAT/LNG 0 of 24397
+ *   RETURNING 2356 — RETURN POINT A
+ *
+ * DataForSEO /v3/serp/google/locations does NOT return location_lat/location_lng.
+ * Those fields are absent from every entry in the 226,293-location dataset.
+ * The previous Haversine strategy was entirely non-functional.
+ *
+ * Correct strategy: match city name against the first segment of location_name.
+ * DataForSEO location_name format: "Nashik,Nashik,Maharashtra,India"
+ * Split on comma → first segment = city name → exact match against resolved city.
+ *
+ * @param {number}      userLat     - Google Places latitude (kept for signature compat)
+ * @param {number}      userLng     - Google Places longitude (kept for signature compat)
+ * @param {string|null} userAddress - Full formatted address (city extracted as fallback)
+ * @param {string|null} countryCode - ISO-2 country code
+ * @param {string|null} cityName    - Explicit city name from Google Places addressComponents
+ */
+async function getBestLocationCode(userLat, userLng, userAddress = null, countryCode = null, cityName = null) {
+  console.log('[LOCATION_TRACE] getBestLocationCode CALLED', { userLat, userLng, userAddress, countryCode, cityName });
 
   try {
-    // Get all DataForSEO locations
     const locations = await getDataForSEOLocations();
-    
-    // Extract user's country from address if provided
-    const userCountry = extractCountryCode(userAddress);
-    console.log('[DATASEO_LOCATIONS] Extracted country:', userCountry);
-    
-    // Filter locations by user's country (if detected)
+
+    const userCountry = countryCode?.toUpperCase() || extractCountryCode(userAddress);
+
+    // Narrow to same country first
     let filteredLocations = locations;
     if (userCountry) {
-      filteredLocations = locations.filter(loc => 
-        loc.country_iso_code === userCountry
-      );
-      console.log('[DATASEO_LOCATIONS] Filtered to', filteredLocations.length, 'locations in country:', userCountry);
+      filteredLocations = locations.filter(loc => loc.country_iso_code === userCountry);
     }
-    
-    // If no country-specific locations, use all locations
     if (filteredLocations.length === 0) {
-      console.warn('[DATASEO_LOCATIONS] No locations found for country, using all locations');
       filteredLocations = locations;
     }
-    
-    // Find the closest location
-    let bestLocation = null;
-    let minDistance = Infinity;
-    
-    for (const location of filteredLocations) {
-      if (!location.location_lat || !location.location_lng) {
-        continue; // Skip locations without coordinates
+
+    // Resolve city: prefer explicit Google Places city component, fall back to address parse
+    const resolvedCity = (cityName?.trim()) || extractCityFromAddress(userAddress);
+    console.log('[LOCATION_TRACE] RESOLVED CITY', resolvedCity);
+
+    if (resolvedCity) {
+      const cityLower = resolvedCity.toLowerCase();
+
+      // location_name = "Nashik,Nashik,Maharashtra,India" — first segment is the city name
+      const cityMatches = filteredLocations.filter(loc => {
+        if (!loc.location_name) return false;
+        return loc.location_name.split(',')[0].toLowerCase().trim() === cityLower;
+      });
+
+      console.log('[LOCATION_TRACE] CITY NAME MATCHES', cityMatches.length,
+        cityMatches.map(l => ({ code: l.location_code, name: l.location_name, type: l.location_type })));
+
+      if (cityMatches.length > 0) {
+        // Prefer location_type === 'City'; otherwise take first match
+        const best = cityMatches.find(l => l.location_type === 'City') || cityMatches[0];
+        console.log('[LOCATION_TRACE] RETURNING', best.location_code,
+          '— city name match:', best.location_name, 'type:', best.location_type);
+        return best.location_code;
       }
-      
-      const distance = calculateDistance(
-        userLat, userLng,
-        location.location_lat, location.location_lng
-      );
-      
-      if (distance < minDistance) {
-        minDistance = distance;
-        bestLocation = location;
-      }
+
+      console.log('[LOCATION_TRACE] No city name match for', resolvedCity, '— falling back to country code');
+    } else {
+      console.log('[LOCATION_TRACE] No city resolved from cityName or address — falling back to country code');
     }
-    
-    if (!bestLocation) {
-      console.warn('[DATASEO_LOCATIONS] No suitable location found, using fallback');
-      // Fallback to major locations
-      const fallbackLocation = locations.find(loc => loc.location_code === 2840); // United States
-      return fallbackLocation ? fallbackLocation.location_code : 2840;
-    }
-    
-    console.log('[DATASEO_LOCATIONS] Best match found:', {
-      location_code: bestLocation.location_code,
-      location_name: bestLocation.location_name,
-      country: bestLocation.country_iso_code,
-      distance_km: Math.round(minDistance * 100) / 100
-    });
-    
-    return bestLocation.location_code;
-    
+
+    const fallback = getCountryFallbackCode(userCountry, userAddress);
+    console.log('[LOCATION_TRACE] RETURNING', fallback, '— country fallback');
+    return fallback;
+
   } catch (error) {
-    console.error('[DATASEO_LOCATIONS] Error finding best location:', error);
-    // Fallback to US location
-    return 2840;
+    const fallback = getCountryFallbackCode(countryCode, userAddress);
+    console.log('[LOCATION_TRACE] RETURNING', fallback, '— caught error:', error.message);
+    return fallback;
   }
 }
 

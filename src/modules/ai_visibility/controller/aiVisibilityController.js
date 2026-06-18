@@ -15,6 +15,9 @@ import mongoose from "mongoose";
 import { getWebsiteOptimizationAggregation } from "../../../services/aiVisibilityAggregationService.js";
 
 import { getAISearchAuditAggregation, getAISearchAuditIssues as getAISearchAuditIssuesService, getAISearchAuditIssuePages as getAISearchAuditIssuePagesService } from "../../../services/aiSearchAuditAggregationService.js";
+import { getAEOHubData } from "../../../services/hub/aeoHubAggregation.js";
+
+import { getAIAccessibility as getAIAccessibilityService } from "../../ai_accessibility/service/aiAccessibilityService.js";
 
 // Import SeoProject for ownership verification
 import SeoProject from "../../app_user/model/SeoProject.js";
@@ -951,6 +954,52 @@ export const getAISearchAuditIssuePages = async (req, res) => {
   }
 };
 
+/**
+ * Get AEO Hub aggregated data
+ * GET /api/ai-visibility/projects/:projectId/aeo-hub
+ */
+export const getAEOHub = async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    if (!projectId) {
+      return res.status(400).json({ success: false, message: 'projectId is required' });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(projectId)) {
+      return res.status(400).json({ success: false, message: 'Invalid projectId format' });
+    }
+
+    const projectObjectId = new mongoose.Types.ObjectId(projectId);
+    const seoProject = await SeoProject.findOne({ _id: projectObjectId, user_id: req.user._id });
+
+    if (!seoProject) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: Project not found or you do not have permission',
+      });
+    }
+
+    const data = await getAEOHubData(projectId);
+
+    if (data.total_pages === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'No AI visibility data found for this project. Please run an AI audit first.',
+      });
+    }
+
+    return res.json({ success: true, data });
+  } catch (error) {
+    console.error('[AEO_HUB]', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get AEO Hub data',
+      error: error.message,
+    });
+  }
+};
+
 // Validation middleware
 
 export const validateStartAiVisibility = [
@@ -960,3 +1009,32 @@ export const validateStartAiVisibility = [
 export const validateAiProjectId = [
   // Add validation rules here if needed
 ];
+
+/**
+ * GET /api/ai-visibility/projects/:projectId/ai-accessibility
+ *
+ * Returns domain-level AI Accessibility data:
+ *   - Per-bot crawler accessibility signals
+ *   - llms.txt presence and validation
+ *   - Overall ai_accessibility_score (0-100)
+ */
+export const getAIAccessibility = async (req, res) => {
+  try {
+    const { projectId } = req.params;
+
+    if (!projectId) {
+      return res.status(400).json({ success: false, message: 'projectId is required' });
+    }
+
+    const data = await getAIAccessibilityService(projectId);
+
+    return res.json({ success: true, data });
+  } catch (error) {
+    console.error('[AI Accessibility] Error fetching data:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch AI accessibility data',
+      error: error.message,
+    });
+  }
+};

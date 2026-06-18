@@ -76,7 +76,7 @@ const userSchema = new mongoose.Schema({
   credits: {
     permanent: {
       type: Number,
-      default: 5,
+      default: 1,
       min: 0
     },
     monthly: {
@@ -93,7 +93,7 @@ const userSchema = new mongoose.Schema({
   // Legacy credits field for migration - REMOVE AFTER MIGRATION
   credits_legacy: {
     type: Number,
-    default: 5,
+    default: 1,
     min: 0
   },
   // Stripe payment fields

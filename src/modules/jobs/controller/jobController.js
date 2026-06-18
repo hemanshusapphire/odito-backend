@@ -188,7 +188,8 @@ export const failJob = async (req, res) => {
             auditProgressService.emitStageChanged(jobId, {
               from: 'TECHNICAL_DOMAIN',
               to: 'PAGE_SCRAPING',
-              newJobId: pageScrapingJob._id.toString()
+              newJobId: pageScrapingJob._id.toString(),
+              projectId: updatedJob.project_id?.toString()
             });
           } else {
             // PUSH model: dispatch to worker
@@ -197,7 +198,8 @@ export const failJob = async (req, res) => {
               auditProgressService.emitStageChanged(jobId, {
                 from: 'TECHNICAL_DOMAIN',
                 to: 'PAGE_SCRAPING',
-                newJobId: pageScrapingJob._id.toString()
+                newJobId: pageScrapingJob._id.toString(),
+                projectId: updatedJob.project_id?.toString()
               });
               jobDispatcher.dispatchPageScrapingJob(dispatchedJob).catch(error => {
                 console.error(`[ERROR] PAGE_SCRAPING dispatch failed | jobId=${dispatchedJob._id} | reason="${error.message}"`);
@@ -238,6 +240,7 @@ export const failJob = async (req, res) => {
     // Emit real-time error update to frontend
     auditProgressService.emitError(jobId, {
       jobId: jobId,
+      projectId: job.project_id?.toString(),
       message: errorObj.message,
       subtext: 'The audit encountered an error and has been stopped',
       error: errorObj.message || 'WORKER_ERROR'

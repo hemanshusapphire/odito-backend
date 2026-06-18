@@ -18,7 +18,7 @@ export const useCredits = async (user, cost) => {
   } else {
     // Legacy structure - treat as permanent credits
     monthlyCredits = 0;
-    permanentCredits = user.credits || 5;
+    permanentCredits = user.credits || 1;
   }
   
   const totalCredits = monthlyCredits + permanentCredits;
@@ -83,7 +83,7 @@ export const getUserCredits = async (userId) => {
   } else {
     // Legacy structure
     monthly = 0;
-    permanent = user.credits || 5;
+    permanent = user.credits || 1;
     nextResetDate = null;
   }
   

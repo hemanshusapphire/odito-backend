@@ -38,6 +38,7 @@ export const validateEnvironment = () => {
 
   // Check for optional but recommended variables
   const recommended = [
+    'ANTHROPIC_API_KEY',
     'GEMINI_API_KEY',
     'SENDGRID_API_KEY',
     'STRIPE_SECRET_KEY',
@@ -75,6 +76,7 @@ export const logConfiguration = () => {
     CORS_ORIGIN: process.env.CORS_ORIGIN,
     MONGO_URI: process.env.MONGO_URI ? '***CONFIGURED***' : 'NOT_SET',
     JWT_SECRET: process.env.JWT_SECRET ? '***CONFIGURED***' : 'NOT_SET',
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ? '***CONFIGURED***' : 'NOT_SET',
     GEMINI_API_KEY: process.env.GEMINI_API_KEY ? '***CONFIGURED***' : 'NOT_SET',
     SENDGRID_API_KEY: process.env.SENDGRID_API_KEY ? '***CONFIGURED***' : 'NOT_SET',
     STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY ? '***CONFIGURED***' : 'NOT_SET',

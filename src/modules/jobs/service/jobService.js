@@ -961,31 +961,56 @@ export class JobService {
 
    */
 
-  async createAndDispatchHeadlessAccessibilityJob(technicalDomainJob) {
+  async createAndDispatchUrlQualificationJob(technicalDomainJob) {
+    try {
+      console.log(`[DEBUG] createAndDispatchUrlQualificationJob called | sourceJobId=${technicalDomainJob._id}`);
+
+      const urlQualJob = await this.createJob({
+        user_id: technicalDomainJob.user_id,
+        seo_project_id: technicalDomainJob.project_id,
+        jobType: JOB_TYPES.URL_QUALIFICATION,
+        input_data: {
+          source_job_id: technicalDomainJob._id.toString(),
+          projectId: technicalDomainJob.project_id.toString()
+        },
+        priority: JOB_TYPE_CONFIG[JOB_TYPES.URL_QUALIFICATION].priority
+      });
+
+      console.log(`[QUEUE] URL_QUALIFICATION job queued | jobId=${urlQualJob._id} | sourceJobId=${technicalDomainJob._id}`);
+      return urlQualJob;
+
+    } catch (error) {
+      console.error(`[ERROR] URL_QUALIFICATION creation failed | sourceJobId=${technicalDomainJob._id} | reason="${error.message}"`);
+      throw error;
+    }
+  }
+
+
+
+  async createAndDispatchHeadlessAccessibilityJob(urlQualificationJob) {
 
     try {
 
-      console.log(`[DEBUG] createAndDispatchHeadlessAccessibilityJob called with technicalDomainJob._id=${technicalDomainJob._id}`);
+      console.log(`[DEBUG] createAndDispatchHeadlessAccessibilityJob called with sourceJobId=${urlQualificationJob._id}`);
 
-
-
-      // Create HEADLESS_ACCESSIBILITY job with minimal input data
-
-      // The worker will fetch URLs from database using projectId
+      // canonical_urls forwarded from URL_QUALIFICATION via _canonicalUrls property
+      const canonicalUrls = urlQualificationJob._canonicalUrls || [];
 
       const headlessA11yJob = await this.createJob({
 
-        user_id: technicalDomainJob.user_id,
+        user_id: urlQualificationJob.user_id,
 
-        seo_project_id: technicalDomainJob.project_id,
+        seo_project_id: urlQualificationJob.project_id,
 
         jobType: JOB_TYPES.HEADLESS_ACCESSIBILITY,
 
         input_data: {
 
-          source_job_id: technicalDomainJob._id.toString(),
+          source_job_id: urlQualificationJob._id.toString(),
 
-          projectId: technicalDomainJob.project_id.toString()
+          projectId: urlQualificationJob.project_id.toString(),
+
+          canonical_urls: canonicalUrls
 
         },
 
@@ -995,7 +1020,7 @@ export class JobService {
 
 
 
-      console.log(`[QUEUE] HEADLESS_ACCESSIBILITY job queued | jobId=${headlessA11yJob._id} | sourceJobId=${technicalDomainJob._id} | projectId=${technicalDomainJob.project_id}`);
+      console.log(`[QUEUE] HEADLESS_ACCESSIBILITY job queued | jobId=${headlessA11yJob._id} | sourceJobId=${urlQualificationJob._id} | canonicalUrls=${canonicalUrls.length}`);
 
 
 
@@ -1005,7 +1030,7 @@ export class JobService {
 
     } catch (error) {
 
-      console.error(`[ERROR] HEADLESS_ACCESSIBILITY creation failed | sourceJobId=${technicalDomainJob._id} | reason="${error.message}"`);
+      console.error(`[ERROR] HEADLESS_ACCESSIBILITY creation failed | sourceJobId=${urlQualificationJob._id} | reason="${error.message}"`);
 
       console.error(`[ERROR] Full error stack: ${error.stack}`);
 
@@ -1031,10 +1056,6 @@ export class JobService {
 
       console.log(`[DEBUG] createAndDispatchCrawlGraphJob called with pageScrapingJob._id=${pageScrapingJob._id}`);
 
-
-
-      // Create CRAWL_GRAPH job with source job reference
-
       const crawlGraphJob = await this.createJob({
 
         user_id: pageScrapingJob.user_id,
@@ -1045,7 +1066,11 @@ export class JobService {
 
         input_data: {
 
-          source_job_id: pageScrapingJob._id.toString()
+          source_job_id: pageScrapingJob._id.toString(),
+
+          // Propagate mode so chainingEngine can detect verification mode
+          // and skip the PERFORMANCE_MOBILE/PERFORMANCE_DESKTOP chain.
+          ...(pageScrapingJob.input_data?.mode ? { mode: pageScrapingJob.input_data.mode } : {})
 
         },
 
@@ -1323,15 +1348,17 @@ export class JobService {
 
    */
 
-  async createAndDispatchAiVisibilityJob(pageScrapingJob) {
+  async createAndDispatchAiVisibilityJob(urlQualificationJob) {
 
-    // Debug logging before job creation
+    const canonicalUrls = urlQualificationJob._canonicalUrls || urlQualificationJob.input_data?.canonical_urls || [];
 
     console.log("Creating AI_VISIBILITY job", {
 
-      projectId: pageScrapingJob.project_id,
+      projectId: urlQualificationJob.project_id,
 
-      sourceJobId: pageScrapingJob._id
+      sourceJobId: urlQualificationJob._id,
+
+      canonicalUrls: canonicalUrls.length
 
     });
 
@@ -1339,15 +1366,17 @@ export class JobService {
 
     const aiVisibilityJob = await this.createJob({
 
-      user_id: pageScrapingJob.user_id,
+      user_id: urlQualificationJob.user_id,
 
-      seo_project_id: pageScrapingJob.project_id,  // ✅ Fixed: use seo_project_id instead of project_id
+      seo_project_id: urlQualificationJob.project_id,
 
       jobType: JOB_TYPES.AI_VISIBILITY,
 
       input_data: {
 
-        source_job_id: pageScrapingJob._id.toString()
+        source_job_id: urlQualificationJob._id.toString(),
+
+        canonical_urls: canonicalUrls
 
       },
 
@@ -1359,7 +1388,7 @@ export class JobService {
 
     console.log(
 
-      `[QUEUE] AI_VISIBILITY job queued | jobId=${aiVisibilityJob._id} | sourceJobId=${pageScrapingJob._id}`
+      `[QUEUE] AI_VISIBILITY job queued | jobId=${aiVisibilityJob._id} | sourceJobId=${urlQualificationJob._id} | canonicalUrls=${canonicalUrls.length}`
 
     );
 
@@ -1371,57 +1400,27 @@ export class JobService {
 
 
 
-  async createAndDispatchPageScrapingJob(linkDiscoveryJob) {
+  async createAndDispatchPageScrapingJob(urlQualificationJob) {
 
     try {
 
-      // Get MongoDB connection to access discovered URLs
-
-      const db = mongoose.connection.db;
-
-
-
-      // Query internal links discovered by LINK_DISCOVERY job
-
-      const internalLinks = await db.collection('seo_internal_links')
-
-        .find({ seo_jobId: linkDiscoveryJob._id })
-
-        .project({ url: 1, _id: 0 })
-
-        .toArray();
-
-
-
-      if (internalLinks.length === 0) {
-
-        return null;
-
-      }
-
-
-
-      // Extract URLs for PAGE_SCRAPING job input
-
-      const urls = internalLinks.map(link => link.url);
-
-
-
-      // Create PAGE_SCRAPING job with URLs as input data
+      // canonical_urls forwarded from URL_QUALIFICATION via _canonicalUrls property.
+      // Workers consume this list directly — no second DB read needed.
+      const canonicalUrls = urlQualificationJob._canonicalUrls || [];
 
       const pageScrapingJob = await this.createJob({
 
-        user_id: linkDiscoveryJob.user_id,
+        user_id: urlQualificationJob.user_id,
 
-        seo_project_id: linkDiscoveryJob.project_id,
+        seo_project_id: urlQualificationJob.project_id,
 
         jobType: JOB_TYPES.PAGE_SCRAPING,
 
         input_data: {
 
-          urls: urls,
+          source_job_id: urlQualificationJob._id.toString(),
 
-          source_job_id: linkDiscoveryJob._id.toString()
+          canonical_urls: canonicalUrls
 
         },
 
@@ -1431,7 +1430,7 @@ export class JobService {
 
 
 
-      console.log(`[QUEUE] PAGE_SCRAPING job queued | jobId=${pageScrapingJob._id}`);
+      console.log(`[QUEUE] PAGE_SCRAPING job queued | jobId=${pageScrapingJob._id} | canonicalUrls=${canonicalUrls.length}`);
 
 
 
@@ -1441,7 +1440,7 @@ export class JobService {
 
     } catch (error) {
 
-      console.error(`[ERROR] PAGE_SCRAPING creation failed | sourceJobId=${linkDiscoveryJob._id} | reason="${error.message}"`);
+      console.error(`[ERROR] PAGE_SCRAPING creation failed | sourceJobId=${urlQualificationJob._id} | reason="${error.message}"`);
 
       throw error;
 

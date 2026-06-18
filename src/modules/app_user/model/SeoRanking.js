@@ -34,11 +34,47 @@ const seoRankingSchema = new mongoose.Schema({
     lowercase: true
   },
 
-  // Location context for the ranking check
+  // Human-readable location string (e.g. "Nashik, Maharashtra, India")
   location: {
     type: String,
     trim: true,
     default: null
+  },
+
+  // DataForSEO location_code used in the SERP query — required to reproduce the same query
+  location_code: {
+    type: Number,
+    default: null
+  },
+
+  // ISO-2 country code (e.g. "IN", "US")
+  country: {
+    type: String,
+    uppercase: true,
+    trim: true,
+    default: null
+  },
+
+  // Language code used (e.g. "en", "hi")
+  language: {
+    type: String,
+    lowercase: true,
+    trim: true,
+    default: 'en'
+  },
+
+  // Whether this ranking was for local or national SEO scope
+  seo_scope: {
+    type: String,
+    enum: ['local', 'national', null],
+    default: null
+  },
+
+  // How this ranking was triggered
+  ranking_source: {
+    type: String,
+    enum: ['onboarding', 'manual_refresh', 'scheduled'],
+    default: 'onboarding'
   },
 
   // Array of keyword → rank pairs
@@ -48,12 +84,26 @@ const seoRankingSchema = new mongoose.Schema({
       required: true,
       trim: true
     },
+    // Backward-compat field — equals best_rank
     rank: {
       type: Number,
-      default: null,    // null = not found in top 100
+      default: null,
       min: 1,
       max: 100
-    }
+    },
+    // Lowest (best) rank position found across all matching URLs
+    best_rank: {
+      type: Number,
+      default: null,
+      min: 1,
+      max: 100
+    },
+    // All URLs from the domain that appeared in the SERP
+    ranking_urls: [{
+      rank: { type: Number, required: true, min: 1, max: 100 },
+      url:  { type: String, required: true, trim: true },
+      type: { type: String, enum: ['homepage', 'internal_page'], default: 'internal_page' }
+    }]
   }],
 
   created_at: {

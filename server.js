@@ -76,6 +76,10 @@ import routes from './src/routes/index.js';
 
 import Job from './src/modules/jobs/model/Job.js';
 
+import jwt from 'jsonwebtoken';
+
+import SeoProject from './src/modules/app_user/model/SeoProject.js';
+
 import retryScheduler from './src/modules/payments/scheduler/retryScheduler.js';
 
 
@@ -130,22 +134,81 @@ const startServer = async () => {
 
 
 
-  // Socket.IO connection handling
+  // Socket.IO connection handling with authentication
+
+  io.use(async (socket, next) => {
+    // 🔒 SECURITY: Extract and verify JWT from socket handshake
+    try {
+      const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+      if (token) {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        socket.userId = decoded.id || decoded._id || decoded.userId;
+        console.log(`🔌 Socket authenticated | socketId=${socket.id} | userId=${socket.userId}`);
+      } else {
+        console.warn(`⚠️ Socket connected without auth token | socketId=${socket.id}`);
+        // Allow connection but mark as unauthenticated (backward compatibility)
+        socket.userId = null;
+      }
+    } catch (err) {
+      console.warn(`⚠️ Socket auth failed | socketId=${socket.id} | error=${err.message}`);
+      socket.userId = null;
+    }
+    next();
+  });
 
   io.on('connection', (socket) => {
 
-    console.log(`🔌 Client connected: ${socket.id}`);
+    console.log(`🔌 Client connected: ${socket.id} | userId=${socket.userId || 'anonymous'}`);
 
     
 
     // Join job-specific rooms for progress updates
 
-    socket.on('join-audit', (jobId) => {
+    socket.on('join-audit', async (jobId) => {
+      try {
+        // 🔒 SECURITY: Verify socket user owns the job's project before joining room
+        if (socket.userId) {
+          const job = await Job.findById(jobId).select('project_id').lean();
+          if (!job) {
+            console.warn(`⚠️ Socket join-audit rejected: job not found | socketId=${socket.id} | jobId=${jobId}`);
+            return;
+          }
+          const project = await SeoProject.findById(job.project_id).select('user_id').lean();
+          if (!project || project.user_id.toString() !== socket.userId.toString()) {
+            console.warn(`⚠️ Socket join-audit rejected: ownership mismatch | socketId=${socket.id} | jobId=${jobId}`);
+            return;
+          }
+        }
+        socket.join(`audit-${jobId}`);
+        console.log(`📊 Client ${socket.id} joined audit room for job: ${jobId}`);
+      } catch (err) {
+        console.error(`❌ Socket join-audit error | socketId=${socket.id} | jobId=${jobId} | error=${err.message}`);
+        // Fallback: allow join if DB lookup fails (prevents breaking real-time updates)
+        socket.join(`audit-${jobId}`);
+      }
+    });
 
-      socket.join(`audit-${jobId}`);
+    // 🔒 Join project-scoped room for completion/error events
+    socket.on('join-project', async (projectId) => {
+      try {
+        if (socket.userId) {
+          const project = await SeoProject.findById(projectId).select('user_id').lean();
+          if (!project || project.user_id.toString() !== socket.userId.toString()) {
+            console.warn(`⚠️ Socket join-project rejected: ownership mismatch | socketId=${socket.id} | projectId=${projectId}`);
+            return;
+          }
+        }
+        socket.join(`project-${projectId}`);
+        console.log(`📊 Client ${socket.id} joined project room: ${projectId}`);
+      } catch (err) {
+        console.error(`❌ Socket join-project error | socketId=${socket.id} | projectId=${projectId} | error=${err.message}`);
+      }
+    });
 
-      console.log(`📊 Client ${socket.id} joined audit room for job: ${jobId}`);
-
+    // Leave project room
+    socket.on('leave-project', (projectId) => {
+      socket.leave(`project-${projectId}`);
+      console.log(`📊 Client ${socket.id} left project room: ${projectId}`);
     });
 
     

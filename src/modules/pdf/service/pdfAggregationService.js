@@ -15,26 +15,20 @@ export class PDFAggregationService {
    */
   static async fetchAllPDFData(projectId) {
     const startTime = Date.now();
-    
-    // 🔍 STEP 3: ADD DEBUG LOGS
-    console.log("AGGREGATION SERVICE: Starting data fetch for projectId:", projectId);
-    console.log("Mongoose connection state:", mongoose.connection.readyState);
-    
+
     let db, ObjectId;
     try {
       const connection = this.getDbConnection();
       db = connection.db;
       ObjectId = connection.ObjectId;
-      console.log("DB connection established successfully");
     } catch (error) {
-      console.error("DB connection failed:", error.message);
+      LoggerUtil.error('PDF aggregation DB connection failed', error);
       throw new Error(`Database connection failed: ${error.message}`);
     }
     
     const projectIdObj = new ObjectId(projectId);
 
     try {
-      console.log("AGGREGATION SERVICE: Executing parallel queries");
       // Execute all queries in parallel for maximum performance
       const [
         projectData,
@@ -120,10 +114,8 @@ export class PDFAggregationService {
       return aggregatedData;
 
     } catch (error) {
-      console.error("AGGREGATION SERVICE ERROR:", error.message);
-      console.error("AGGREGATION SERVICE STACK:", error.stack);
-      
-      // 🔧 STEP 5: VERIFY OUTPUT - Return safe fallback structure
+      LoggerUtil.error('PDF aggregation query failed', error);
+
       const fallbackData = {
         project: { project_name: "Unknown", main_url: "N/A" },
         ai: {
@@ -158,7 +150,6 @@ export class PDFAggregationService {
         fallbackUsed: true
       });
 
-      console.log("AGGREGATION SERVICE: Returning fallback data due to error");
       return fallbackData;
     }
   }
@@ -592,7 +583,7 @@ export class PDFAggregationService {
    * Fetch internal links data
    */
   static async fetchInternalLinksData(db, projectId) {
-    const stats = await db.collection('seo_internal_links')
+    const stats = await db.collection('seo_ai_internal_links')
       .aggregate([
         { $match: { projectId } },
         {
@@ -633,9 +624,6 @@ export class PDFAggregationService {
    */
   static async fetchOnpageIssuesData(db, projectId) {
     try {
-      console.log("ONPAGE RAW: Fetching onpage issues for projectId:", projectId);
-      
-      // Correct aggregation pipeline as per requirements
       const issueCounts = await db.collection('seo_page_issues')
         .aggregate([
           { $match: { projectId } },
@@ -681,27 +669,10 @@ export class PDFAggregationService {
         warnings: 0,
         informational: 0
       };
-      
-      console.log("ONPAGE COUNTS:", result);
-      
-      // DEBUG: Check raw severity distribution
-      const rawSeverities = await db.collection('seo_page_issues')
-        .aggregate([
-          { $match: { projectId } },
-          {
-            $group: {
-              _id: '$severity',
-              count: { $sum: 1 }
-            }
-          }
-        ]).toArray();
-      
-      console.log("ONPAGE RAW SEVERITY DISTRIBUTION:", rawSeverities);
-      
+
       return result;
       
     } catch (error) {
-      console.error("ONPAGE ERROR: Failed to fetch onpage issues:", error);
       LoggerUtil.error('Failed to fetch onpage issues', error);
       return { 
         totalIssues: 0,
@@ -719,16 +690,11 @@ export class PDFAggregationService {
    */
   static async getOnPageIssueCounts(projectId) {
     try {
-      console.log("GET ONPAGE COUNTS: Starting for projectId:", projectId);
       const { db, ObjectId } = this.getDbConnection();
       const projectIdObj = new ObjectId(projectId);
-      
-      const counts = await this.fetchOnpageIssuesData(db, projectIdObj);
-      console.log("ONPAGE COUNTS:", counts);
-      
-      return counts;
+      return await this.fetchOnpageIssuesData(db, projectIdObj);
     } catch (error) {
-      console.error("GET ONPAGE COUNTS ERROR:", error);
+      LoggerUtil.error('Failed to get onpage issue counts', error);
       return {
         totalIssues: 0,
         critical: 0,
@@ -743,26 +709,7 @@ export class PDFAggregationService {
    */
   static async fetchPerformanceData(db, projectId) {
     try {
-      // 🔍 STEP 3: ADD DEBUG LOGS
-      console.log("FETCH PERFORMANCE: Starting for projectId:", projectId);
-      console.log("DB available:", !!db);
-      console.log("DB collections:", db ? Object.keys(db.collections || {}) : "N/A");
-      
-      // 🔧 STEP 4: FIX AGGREGATION WITH SAFE ERROR HANDLING
-      let collection;
-      try {
-        collection = db.collection('seo_domain_performance');
-        console.log("PERF Collection created successfully:", !!collection);
-      } catch (err) {
-        console.error("PERF Collection creation failed:", err.message);
-        throw new Error(`Failed to create collection: ${err.message}`);
-      }
-      
-      if (!collection) {
-        console.error("PERF Collection is null/undefined");
-        return { mobile: null, desktop: null };
-      }
-
+      const collection = db.collection('seo_domain_performance');
       const performance = await collection.findOne({ project_id: projectId }, {
         mobile: 1,
         desktop: 1,
@@ -770,10 +717,7 @@ export class PDFAggregationService {
         tested_at: 1
       });
 
-      console.log("PERF Raw data:", performance);
-
       if (!performance) {
-        console.log("PERF No data found, returning null values");
         return { mobile: null, desktop: null };
       }
 
@@ -850,27 +794,16 @@ export class PDFAggregationService {
    * Get database connection helper
    */
   static getDbConnection() {
-    // 🔍 STEP 2: FIX COLLECTION ERROR
-    console.log("DB connection:", mongoose.connection.readyState);
-    console.log("DB name:", mongoose.connection.name);
-    
-    // Use mongoose.connection.db directly - it should be available even if readyState is 0
     const db = mongoose.connection.db;
     if (!db) {
-      console.error("Database not available, trying to get from mongoose.connections[0]");
-      // Fallback to first connection
       const fallbackDb = mongoose.connections[0]?.db;
       if (!fallbackDb) {
         throw new Error("Database connection not available");
       }
       const { ObjectId } = mongoose.Types;
-      console.log("Using fallback DB connection, ObjectId available:", !!ObjectId);
       return { db: fallbackDb, ObjectId };
     }
-    
     const { ObjectId } = mongoose.Types;
-    console.log("DB connection established, ObjectId available:", !!ObjectId);
-    
     return { db, ObjectId };
   }
 }

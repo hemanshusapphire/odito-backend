@@ -1,6 +1,7 @@
 import express from 'express';
-import { startScraping, getScrapingStatus, cancelAudit, getPageRawHtml } from '../controller/scrapingController.js';
+import { startScraping, startVerification, getScrapingStatus, cancelAudit, getPageRawHtml } from '../controller/scrapingController.js';
 import auth from '../../user/middleware/auth.js';
+import { validateProjectAccess } from '../../../middleware/auth.middleware.js';
 
 const router = express.Router();
 
@@ -15,11 +16,18 @@ router.use(auth);
 router.post('/start-scraping', startScraping);
 
 /**
- * @route   GET /api/seo/scraping-status/:project_id
- * @desc    Get scraping status for a project
+ * @route   POST /api/seo/start-verification
+ * @desc    Start Quick Recheck — lightweight re-analysis without full crawl
  * @access  Private
  */
-router.get('/scraping-status/:project_id', getScrapingStatus);
+router.post('/start-verification', startVerification);
+
+/**
+ * @route   GET /api/seo/scraping-status/:id
+ * @desc    Get scraping status for a project
+ * @access  Private (project ownership verified)
+ */
+router.get('/scraping-status/:id', validateProjectAccess(), getScrapingStatus);
 
 /**
  * @route   POST /api/seo/cancel-audit

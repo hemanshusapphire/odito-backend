@@ -1,7 +1,7 @@
 import express from 'express';
 import auth from '../../user/middleware/auth.js';
 import { validateProjectAccess } from '../../../middleware/auth.middleware.js';
-import { startAiVisibility, getAiVisibilityProjects, startAudit, getWebsiteOptimization, getAISearchAudit, getAISearchAuditIssues, getAISearchAuditIssuePages } from '../../ai_visibility/controller/aiVisibilityController.js';
+import { startAiVisibility, getAiVisibilityProjects, startAudit, getWebsiteOptimization, getAISearchAudit, getAISearchAuditIssues, getAISearchAuditIssuePages, getAIAccessibility, getAEOHub } from '../../ai_visibility/controller/aiVisibilityController.js';
 import { getStandaloneAIVisibilityPages, getPageScore, getAIVisibilityPageIssues } from '../../app_user/controller/projectDataController.js';
 
 const router = express.Router();
@@ -13,6 +13,12 @@ router.get('/projects', getAiVisibilityProjects);
 
 // NEW: Get website optimization aggregation
 router.get('/projects/:projectId/website-optimization', validateProjectAccess(), getWebsiteOptimization);
+
+// Domain-level AI Accessibility (crawler access + llms.txt)
+router.get('/projects/:projectId/ai-accessibility', validateProjectAccess(), getAIAccessibility);
+
+// AEO Hub aggregated data (metrics + issues scoped to AEO categories)
+router.get('/projects/:projectId/aeo-hub', validateProjectAccess(), getAEOHub);
 
 // NEW: Get AI Search Audit aggregation
 router.get('/projects/:projectId/ai-search-audit', validateProjectAccess(), getAISearchAudit);

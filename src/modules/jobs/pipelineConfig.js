@@ -33,20 +33,52 @@ export const PIPELINE_CONFIG = {
   },
 
   // ──────────────────────────────────────────────────────────────────────────
-  // TECHNICAL_DOMAIN → PARALLEL(PAGE_SCRAPING, HEADLESS_ACCESSIBILITY)  (uses source LINK_DISCOVERY job)
+  // TECHNICAL_DOMAIN → URL_QUALIFICATION  (uses source LINK_DISCOVERY job)
+  // URL_QUALIFICATION probes all discovered URLs and emits canonicalUrls.
   // ──────────────────────────────────────────────────────────────────────────
   [JOB_TYPES.TECHNICAL_DOMAIN]: {
-    next: [JOB_TYPES.PAGE_SCRAPING, JOB_TYPES.HEADLESS_ACCESSIBILITY],
-    parallel: true,
+    next: [JOB_TYPES.URL_QUALIFICATION],
+    parallel: false,
     atomicGuard: true,
     resolveSource: true
   },
 
   // ──────────────────────────────────────────────────────────────────────────
-  // PAGE_SCRAPING → PARALLEL(CRAWL_GRAPH, AI_VISIBILITY)  (parallel execution)
+  // URL_QUALIFICATION → PARALLEL(PAGE_SCRAPING, HEADLESS_ACCESSIBILITY,
+  //                              AI_VISIBILITY)
+  //
+  // forwardCanonicalUrls: chainingEngine extracts result_data.canonicalUrls
+  // from this job and injects it into each downstream job's input_data,
+  // guaranteeing all three workers process the identical URL set.
+  //
+  // NOTE: CRAWL_GRAPH is intentionally NOT in this fan-out. It reads from
+  // seo_page_data (written by PAGE_SCRAPING) and must run after scraping
+  // completes. See PAGE_SCRAPING → CRAWL_GRAPH below.
+  // ──────────────────────────────────────────────────────────────────────────
+  [JOB_TYPES.URL_QUALIFICATION]: {
+    next: [
+      JOB_TYPES.PAGE_SCRAPING,
+      JOB_TYPES.HEADLESS_ACCESSIBILITY
+    ],
+    parallel: true,
+    atomicGuard: true,
+    forwardCanonicalUrls: true
+  },
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // PAGE_SCRAPING → parallel(CRAWL_GRAPH, AI_VISIBILITY)
+  // CRAWL_GRAPH must remain downstream of PAGE_SCRAPING because it reads
+  // from seo_page_data (populated by page scraping). Running it in parallel
+  // with PAGE_SCRAPING would yield an empty crawl graph.
+  //
+  // AI_VISIBILITY also reads directly from raw_html in seo_page_data, so it
+  // must run after PAGE_SCRAPING completes.
   // ──────────────────────────────────────────────────────────────────────────
   [JOB_TYPES.PAGE_SCRAPING]: {
-    next: [JOB_TYPES.CRAWL_GRAPH, JOB_TYPES.AI_VISIBILITY],
+    next: [
+      JOB_TYPES.CRAWL_GRAPH,
+      JOB_TYPES.AI_VISIBILITY
+    ],
     parallel: true,
     atomicGuard: true
   },
@@ -87,15 +119,12 @@ export const PIPELINE_CONFIG = {
   },
 
   // ──────────────────────────────────────────────────────────────────────────
-  // PAGE_ANALYSIS → SEO_SCORING  (emits completion event first)
+  // PAGE_ANALYSIS → SEO_SCORING
   // ──────────────────────────────────────────────────────────────────────────
   [JOB_TYPES.PAGE_ANALYSIS]: {
     next: [JOB_TYPES.SEO_SCORING],
     parallel: false,
-    atomicGuard: true,
-    hooks: {
-      beforeChain: 'emitCompleted'
-    }
+    atomicGuard: true
   },
 
   
@@ -109,10 +138,24 @@ export const PIPELINE_CONFIG = {
   },
 
   // ──────────────────────────────────────────────────────────────────────────
-  // AI_VISIBILITY_SCORING → (terminal, but triggers project update)
+  // SEO_SCORING → (terminal) — emits audit:completed after scores are written
+  // ──────────────────────────────────────────────────────────────────────────
+  [JOB_TYPES.SEO_SCORING]: {
+    next: [],
+    hooks: {
+      onComplete: 'emitCompleted'
+    }
+  },
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // AI_VISIBILITY_SCORING → (terminal) — also emits audit:completed so the
+  //   frontend refreshes AI visibility data even when it finishes after SEO_SCORING.
   // ──────────────────────────────────────────────────────────────────────────
   [JOB_TYPES.AI_VISIBILITY_SCORING]: {
-    next: []
+    next: [],
+    hooks: {
+      onComplete: 'emitCompleted'
+    }
   },
 
   // ──────────────────────────────────────────────────────────────────────────

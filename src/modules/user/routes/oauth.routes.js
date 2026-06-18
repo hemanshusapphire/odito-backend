@@ -5,6 +5,7 @@ import axios from "axios";
 import User from "../model/User.js";
 import GoogleConnection from "../../app_user/model/GoogleConnection.js";
 import { formatCreditsForFrontend } from "../service/authService.js";
+import { AuthUtil } from "../../../utils/AuthUtil.js";
 
 const router = express.Router();
 
@@ -245,6 +246,8 @@ router.get("/google/callback", async (req, res) => {
 
       console.log("Backend JWT issued for user:", user.email);
 
+      const landingPage = await AuthUtil.determineUserLandingPage(user._id);
+
       // Return JSON response consistent with existing auth API
       return res.status(200).json({
         success: true,
@@ -260,7 +263,9 @@ router.get("/google/callback", async (req, res) => {
             roleId: user.roleId,
             credits: formatCreditsForFrontend(user),
             subscription: user.subscription,
-            isEmailVerified: user.isEmailVerified
+            isEmailVerified: user.isEmailVerified,
+            hasProjects: landingPage.hasProjects,
+            redirectTo: landingPage.redirectTo
           }
         }
       });
@@ -365,6 +370,8 @@ router.post("/google/callback", async (req, res) => {
 
     console.log("BACKEND OAUTH - JWT issued for NextAuth user:", email);
 
+    const landingPage = await AuthUtil.determineUserLandingPage(user._id);
+
     // Return response consistent with existing auth API
     return res.status(200).json({
       success: true,
@@ -381,7 +388,9 @@ router.post("/google/callback", async (req, res) => {
           credits: formatCreditsForFrontend(user),
           subscription: user.subscription,
           isEmailVerified: user.isEmailVerified,
-          isNewUser: isNewUser
+          isNewUser: isNewUser,
+          hasProjects: landingPage.hasProjects,
+          redirectTo: landingPage.redirectTo
         }
       }
     });

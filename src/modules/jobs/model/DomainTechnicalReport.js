@@ -43,6 +43,11 @@ const domainTechnicalReportSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.Mixed,
     default: {}
   },
+  // Normalized per-bot accessibility signals derived from robots.txt (extraction only)
+  aiCrawlerSignals: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
   sslValid: {
     type: Boolean,
     default: false
@@ -74,6 +79,14 @@ const domainTechnicalReportSchema = new mongoose.Schema({
     canonical_mismatches: { type: Number, default: 0 },
     non_indexable_urls: { type: Number, default: 0 },
     validation_complete: { type: Boolean, default: false }
+  },
+  // Framework detected from the site's homepage HTML + headers.
+  // Populated by the TECHNICAL_DOMAIN worker during audit execution.
+  frameworkType: {
+    name:       { type: String, default: null },   // display name e.g. "Next.js"
+    key:        { type: String, default: null },   // slug e.g. "nextjs"
+    confidence: { type: Number, default: null },   // 0-100
+    source:     { type: String, default: null },   // "html" | "generator" | "header"
   },
   createdAt: {
     type: Date,

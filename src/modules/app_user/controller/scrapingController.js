@@ -31,14 +31,31 @@ const resetProjectCrawlData = async (projectId) => {
 
     LoggerUtil.info(`Resetting crawl data for project | projectId=${projectId}`);
 
-    // Clear all crawl-related collections for this project (external links disabled)
+    // Clear ALL audit-related collections for this project before re-crawl
+    // NOTE: 'seoprojects' is excluded — that's the project document itself
     const collectionsToClear = [
       'seo_internal_links',
+      'seo_external_links',
       'seo_social_links',
       'seo_page_data',
       'seo_page_issues',
+      'seo_page_performance',
+      'seo_page_scores',
+      'seo_page_summary',
       'seo_first_snapshot',
-      'seo_mainurl_snapshot'
+      'seo_mainurl_snapshot',
+      'seo_headless_data',
+      'seo_crawl_graph',
+      'seo_domain_performance',
+      'seo_keyword_research',
+      'seo_keyword_opportunities',
+      'seo_rankings',
+      'seo_ai_page_scores',
+      'seo_ai_visibility',
+      'seo_ai_visibility_issues',
+      'seo_ai_visibility_project',
+      'domain_technical_reports',
+      'search_console_data'
     ];
 
     let totalDeleted = 0;
@@ -49,6 +66,16 @@ const resetProjectCrawlData = async (projectId) => {
       totalDeleted += result.deletedCount;
       LoggerUtil.debug(`Cleared ${collectionName}`, { deleted: result.deletedCount });
     }
+
+    // 🔥 CRITICAL: Delete old Job records for this project.
+    // Without this, the dependency gate in chainingEngine._checkDependencyGate()
+    // finds old completed PAGE_ANALYSIS jobs and silently skips creating new ones,
+    // breaking the entire recrawl pipeline.
+    const jobDeleteResult = await Job.deleteMany({
+      project_id: projectIdObj
+    });
+    totalDeleted += jobDeleteResult.deletedCount;
+    LoggerUtil.info(`Cleared old jobs`, { projectId, deleted: jobDeleteResult.deletedCount });
 
     // Reset project crawl summary fields
     await SeoProject.findByIdAndUpdate(projectId, {
@@ -69,6 +96,263 @@ const resetProjectCrawlData = async (projectId) => {
   } catch (error) {
     LoggerUtil.error(`Failed to reset crawl data`, error, { projectId });
     throw error;
+  }
+};
+
+/**
+ * Soft reset — clear only collections regenerated during verification.
+ * Preserves discovery data (seo_internal_links, crawl graph, domain performance,
+ * keyword research, technical reports) so Quick Recheck can reuse them.
+ */
+const softResetProjectCrawlData = async (projectId) => {
+  try {
+    const db = getDb();
+    const { ObjectId } = mongoose.Types;
+    const projectIdObj = new ObjectId(projectId);
+
+    LoggerUtil.info(`Soft resetting verification data for project | projectId=${projectId}`);
+
+    // Clear only collections that verification regenerates.
+    // Preserved: seo_internal_links, seo_external_links, seo_social_links,
+    //            seo_crawl_graph, seo_domain_performance, seo_keyword_research,
+    //            seo_keyword_opportunities, seo_rankings, domain_technical_reports
+    const collectionsToSoftClear = [
+      'seo_page_data',
+      'seo_page_issues',
+      'seo_page_performance',
+      'seo_page_scores',
+      'seo_page_summary',
+      'seo_headless_data',
+      'seo_ai_visibility',
+      'seo_ai_visibility_issues',
+      'seo_ai_visibility_project',
+      'seo_ai_page_scores',
+      'search_console_data',
+      'seo_first_snapshot',
+      'seo_mainurl_snapshot'
+    ];
+
+    let totalDeleted = 0;
+    for (const collectionName of collectionsToSoftClear) {
+      const result = await db.collection(collectionName).deleteMany({ projectId: projectIdObj });
+      totalDeleted += result.deletedCount;
+      LoggerUtil.debug(`Soft cleared ${collectionName}`, { deleted: result.deletedCount });
+    }
+
+    // 🔥 CRITICAL: Delete old Job records so the dependency gate does not find
+    // stale PAGE_ANALYSIS jobs and silently skip creating new ones.
+    const jobDeleteResult = await Job.deleteMany({ project_id: projectIdObj });
+    totalDeleted += jobDeleteResult.deletedCount;
+    LoggerUtil.info(`Soft reset: cleared old jobs`, { projectId, deleted: jobDeleteResult.deletedCount });
+
+    // Reset verification-relevant project counters only
+    await SeoProject.findByIdAndUpdate(projectId, {
+      pages_crawled: 0,
+      pages_analyzed: 0,
+      total_issues: 0,
+      crawl_status: 'pending',
+      last_analysis_at: null
+    });
+
+    LoggerUtil.info(`Project soft reset complete`, { projectId, totalDeleted });
+    return totalDeleted;
+
+  } catch (error) {
+    LoggerUtil.error(`Failed to soft reset crawl data`, error, { projectId });
+    throw error;
+  }
+};
+
+/**
+ * Start the Quick Recheck (verification) pipeline.
+ *
+ * Skips LINK_DISCOVERY, URL_QUALIFICATION, DOMAIN_PERFORMANCE, KEYWORD_RESEARCH,
+ * PERFORMANCE_MOBILE, and PERFORMANCE_DESKTOP. Reuses URLs from seo_internal_links.
+ * Runs: PAGE_SCRAPING → CRAWL_GRAPH + AI_VISIBILITY, HEADLESS_ACCESSIBILITY,
+ *       then PAGE_ANALYSIS → SEO_SCORING and AI_VISIBILITY_SCORING.
+ */
+export const startVerification = async (req, res) => {
+  try {
+    const jobDispatcher = new JobDispatcher();
+    const { project_id } = req.body;
+
+    if (!project_id) {
+      return res.status(400).json({ success: false, message: 'project_id is required' });
+    }
+
+    const project = await SeoProject.findById(project_id);
+    if (!project) {
+      return res.status(404).json({ success: false, message: 'Project not found' });
+    }
+
+    // 🔒 SECURITY: Verify project ownership before starting verification
+    if (project.user_id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: You do not own this project'
+      });
+    }
+
+    // 🔒 ATOMIC IDEMPOTENCY GUARD: same pattern as startScraping
+    const claimedProject = await SeoProject.findOneAndUpdate(
+      { _id: project_id, crawl_status: { $nin: ['running'] } },
+      { crawl_status: 'running', audit_started_at: new Date() },
+      { new: true }
+    );
+
+    if (!claimedProject) {
+      return res.status(409).json({
+        success: false,
+        message: 'Scraping already in progress for this project'
+      });
+    }
+
+    // Belt-and-suspenders: check for running verification jobs
+    const existingJobs = await jobService.getJobsByProject(project_id, {
+      jobType: { $in: ['PAGE_SCRAPING', 'HEADLESS_ACCESSIBILITY'] },
+      status: { $in: ['pending', 'processing'] }
+    });
+
+    if (existingJobs.length > 0) {
+      await SeoProject.findByIdAndUpdate(project_id, { crawl_status: project.crawl_status || 'pending' });
+      return res.status(409).json({
+        success: false,
+        message: 'Verification already in progress for this project'
+      });
+    }
+
+    // Load URLs from seo_page_data — these are pages that previously returned HTTP 200
+    // and were successfully scraped. seo_internal_links may contain discovered-but-never-
+    // scraped or dead URLs; seo_page_data is the authoritative set of live pages.
+    const db = getDb();
+    const { ObjectId } = mongoose.Types;
+    const projectIdObj = new ObjectId(project_id);
+
+    const pageDataDocs = await db.collection('seo_page_data')
+      .find({ projectId: projectIdObj }, { projection: { url: 1 } })
+      .toArray();
+
+    const rawUrls = [...new Set(pageDataDocs.map(doc => doc.url).filter(Boolean))];
+
+    if (rawUrls.length === 0) {
+      await SeoProject.findByIdAndUpdate(project_id, { crawl_status: project.crawl_status || 'pending' });
+      return res.status(400).json({
+        success: false,
+        code: 'NO_PREVIOUS_CRAWL',
+        message: 'No previous crawl data found. Please run a Full Audit first.'
+      });
+    }
+
+    // Always include project main URL; cap at 50 to bound worker load.
+    // Normalize both sides before comparing — seo_page_data may store the homepage
+    // with or without a trailing slash (e.g. "https://domain.com/" vs "https://domain.com"),
+    // causing a strict .includes() to miss the match and inject both variants as separate URLs.
+    const normalizeForCompare = (u) => u?.replace(/\/+$/, '').toLowerCase() ?? '';
+    const normalizedMain = normalizeForCompare(project.main_url);
+    const alreadyHasMain = rawUrls.some(u => normalizeForCompare(u) === normalizedMain);
+
+    const withMain = alreadyHasMain
+      ? rawUrls
+      : [project.main_url, ...rawUrls];
+
+    const finalUrls = withMain.slice(0, 50);
+
+    LoggerUtil.info(`Starting verification for project | projectId=${project_id} | urls=${finalUrls.length}`);
+
+    // Soft reset: clear verification-regenerated collections, preserve discovery data
+    await softResetProjectCrawlData(project_id);
+
+    // Create verification seed jobs — both receive the same canonical_urls list
+    // so PAGE_SCRAPING and HEADLESS_ACCESSIBILITY process an identical URL set
+    let pageScrapingJob, headlessA11yJob;
+    try {
+      pageScrapingJob = await jobService.createJob({
+        user_id: req.user._id,
+        seo_project_id: project_id,
+        jobType: 'PAGE_SCRAPING',
+        input_data: {
+          mode: 'verification',
+          canonical_urls: finalUrls,
+          main_url: project.main_url
+        },
+        priority: 1
+      });
+
+      headlessA11yJob = await jobService.createJob({
+        user_id: req.user._id,
+        seo_project_id: project_id,
+        jobType: 'HEADLESS_ACCESSIBILITY',
+        input_data: {
+          mode: 'verification',
+          canonical_urls: finalUrls,
+          main_url: project.main_url,
+          source_job_id: pageScrapingJob._id.toString()
+        },
+        priority: 1
+      });
+    } catch (jobCreationError) {
+      LoggerUtil.error('Verification job creation failed, releasing project lock', jobCreationError, { project_id });
+      await SeoProject.findByIdAndUpdate(project_id, { crawl_status: project.crawl_status || 'pending' });
+      throw jobCreationError;
+    }
+
+    // Mark project active
+    await SeoProject.findByIdAndUpdate(project_id, { status: 'active' });
+
+    // Dispatch both seed jobs asynchronously
+    jobDispatcher.dispatchPageScrapingJob(pageScrapingJob).catch(error => {
+      LoggerUtil.error(`Failed to dispatch PAGE_SCRAPING verification job ${pageScrapingJob._id}`, error);
+    });
+
+    jobDispatcher.dispatchHeadlessAccessibilityJob(headlessA11yJob).catch(error => {
+      LoggerUtil.error(`Failed to dispatch HEADLESS_ACCESSIBILITY verification job ${headlessA11yJob._id}`, error);
+    });
+
+    // Emit started events so the frontend receives real-time updates
+    auditProgressService.emitStarted(pageScrapingJob._id.toString(), {
+      job_id: pageScrapingJob._id,
+      job_type: pageScrapingJob.jobType,
+      project_id,
+      main_url: project.main_url,
+      user_id: req.user._id,
+      mode: 'verification'
+    });
+
+    auditProgressService.emitStarted(headlessA11yJob._id.toString(), {
+      job_id: headlessA11yJob._id,
+      job_type: headlessA11yJob.jobType,
+      project_id,
+      main_url: project.main_url,
+      user_id: req.user._id,
+      mode: 'verification'
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Quick Recheck started',
+      data: {
+        mode: 'verification',
+        jobs: [
+          {
+            job_id: pageScrapingJob._id,
+            job_type: pageScrapingJob.jobType,
+            status: pageScrapingJob.status
+          },
+          {
+            job_id: headlessA11yJob._id,
+            job_type: headlessA11yJob.jobType,
+            status: headlessA11yJob.status
+          }
+        ],
+        url_count: finalUrls.length,
+        project_id,
+        main_url: project.main_url
+      }
+    });
+
+  } catch (error) {
+    LoggerUtil.error('Error starting verification pipeline', error, { project_id: req.body.project_id });
+    return res.status(500).json(ResponseUtil.error('Failed to start verification pipeline', 500));
   }
 };
 
@@ -98,14 +382,46 @@ export const startScraping = async (req, res) => {
       });
     }
 
-    // Check if there's already a LINK_DISCOVERY or PAGE_SCRAPING job running for this project
+    // 🔒 SECURITY: Verify project ownership before starting audit
+    if (project.user_id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: You do not own this project'
+      });
+    }
+
+    // 🔒 ATOMIC IDEMPOTENCY GUARD: Prevent duplicate audit starts from concurrent requests
+    // Uses atomic findOneAndUpdate to claim the project — only one request can transition
+    // crawl_status from a non-running state. This prevents double-clicks, refreshes,
+    // websocket reconnects, and race conditions from causing duplicate credit deductions.
+    const claimedProject = await SeoProject.findOneAndUpdate(
+      {
+        _id: project_id,
+        crawl_status: { $nin: ['running'] }
+      },
+      {
+        crawl_status: 'running',
+        audit_started_at: new Date()
+      },
+      { new: true }
+    );
+
+    if (!claimedProject) {
+      return res.status(409).json({
+        success: false,
+        message: 'Scraping already in progress for this project'
+      });
+    }
+
+    // Also check for existing running jobs (belt-and-suspenders with the atomic guard above)
     const existingJobs = await jobService.getJobsByProject(project_id, {
       jobType: { $in: ['LINK_DISCOVERY', 'PAGE_SCRAPING', 'DOMAIN_PERFORMANCE', 'KEYWORD_RESEARCH'] },
       status: { $in: ['pending', 'processing'] }
     });
 
-    // Allow starting audit if no active jobs OR if project is pending (first-time setup)
-    if (existingJobs.length > 0 && project.status !== 'pending') {
+    if (existingJobs.length > 0) {
+      // Reset crawl_status since we claimed it but jobs already exist
+      await SeoProject.findByIdAndUpdate(project_id, { crawl_status: project.crawl_status || 'pending' });
       return res.status(409).json({
         success: false,
         message: 'Scraping already in progress for this project',
@@ -113,11 +429,76 @@ export const startScraping = async (req, res) => {
       });
     }
 
-    // Check and deduct credits (3 credits per scrape)
+    // Pre-check credits BEFORE doing any work (fast-fail)
+    const user = await User.findById(req.user._id);
+    const monthlyCredits = (user.credits && typeof user.credits === 'object') ? (user.credits.monthly || 0) : 0;
+    const permanentCredits = (user.credits && typeof user.credits === 'object') ? (user.credits.permanent || 0) : (user.credits || 1);
+    const totalCredits = monthlyCredits + permanentCredits;
+
+    if (totalCredits < 1) {
+      // Release the crawl_status lock since we can't proceed
+      await SeoProject.findByIdAndUpdate(project_id, { crawl_status: project.crawl_status || 'pending' });
+      return res.status(403).json({
+        success: false,
+        code: 'INSUFFICIENT_CREDITS',
+        message: 'Not enough credits to start scraping'
+      });
+    }
+
+    // CRITICAL: Reset all previous crawl data before starting new crawl
+    // This ensures new crawls rewrite existing data instead of creating duplicates
+    await resetProjectCrawlData(project_id);
+
+    // Create jobs FIRST — if job creation fails, no credit is deducted
+    let linkDiscoveryJob, domainPerformanceJob, keywordResearchJob;
     try {
-      const user = await User.findById(req.user._id);
-      await useCredits(user, 3);
+      // Create LINK_DISCOVERY job
+      linkDiscoveryJob = await jobService.createJob({
+        user_id: req.user._id,
+        seo_project_id: project_id,
+        jobType: 'LINK_DISCOVERY',
+        input_data: {
+          main_url: project.main_url
+        },
+        priority: 1 // Highest priority
+      });
+
+      // Create DOMAIN_PERFORMANCE job
+      domainPerformanceJob = await jobService.createJob({
+        user_id: req.user._id,
+        seo_project_id: project_id,
+        jobType: 'DOMAIN_PERFORMANCE',
+        input_data: {
+          main_url: project.main_url
+        },
+        priority: 2
+      });
+
+      // Create KEYWORD_RESEARCH job
+      keywordResearchJob = await jobService.createJob({
+        user_id: req.user._id,
+        seo_project_id: project_id,
+        jobType: 'KEYWORD_RESEARCH',
+        input_data: {
+          keyword: project.keywords && project.keywords.length > 0 ? project.keywords[0] : 'default seo keyword',
+          depth: 3
+        },
+        priority: 3
+      });
+    } catch (jobCreationError) {
+      // Job creation failed — release the crawl_status lock, do NOT deduct credits
+      LoggerUtil.error('Job creation failed, releasing project lock', jobCreationError, { project_id });
+      await SeoProject.findByIdAndUpdate(project_id, { crawl_status: project.crawl_status || 'pending' });
+      throw jobCreationError;
+    }
+
+    // Deduct credits AFTER successful job creation (1 credit per audit)
+    try {
+      await useCredits(user, 1);
     } catch (creditError) {
+      // Credit deduction failed after jobs were created — clean up jobs and release lock
+      LoggerUtil.error('Credit deduction failed after job creation, cleaning up', creditError, { project_id });
+      await SeoProject.findByIdAndUpdate(project_id, { crawl_status: project.crawl_status || 'pending' });
       if (creditError.code === 'INSUFFICIENT_CREDITS') {
         return res.status(403).json({
           success: false,
@@ -127,44 +508,6 @@ export const startScraping = async (req, res) => {
       }
       throw creditError;
     }
-
-    // CRITICAL: Reset all previous crawl data before starting new crawl
-    // This ensures new crawls rewrite existing data instead of creating duplicates
-    await resetProjectCrawlData(project_id);
-
-    // Create LINK_DISCOVERY job
-    const linkDiscoveryJob = await jobService.createJob({
-      user_id: req.user._id,
-      seo_project_id: project_id,
-      jobType: 'LINK_DISCOVERY',
-      input_data: {
-        main_url: project.main_url
-      },
-      priority: 1 // Highest priority
-    });
-
-    // Create DOMAIN_PERFORMANCE job
-    const domainPerformanceJob = await jobService.createJob({
-      user_id: req.user._id,
-      seo_project_id: project_id,
-      jobType: 'DOMAIN_PERFORMANCE',
-      input_data: {
-        main_url: project.main_url
-      },
-      priority: 2
-    });
-
-    // Create KEYWORD_RESEARCH job
-    const keywordResearchJob = await jobService.createJob({
-      user_id: req.user._id,
-      seo_project_id: project_id,
-      jobType: 'KEYWORD_RESEARCH',
-      input_data: {
-        keyword: project.keywords && project.keywords.length > 0 ? project.keywords[0] : 'default seo keyword',
-        depth: 3
-      },
-      priority: 3
-    });
 
     // Dispatch all three jobs asynchronously
     // Don't wait for dispatch to respond to user immediately
@@ -180,11 +523,9 @@ export const startScraping = async (req, res) => {
       LoggerUtil.error(`Failed to queue job ${keywordResearchJob._id}`, error);
     });
 
-    // Update project status to active when scraping starts
+    // Update project status to active (crawl_status already set by atomic guard above)
     await SeoProject.findByIdAndUpdate(project_id, {
-      status: 'active',
-      crawl_status: 'running',
-      audit_started_at: new Date()
+      status: 'active'
     });
 
     // Emit audit started event for real-time frontend updates
@@ -259,6 +600,17 @@ export const cancelAudit = async (req, res) => {
     if (!project_id && !job_id) {
       LoggerUtil.warn('Missing project_id or job_id');
       return res.status(400).json(ResponseUtil.error('project_id or job_id is required', 400));
+    }
+
+    // 🔒 SECURITY: Verify project ownership before cancelling
+    if (project_id) {
+      const project = await SeoProject.findById(project_id);
+      if (!project) {
+        return res.status(404).json(ResponseUtil.error('Project not found', 404));
+      }
+      if (project.user_id.toString() !== req.user._id.toString()) {
+        return res.status(403).json(ResponseUtil.error('Access denied: You do not own this project', 403));
+      }
     }
 
     let runningJobs = [];
@@ -378,7 +730,8 @@ export const cancelAudit = async (req, res) => {
  */
 export const getScrapingStatus = async (req, res) => {
   try {
-    const { project_id } = req.params;
+    // Project ownership already verified by validateProjectAccess middleware
+    const project_id = req.params.id;
 
     const jobs = await jobService.getJobsByProject(project_id);
 
@@ -437,7 +790,7 @@ export const getScrapingStatus = async (req, res) => {
  */
 export const getPageRawHtml = async (req, res) => {
   try {
-    const { url } = req.query;
+    const { url, project_id } = req.query;
 
     if (!url) {
       return res.status(400).json({
@@ -446,13 +799,33 @@ export const getPageRawHtml = async (req, res) => {
       });
     }
 
+    // 🔒 SECURITY: Require project_id to prevent cross-project data leakage
+    if (!project_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'project_id parameter is required'
+      });
+    }
+
+    // 🔒 SECURITY: Verify project ownership
+    const project = await SeoProject.findById(project_id);
+    if (!project || project.user_id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      });
+    }
+
     LoggerUtil.debug(`Fetching raw HTML from stored data for URL: ${url}`);
 
-    // Get the page data from seo_page_data collection
+    // Get the page data from seo_page_data collection — scoped by projectId
+    // Projection: only fetch raw_html + timestamps; avoids loading the full document
     const db = getDb();
-    const pageData = await db.collection('seo_page_data').findOne({
-      url: url
-    });
+    const { ObjectId } = mongoose.Types;
+    const pageData = await db.collection('seo_page_data').findOne(
+      { url: url, projectId: new ObjectId(project_id) },
+      { projection: { raw_html: 1, scrapedAt: 1, scraped_at: 1, _id: 0 } }
+    );
 
     if (!pageData) {
       return res.status(404).json({

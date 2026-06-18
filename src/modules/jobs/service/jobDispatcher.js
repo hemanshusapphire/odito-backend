@@ -263,7 +263,11 @@ class JobDispatcher {
 
           userId: job.user_id.toString(),
 
-          urls: job.input_data.urls
+          urls: job.input_data.urls || [],
+
+          canonicalUrls: job.input_data.canonical_urls || [],
+
+          sourceJobId: job.input_data.source_job_id
 
         }, {
 
@@ -813,7 +817,9 @@ class JobDispatcher {
 
         sourceJobId: job.input_data.source_job_id,
 
-        urls: job.input_data.urls || []
+        urls: job.input_data.urls || [],
+
+        canonicalUrls: job.input_data.canonical_urls || []
 
       }, {
 
@@ -1581,6 +1587,112 @@ class JobDispatcher {
 
     }
 
+  }
+
+
+
+  /**
+   * Dispatch HOMEPAGE_VIDEO_GENERATION job to the SAME Video Worker via HTTP.
+   * Source of truth: HomepageAudit.snapshot ONLY. No live fetches.
+   * Sends videoType so the worker routes to the homepageAuditProcessor.
+   */
+  async dispatchHomepageVideoJob(job) {
+    try {
+      console.log(`[HOMEPAGE_VIDEO_DISPATCH] Starting dispatch | jobId=${job._id}`);
+
+      await jobService.updateJobStatus(job._id, 'processing', {
+        started_at: new Date(),
+        last_attempted_at: new Date()
+      });
+
+      // auditId is stored in the job's input_data at creation time
+      const auditId = job.input_data?.auditId;
+      if (!auditId) {
+        throw new Error(`auditId not found in job input_data | jobId=${job._id}`);
+      }
+
+      const HomepageAudit = (await import('../../external/model/HomepageAudit.js')).default;
+      const audit = await HomepageAudit.findById(auditId).lean();
+
+      if (!audit) {
+        throw new Error(`HomepageAudit not found | auditId=${auditId}`);
+      }
+      if (!audit.snapshot) {
+        throw new Error(`snapshot not found on HomepageAudit | auditId=${auditId}`);
+      }
+
+      console.log(`[HOMEPAGE_VIDEO_DISPATCH] ✅ Found snapshot | auditId=${auditId} | keys=${Object.keys(audit.snapshot).length}`);
+
+      const videoPayload = {
+        jobId: job._id.toString(),
+        videoType: 'HOMEPAGE_AUDIT',
+        auditId: auditId.toString(),
+        auditSnapshot: audit.snapshot
+      };
+
+      const response = await axios.post(`${this.videoWorkerURL}/jobs/video-generation`, videoPayload, {
+        timeout: 300000,
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      console.log(`[HOMEPAGE_VIDEO_DISPATCH] Job dispatched successfully | jobId=${job._id} | workerResponse=${response.status}`);
+
+      return { success: true, jobId: job._id };
+
+    } catch (error) {
+      console.error(`[HOMEPAGE_VIDEO_DISPATCH] Dispatch failed | jobId=${job._id} | reason="${error.message}"`);
+
+      await jobService.updateJobStatus(job._id, 'failed', {
+        error: {
+          message: `Failed to dispatch homepage video job to Video worker: ${error.message}`,
+          timestamp: new Date()
+        },
+        failed_at: new Date()
+      });
+
+      return { success: false, message: 'Failed to dispatch homepage video job', error: error.message };
+    }
+  }
+
+  /**
+   * Dispatch URL_QUALIFICATION job to Python worker.
+   * PULL model: job stays pending, worker polls and claims.
+   * PUSH model: HTTP POST to Python.
+   */
+  async dispatchUrlQualificationJob(job) {
+    try {
+      if (this.usePullModel) {
+        await jobService.updateJobStatus(job._id, 'pending');
+        console.log(`✅ [PULL] URL_QUALIFICATION job queued for polling | jobId=${job._id}`);
+        return { success: true, jobId: job._id, dispatched: false };
+      }
+
+      const dispatchUrl = `${this.pythonBaseURL}/api/jobs/url-qualification`;
+      console.log(`[DISPATCH] URL_QUALIFICATION → ${dispatchUrl} | jobId=${job._id}`);
+
+      const response = await axios.post(dispatchUrl, {
+        jobId: job._id.toString(),
+        projectId: job.project_id.toString(),
+        userId: job.user_id.toString(),
+        sourceJobId: job.input_data.source_job_id,
+      }, {
+        timeout: 30000,
+        headers: { 'Content-Type': 'application/json' },
+      });
+
+      console.log(`✅ [DISPATCH] URL_QUALIFICATION accepted | jobId=${job._id}`);
+      return { success: true, jobId: job._id, dispatched: true };
+
+    } catch (error) {
+      console.error(`[ERROR] URL_QUALIFICATION dispatch failed | jobId=${job._id} | reason="${error.message}"`);
+
+      await jobService.updateJobStatus(job._id, 'FAILED', {
+        completed_at: new Date(),
+        error_message: `Dispatch failed: ${error.message}`,
+      });
+
+      return { success: false, message: 'Failed to dispatch URL_QUALIFICATION job', error: error.message };
+    }
   }
 
 
