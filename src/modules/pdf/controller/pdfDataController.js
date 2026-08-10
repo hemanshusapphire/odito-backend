@@ -11,8 +11,6 @@ import { Page09Service } from '../service/page09Service.js';
 import { Page10Service } from '../service/page10Service.js';
 import { Page11Service } from '../service/page11Service.js';
 import { Page16Service } from '../service/page16Service.js';
-import { Page19Service } from '../service/page19Service.js';
-import { Page22Service } from '../service/page22Service.js';
 import { ExecutiveMapper } from '../mapper/sections/executive.mapper.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 
@@ -580,7 +578,6 @@ export class PDFDataController {
           scores: { seoHealth: 0, aiVisibility: 0, performance: 0, technicalHealth: 0 },
           issues: { critical: 0, warnings: 0, informational: 0 },
           issueDistribution: { critical: 0, warnings: 0, info: 0, passed: 0 },
-          aiAnalysis: `Executive summary temporarily unavailable due to system error: ${error.message}`,
           metadata: {
             totalIssues: 0,
             pagesAnalyzed: 0,
@@ -767,47 +764,6 @@ export class PDFDataController {
   }
 
   /**
-   * Generate Page 19 - AI Visibility Overview data
-   */
-  static async getPage19Data(req, res) {
-    try {
-      const { projectId } = req.params;
-      
-      if (!projectId) {
-        return res.status(400).json({
-          success: false,
-          error: {
-            message: 'Project ID is required',
-            code: 'MISSING_PROJECT_ID'
-          }
-        });
-      }
-      
-      const result = await Page19Service.getPage19Data(projectId);
-      
-      if (!result.success) {
-        return res.status(500).json(result);
-      }
-      
-      res.json(result);
-      
-    } catch (error) {
-      LoggerUtil.error('Page 19 controller error', error, {
-        projectId: req.params.projectId,
-        userId: req.user?.id
-      });
-      
-      res.status(500).json({
-        success: false,
-        error: {
-          message: 'Internal server error',
-          code: 'CONTROLLER_ERROR'
-        }
-      });
-    }
-  }
-
-  /**
    * Generate Page 11 - Crawlability Analysis data
    */
   static async getPage11Data(req, res) {
@@ -903,50 +859,4 @@ export class PDFDataController {
     }
   }
 
-  /**
-   * Generate Page 22 - AI Content Readiness data
-   * Uses RAW values from Dashboard API (no normalization)
-   */
-  static async getPage22Data(req, res) {
-    try {
-      const { projectId } = req.params;
-      
-      console.log("Page22 controller hit - projectId:", projectId);
-      
-      if (!projectId) {
-        return res.status(400).json({
-          success: false,
-          error: {
-            message: 'Project ID is required',
-            code: 'MISSING_PROJECT_ID'
-          }
-        });
-      }
-      
-      // Page22Service now uses RAW values from Dashboard API (no normalization)
-      const result = await Page22Service.getPage22Data(projectId);
-      
-      if (!result.success) {
-        return res.status(500).json(result);
-      }
-      
-      console.log("Page22 controller success - returning RAW values identical to Dashboard API");
-      res.json(result);
-      
-    } catch (error) {
-      console.error("Page22 controller error:", error);
-      LoggerUtil.error('Page 22 controller error', error, {
-        projectId: req.params.projectId,
-        userId: req.user?.id
-      });
-      
-      res.status(500).json({
-        success: false,
-        error: {
-          message: 'Internal server error',
-          code: 'CONTROLLER_ERROR'
-        }
-      });
-    }
-  }
 }

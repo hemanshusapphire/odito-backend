@@ -1,5 +1,5 @@
 import { OAuth2Client } from 'google-auth-library';
-import GoogleConnection from '../modules/app_user/model/GoogleConnection.js';
+import GoogleConnection, { encryptToken } from '../modules/app_user/model/GoogleConnection.js';
 
 /**
  * Google API Service - Centralized Token Management
@@ -103,18 +103,18 @@ async function refreshAccessToken(refreshToken) {
 async function updateConnectionTokens(connectionId, tokens) {
   try {
     const updateData = {
-      access_token: tokens.access_token,
+      access_token: encryptToken(tokens.access_token),
       updated_at: new Date()
     };
-    
+
     // Update expiry date if provided
     if (tokens.expiry_date) {
       updateData.token_expires_at = new Date(tokens.expiry_date);
     }
-    
+
     // Update refresh token if Google provided a new one
     if (tokens.refresh_token) {
-      updateData.refresh_token = tokens.refresh_token;
+      updateData.refresh_token = encryptToken(tokens.refresh_token);
     }
     
     const updatedConnection = await GoogleConnection.findByIdAndUpdate(

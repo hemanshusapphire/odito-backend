@@ -6,6 +6,7 @@ import auditProgressService from '../service/auditProgressService.js';
 import DomainTechnicalReport from '../model/DomainTechnicalReport.js';
 import { AIGeneratedVideoService } from '../../video/services/aiGeneratedVideo.service.js';
 import HomepageAuditVideoService from '../../external/service/homepageAuditVideo.service.js';
+import auth from '../../user/middleware/auth.js';
 
 const router = express.Router();
 const jobService = new JobService();
@@ -14,8 +15,15 @@ const jobService = new JobService();
  * Job status endpoints
  */
 
-// GET /jobs/:jobId/status - Get job status (for frontend polling)
-router.get('/:jobId/status', async (req, res) => {
+// GET /jobs/:jobId/status - Get job status (for frontend polling). This is
+// the one route in this file called by the logged-in user's own browser
+// (frontend/services/aiVideoApi.js -> apiService.request, which already
+// attaches the user's Bearer token to every call) rather than by the Python
+// worker, so it can safely require a normal authenticated session — unlike
+// every other route below, which is a worker-only callback with no user
+// session to check (see this file's other routes; left unauthenticated
+// deliberately, not an oversight — see Phase 1 security report).
+router.get('/:jobId/status', auth, async (req, res) => {
   try {
     const { jobId } = req.params;
 
@@ -410,18 +418,73 @@ router.post('/:jobId/summary', async (req, res) => {
  */
 
 // POST /jobs/domain-technical-report - Store domain technical report data
+//
+// Two callers use this same endpoint:
+//   1. TECHNICAL_DOMAIN worker — sends the full report including `domain`,
+//      upserts (creates the project's one-per-project report if absent).
+//   2. URL_QUALIFICATION worker — sends only reachability stats (Coverage
+//      V2 / AISO-CV9), no `domain`. It never creates the report (domain is
+//      a required schema field it doesn't have) — it only patches an
+//      existing one via $set, and no-ops if none exists yet.
 router.post('/domain-technical-report', async (req, res) => {
   try {
-    const { projectId, domain, robotsStatus, robotsExists, robotsContent, sitemapStatus, sitemapExists, sitemapContent, parsedSitemapUrlCount, llmsTxt, aiCrawlerSignals, sslValid, sslExpiryDate, sslDaysRemaining, httpsRedirect, redirectChain, finalUrl, frameworkType } = req.body;
+    const {
+      projectId, domain, robotsStatus, robotsExists, robotsContent,
+      sitemapStatus, sitemapExists, sitemapContent, parsedSitemapUrlCount,
+      llmsTxt, aiCrawlerSignals, sslValid, sslExpiryDate, sslDaysRemaining,
+      httpsRedirect, redirectChain, finalUrl, frameworkType,
+      discoveredUrls, qualifiedUrls, lowPriorityUrls, rejectedUrls
+    } = req.body;
 
-    if (!projectId || !domain) {
+    if (!projectId) {
       return res.status(400).json({
         success: false,
-        message: 'projectId and domain are required'
+        message: 'projectId is required'
       });
     }
 
-    // Upsert the report (one per project)
+    const isFullReport = domain !== undefined && domain !== null;
+
+    if (!isFullReport) {
+      // Reachability-only patch path — update-if-exists, never create.
+      const patch = {};
+      if (discoveredUrls !== undefined) patch.discoveredUrls = discoveredUrls;
+      if (qualifiedUrls !== undefined) patch.qualifiedUrls = qualifiedUrls;
+      if (lowPriorityUrls !== undefined) patch.lowPriorityUrls = lowPriorityUrls;
+      if (rejectedUrls !== undefined) patch.rejectedUrls = rejectedUrls;
+
+      if (Object.keys(patch).length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'domain is required to create a new report, or provide reachability fields to patch an existing one'
+        });
+      }
+
+      const patched = await DomainTechnicalReport.findOneAndUpdate(
+        { projectId },
+        { $set: patch },
+        { upsert: false, new: true }
+      );
+
+      if (!patched) {
+        console.warn(`[API] Reachability patch skipped — no domain_technical_reports doc yet | projectId=${projectId}`);
+        return res.json({
+          success: true,
+          message: 'No existing report to patch — skipped',
+          data: { reportId: null }
+        });
+      }
+
+      console.log(`[API] Domain technical report reachability patch stored | projectId=${projectId} | discoveredUrls=${discoveredUrls} | qualifiedUrls=${qualifiedUrls}`);
+
+      return res.json({
+        success: true,
+        message: 'Reachability stats patched',
+        data: { reportId: patched._id }
+      });
+    }
+
+    // Full report path — unchanged from prior behavior.
     const report = await DomainTechnicalReport.findOneAndUpdate(
       { projectId },
       {
@@ -612,17 +675,13 @@ router.get('/claim', async (req, res) => {
       });
     }
     
-    console.log(`[CLAIM DEBUG] Requested job_type: ${job_type}`);
-    console.log(`[CLAIM DEBUG] Searching for pending jobs...`);
-    
     const job = await jobService.claimJob(job_type);
-    
+
     if (!job) {
-      console.log(`📭 No jobs available for type: ${job_type}`);
       return res.status(204).send(); // 204 No Content - correct HTTP semantics
     }
-    
-    console.log(`✅ Job claimed: ${job._id} (${job.jobType})`);
+
+    console.log(`[INFO] Job claimed | type=${job.jobType} | jobId=${job._id}`);
     
     res.status(200).json({
       success: true,

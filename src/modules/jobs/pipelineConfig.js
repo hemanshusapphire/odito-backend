@@ -6,7 +6,6 @@
  *   next            – job type(s) to create on completion
  *   parallel        – create next jobs in parallel (Promise.allSettled)
  *   atomicGuard     – use duplicate-check guard before creation (default: true)
- *   resolveSource   – resolve the original source job before creation
  *   stageFrom       – override the "from" field in stageChanged events
  *   afterDispatch   – additional jobs to create after a specific next job is dispatched
  *   fallback        – if creation of a next job fails, create these instead (with atomic guard)
@@ -21,26 +20,21 @@ import { JOB_TYPES } from './constants/jobTypes.js';
 export const PIPELINE_CONFIG = {
 
   // ──────────────────────────────────────────────────────────────────────────
-  // LINK_DISCOVERY → TECHNICAL_DOMAIN  (fallback → PAGE_SCRAPING)
+  // LINK_DISCOVERY → URL_QUALIFICATION
+  // URL_QUALIFICATION probes all discovered URLs and emits canonicalUrls.
+  //
+  // TECHNICAL_DOMAIN is no longer part of this chain. It only ever needed
+  // projectId/userId/domain (available at audit start), not LINK_DISCOVERY's
+  // output, so it is now created as an independent seed job alongside
+  // LINK_DISCOVERY/DOMAIN_PERFORMANCE — see
+  // projectAuditService.startProjectAudit(). It no longer gates or forwards
+  // into this chain and has no PIPELINE_CONFIG entry of its own (same as
+  // DOMAIN_PERFORMANCE).
   // ──────────────────────────────────────────────────────────────────────────
   [JOB_TYPES.LINK_DISCOVERY]: {
-    next: [JOB_TYPES.TECHNICAL_DOMAIN],
-    parallel: false,
-    atomicGuard: true,
-    fallback: {
-      [JOB_TYPES.TECHNICAL_DOMAIN]: [JOB_TYPES.PAGE_SCRAPING]
-    }
-  },
-
-  // ──────────────────────────────────────────────────────────────────────────
-  // TECHNICAL_DOMAIN → URL_QUALIFICATION  (uses source LINK_DISCOVERY job)
-  // URL_QUALIFICATION probes all discovered URLs and emits canonicalUrls.
-  // ──────────────────────────────────────────────────────────────────────────
-  [JOB_TYPES.TECHNICAL_DOMAIN]: {
     next: [JOB_TYPES.URL_QUALIFICATION],
     parallel: false,
-    atomicGuard: true,
-    resolveSource: true
+    atomicGuard: true
   },
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -129,12 +123,14 @@ export const PIPELINE_CONFIG = {
 
   
   // ──────────────────────────────────────────────────────────────────────────
-  // AI_VISIBILITY → AI_VISIBILITY_SCORING
+  // AI_VISIBILITY → (terminal) — V2 pipeline is self-contained.
+  //   Emits audit:completed so the frontend refreshes AI data.
   // ──────────────────────────────────────────────────────────────────────────
   [JOB_TYPES.AI_VISIBILITY]: {
-    next: [JOB_TYPES.AI_VISIBILITY_SCORING],
-    parallel: false,
-    atomicGuard: true
+    next: [],
+    hooks: {
+      onComplete: 'emitCompleted'
+    }
   },
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -148,20 +144,38 @@ export const PIPELINE_CONFIG = {
   },
 
   // ──────────────────────────────────────────────────────────────────────────
-  // AI_VISIBILITY_SCORING → (terminal) — also emits audit:completed so the
-  //   frontend refreshes AI visibility data even when it finishes after SEO_SCORING.
+  // F4-016: Verification Batch project-level aggregation chain.
+  //
+  // PROJECT_SEO_AGGREGATION → PROJECT_AI_AGGREGATION → PROJECT_TASK_VERIFICATION
+  //
+  // Created exactly once per batch by chainingEngine's barrier
+  // (_checkVerificationBatchBarrier / _enqueueProjectAggregationChain), never
+  // once per URL. Deliberately serial (parallel: false) — each stage reads
+  // the aggregate output of the one before it (well, PROJECT_AI_AGGREGATION
+  // doesn't strictly depend on PROJECT_SEO_AGGREGATION's output, but running
+  // them serially avoids two independent project-wide recomputations racing
+  // each other, matching F4-011's own original recommendation for this
+  // chain). PROJECT_TASK_VERIFICATION's onComplete hook ('batchCompleted')
+  // is handled by its own dedicated branch in process() — separate from
+  // 'emitCompleted' above, since this is a batch-scoped completion, not a
+  // Full Audit / single-URL verification one.
   // ──────────────────────────────────────────────────────────────────────────
-  [JOB_TYPES.AI_VISIBILITY_SCORING]: {
-    next: [],
-    hooks: {
-      onComplete: 'emitCompleted'
-    }
+  [JOB_TYPES.PROJECT_SEO_AGGREGATION]: {
+    next: [JOB_TYPES.PROJECT_AI_AGGREGATION],
+    parallel: false,
+    atomicGuard: true
   },
 
-  // ──────────────────────────────────────────────────────────────────────────
-  // KEYWORD_RESEARCH → (terminal, standalone job)
-  // ──────────────────────────────────────────────────────────────────────────
-  [JOB_TYPES.KEYWORD_RESEARCH]: {
-    next: []
+  [JOB_TYPES.PROJECT_AI_AGGREGATION]: {
+    next: [JOB_TYPES.PROJECT_TASK_VERIFICATION],
+    parallel: false,
+    atomicGuard: true
+  },
+
+  [JOB_TYPES.PROJECT_TASK_VERIFICATION]: {
+    next: [],
+    hooks: {
+      onComplete: 'batchCompleted'
+    }
   }
 };

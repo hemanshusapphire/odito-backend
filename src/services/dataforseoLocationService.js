@@ -35,13 +35,10 @@ async function getDataForSEOLocations() {
   if (locationsCache.data &&
       locationsCache.lastFetch &&
       (now - locationsCache.lastFetch) < locationsCache.cacheDuration) {
-    console.log('[DATASEO_LOCATIONS] Using cached location data');
-    console.log('[LOCATION_TRACE] LOCATION COUNT (from cache)', locationsCache.data.length);
     return locationsCache.data;
   }
 
   try {
-    console.log('[DATASEO_LOCATIONS] Fetching fresh location data from DataForSEO API');
     
     const login = process.env.DATAFORSEO_LOGIN || process.env.DATASEO_API_LOGIN || '';
     const password = process.env.DATAFORSEO_PASSWORD || process.env.DATASEO_API_PASSWORD || '';
@@ -64,8 +61,6 @@ async function getDataForSEOLocations() {
     // Cache the results
     locationsCache.data = locations;
     locationsCache.lastFetch = now;
-    
-    console.log('[DATASEO_LOCATIONS] Successfully cached', locations.length, 'locations');
     return locations;
     
   } catch (error) {
@@ -76,7 +71,6 @@ async function getDataForSEOLocations() {
     
     // If we have old cache data, use it as fallback
     if (locationsCache.data) {
-      console.warn('[DATASEO_LOCATIONS] Using expired cache as fallback');
       return locationsCache.data;
     }
     
@@ -182,8 +176,6 @@ function extractCityFromAddress(address) {
  * @param {string|null} cityName    - Explicit city name from Google Places addressComponents
  */
 async function getBestLocationCode(userLat, userLng, userAddress = null, countryCode = null, cityName = null) {
-  console.log('[LOCATION_TRACE] getBestLocationCode CALLED', { userLat, userLng, userAddress, countryCode, cityName });
-
   try {
     const locations = await getDataForSEOLocations();
 
@@ -200,41 +192,24 @@ async function getBestLocationCode(userLat, userLng, userAddress = null, country
 
     // Resolve city: prefer explicit Google Places city component, fall back to address parse
     const resolvedCity = (cityName?.trim()) || extractCityFromAddress(userAddress);
-    console.log('[LOCATION_TRACE] RESOLVED CITY', resolvedCity);
 
     if (resolvedCity) {
       const cityLower = resolvedCity.toLowerCase();
-
-      // location_name = "Nashik,Nashik,Maharashtra,India" — first segment is the city name
       const cityMatches = filteredLocations.filter(loc => {
         if (!loc.location_name) return false;
         return loc.location_name.split(',')[0].toLowerCase().trim() === cityLower;
       });
 
-      console.log('[LOCATION_TRACE] CITY NAME MATCHES', cityMatches.length,
-        cityMatches.map(l => ({ code: l.location_code, name: l.location_name, type: l.location_type })));
-
       if (cityMatches.length > 0) {
-        // Prefer location_type === 'City'; otherwise take first match
         const best = cityMatches.find(l => l.location_type === 'City') || cityMatches[0];
-        console.log('[LOCATION_TRACE] RETURNING', best.location_code,
-          '— city name match:', best.location_name, 'type:', best.location_type);
         return best.location_code;
       }
-
-      console.log('[LOCATION_TRACE] No city name match for', resolvedCity, '— falling back to country code');
-    } else {
-      console.log('[LOCATION_TRACE] No city resolved from cityName or address — falling back to country code');
     }
 
-    const fallback = getCountryFallbackCode(userCountry, userAddress);
-    console.log('[LOCATION_TRACE] RETURNING', fallback, '— country fallback');
-    return fallback;
+    return getCountryFallbackCode(userCountry, userAddress);
 
   } catch (error) {
-    const fallback = getCountryFallbackCode(countryCode, userAddress);
-    console.log('[LOCATION_TRACE] RETURNING', fallback, '— caught error:', error.message);
-    return fallback;
+    return getCountryFallbackCode(countryCode, userAddress);
   }
 }
 
@@ -284,5 +259,6 @@ export {
   clearLocationsCache,
   getCacheStatus,
   calculateDistance,
-  extractCountryCode
+  extractCountryCode,
+  extractCityFromAddress,
 };

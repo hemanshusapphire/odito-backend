@@ -95,8 +95,12 @@ class ClaudeService {
    * @param {Object|null} recommendationContext
    * @param {Object|null} repairHint  — { previousOutput: string, failureReasons: string[] }
    *   When provided, a repair prompt is used instead of the base prompt.
+   * @param {number|null} maxTokensOverride — when provided, used instead of the
+   *   group's static budget. Set by the caller on a retry that followed a
+   *   CLAUDE_TRUNCATED failure, so the retry actually has more room instead
+   *   of hitting the exact same ceiling again.
    */
-  async generate(ruleId, context, ruleMetadata = {}, issueContext = null, recommendationContext = null, repairHint = null) {
+  async generate(ruleId, context, ruleMetadata = {}, issueContext = null, recommendationContext = null, repairHint = null, maxTokensOverride = null) {
     if (!this.isAvailable()) {
       console.error('[CLAUDE_SERVICE] Cannot generate — API key not configured');
       throw new Error('CLAUDE_NOT_CONFIGURED');
@@ -116,13 +120,13 @@ class ClaudeService {
         : PromptBuilder.build(recommendationContext, ruleMetadata);
 
       prompt     = built.prompt;
-      maxTokens  = built.maxTokens;
+      maxTokens  = maxTokensOverride || built.maxTokens;
       builtGroup = built.group;
-      console.log(`[CLAUDE_SERVICE] ${repairHint ? 'Repair' : 'Context-aware'} path | group=${built.group} | maxTokens=${maxTokens} | rule=${ruleId}`);
+      console.log(`[CLAUDE_SERVICE] ${repairHint ? 'Repair' : 'Context-aware'} path | group=${built.group} | maxTokens=${maxTokens}${maxTokensOverride ? ' (boosted)' : ''} | rule=${ruleId}`);
     } else {
       // Legacy fallback: use existing prompt builders (displayType-based routing)
       prompt     = this._buildPrompt(ruleId, context, ruleMetadata, issueContext);
-      maxTokens  = MAX_TOKENS;
+      maxTokens  = maxTokensOverride || MAX_TOKENS;
       builtGroup = null;
       console.log(`[CLAUDE_SERVICE] Legacy path | rule=${ruleId} | richContext=${recommendationContext?.builderMeta?.hasRichContext ?? 'none'}`);
     }
@@ -134,7 +138,25 @@ class ClaudeService {
       const response = await this._callAPI(prompt, maxTokens, requestId);
       const generationTimeMs = Date.now() - startTime;
 
-      const parsed = this._parseResponse(response);
+      let parsed;
+      try {
+        parsed = this._parseResponse(response);
+      } catch (parseError) {
+        // A response that stopped because it ran out of room (stop_reason
+        // === 'max_tokens') is a DIFFERENT failure class than genuinely
+        // malformed JSON (e.g. Claude wrote prose instead of JSON) — the
+        // former is fixable by retrying with more room, the latter is not.
+        // Distinguishing them here is what lets recommendationService.js's
+        // retry loop decide whether a bigger maxTokens budget is worth
+        // trying, instead of every JSON parse failure being a dead end.
+        if (response.stop_reason === 'max_tokens') {
+          const err = new Error('CLAUDE_TRUNCATED');
+          err.claudeErrorCode = 'CLAUDE_TRUNCATED';
+          err.attemptedMaxTokens = maxTokens;
+          throw err;
+        }
+        throw parseError;
+      }
 
       return {
         rawOutput: parsed.content,
@@ -390,8 +412,13 @@ Respond with JSON only:`;
         `[CLAUDE] call.success | reqId=${reqId} | status=${response.status}` +
         ` | inputTokens=${inputTokens} | outputTokens=${outputTokens}` +
         ` | maxTokens=${maxTokens} | utilizationPct=${Math.round((outputTokens / maxTokens) * 100)}%` +
+        ` | stopReason=${data.stop_reason}` +
         ` | durationMs=${durationMs} | payloadKB=${(payloadBytes / 1024).toFixed(1)}`
       );
+
+      if (data.stop_reason === 'max_tokens') {
+        console.warn(`[CLAUDE] ⚠ Response truncated by max_tokens | reqId=${reqId} | maxTokens=${maxTokens} — output was cut off mid-generation, likely to fail JSON parsing`);
+      }
 
       return data;
 
@@ -460,7 +487,8 @@ Respond with JSON only:`;
       case 'CLAUDE_OVERLOADED':    return Math.max(10000, base) + jitter;  // min 10s
       case 'CLAUDE_RATE_LIMITED':  return (error.retryAfter || 60) * 1000; // honour header
       case 'CLAUDE_NETWORK_ERROR': return 1000 + jitter;           // fast retry
-      default:                     return null;                    // don't retry (JSON parse, auth)
+      case 'CLAUDE_TRUNCATED':     return 500 + jitter;             // not a capacity issue — retry fast with more room
+      default:                     return null;                    // don't retry (genuinely malformed JSON, auth)
     }
   }
 

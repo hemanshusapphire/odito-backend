@@ -161,6 +161,19 @@ class JobDispatcher {
 
   async dispatchLinkDiscoveryJob(job) {
     try {
+      if (this.usePullModel) {
+        // PULL model: mark as pending, worker will poll. Migrated off the
+        // PUSH path — its axios.post below was the exact mechanism proven
+        // (via live reproduction) to occasionally exceed its client timeout
+        // under audit-start contention, producing a transient FAILED job.
+        // execute_link_discovery() itself is unchanged and already reports
+        // completion/failure via the same /complete and /fail callbacks
+        // used by every other PULL-mode job type.
+        await jobService.updateJobStatus(job._id, 'pending');
+        console.log(`✅ [PULL] LINK_DISCOVERY job queued for polling | jobId=${job._id}`);
+        return { success: true, jobId: job._id, dispatched: false };
+      }
+
       // Update job status to processing first
       await jobService.updateJobStatus(job._id, 'PROCESSING', {
         started_at: new Date(),
@@ -381,7 +394,14 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
+        // 180s: the Python endpoint runs the job synchronously and only
+        // responds once it finishes (confirmed for the sibling
+        // domain-performance/technical-domain endpoints; this dispatch
+        // pattern is shared). 30s was shorter than observed real completion
+        // times under audit-start load, causing Node to mark the job FAILED
+        // via this timeout while Python was still working, then correct it
+        // back to completed via its own callback moments later.
+        timeout: 180000,
 
         headers: {
 
@@ -465,7 +485,8 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
+        // 180s — see the identical note in dispatchPageAnalysisJob above.
+        timeout: 180000,
 
         headers: {
 
@@ -579,7 +600,8 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
+        // 180s — see the identical note in dispatchPageAnalysisJob above.
+        timeout: 180000,
 
         headers: {
 
@@ -699,7 +721,8 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
+        // 180s — see the identical note in dispatchPageAnalysisJob above.
+        timeout: 180000,
 
         headers: {
 
@@ -925,7 +948,8 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
+        // 180s — see the identical note in dispatchPageAnalysisJob above.
+        timeout: 180000,
 
         headers: {
 
@@ -1029,7 +1053,8 @@ class JobDispatcher {
 
       const response = await axios.post(`${this.pythonBaseURL}/api/jobs/ai-visibility`, payload, {
 
-        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
+        // 180s — see the identical note in dispatchPageAnalysisJob above.
+        timeout: 180000,
 
         headers: {
 
@@ -1085,88 +1110,6 @@ class JobDispatcher {
 
   /**
 
-   * Dispatch AI_VISIBILITY_SCORING job directly to Python worker via HTTP
-
-   */
-
-  async dispatchAiVisibilityScoringJob(job) {
-
-    try {
-
-      const payload = {
-
-        jobId: job._id.toString(),
-
-        projectId: job.project_id.toString(),
-
-        userId: job.user_id.toString(),
-
-        sourceJobId: job.input_data?.source_job_id || ''
-
-      };
-
-
-
-      console.log('[SCORING DISPATCH PAYLOAD]', payload);
-
-
-
-      const response = await axios.post(`${this.pythonBaseURL}/api/jobs/ai-visibility-scoring`, payload, {
-
-        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
-
-        headers: {
-
-          'Content-Type': 'application/json'
-
-        }
-
-      });
-
-
-
-      return {
-
-        success: true,
-
-        jobId: job._id
-
-      };
-
-    } catch (error) {
-
-      console.error(`[ERROR] AI_VISIBILITY_SCORING dispatch failed | jobId=${job._id} | reason="${error.message}"`);
-
-
-
-      await jobService.updateJobStatus(job._id, 'FAILED', {
-
-        completed_at: new Date(),
-
-        error_message: `Dispatch failed: ${error.message}`
-
-      });
-
-
-
-      return {
-
-        success: false,
-
-        message: 'Failed to dispatch AI_VISIBILITY_SCORING job to Python worker',
-
-        error: error.message
-
-      };
-
-    }
-
-  }
-
-
-
-  /**
-
    * Dispatch DOMAIN_PERFORMANCE job directly to Python worker via HTTP
 
    * This is PUSH model - Node actively calls Python
@@ -1176,6 +1119,19 @@ class JobDispatcher {
   async dispatchDomainPerformanceJob(job) {
 
     try {
+
+      if (this.usePullModel) {
+        // PULL model: mark as pending, worker will poll. main.py's poller
+        // now supports DOMAIN_PERFORMANCE (added alongside LINK_DISCOVERY) —
+        // this was previously PUSH-only because no PULL support existed on
+        // the Python side; that gap is closed, so this now follows the same
+        // pattern as every other PULL-mode job type. execute_domain_performance_logic()
+        // itself is unchanged and already reports completion/failure via the
+        // same /complete and /fail callbacks used everywhere else.
+        await jobService.updateJobStatus(job._id, 'pending');
+        console.log(`✅ [PULL] DOMAIN_PERFORMANCE job queued for polling | jobId=${job._id}`);
+        return { success: true, jobId: job._id, dispatched: false };
+      }
 
       // Update job status to processing first
 
@@ -1203,7 +1159,18 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
+        // PROVEN root cause of the transient "One or more jobs failed"
+        // symptom: domain_performance.py's handler runs the full mobile +
+        // desktop PageSpeed Insights scan (each with its own retry/backoff)
+        // synchronously and only responds when both finish — confirmed by
+        // direct trace, not assumed. A live reproduction measured 91.4s for
+        // this endpoint to respond under normal audit-start load; the
+        // previous 30s client timeout fired before that response arrived,
+        // so Node marked the job FAILED while Python was still working, then
+        // Python's own completion callback corrected it back to completed
+        // ~60s later. 180s gives comfortable headroom above the observed
+        // 91.4s without masking a genuine hang indefinitely.
+        timeout: 180000,
 
         headers: {
 
@@ -1271,6 +1238,31 @@ class JobDispatcher {
 
     try {
 
+      if (this.usePullModel) {
+        // PULL model: mark as pending, worker will poll. Avoids the PUSH
+        // path's 30s HTTP dispatch call below, which was observed to
+        // consistently time out (~30.1s after creation, every audit run)
+        // at audit start — likely Python-side contention with
+        // LINK_DISCOVERY's heavier concurrent work — producing a spurious
+        // failed→completed cycle that ProcessingScreen's polling can latch
+        // onto as a permanent (and incorrect) failure state.
+        await jobService.updateJobStatus(job._id, 'pending');
+        console.log(`✅ [PULL] TECHNICAL_DOMAIN job queued for polling | jobId=${job._id}`);
+        return { success: true, jobId: job._id, dispatched: false };
+      }
+
+      // Update job status to processing first (this job is now dispatched
+      // directly as an audit-start seed job, not via chainingEngine's
+      // atomicallyDispatchJob, which used to perform this transition)
+
+      await jobService.updateJobStatus(job._id, 'PROCESSING', {
+
+        started_at: new Date(),
+
+        last_attempted_at: new Date()
+
+      });
+
       const response = await axios.post(`${this.pythonBaseURL}/api/jobs/technical-domain`, {
 
         jobId: job._id.toString(),
@@ -1283,7 +1275,11 @@ class JobDispatcher {
 
       }, {
 
-        timeout: 30000,  // Reduced to 30s - only wait for job acceptance
+        // 180s — see the identical note in dispatchDomainPerformanceJob
+        // above; this endpoint follows the same synchronous-handler pattern
+        // and was independently observed to time out at 30s "every audit
+        // run" per the PULL-mode comment just above this function.
+        timeout: 180000,
 
         headers: {
 
@@ -1326,102 +1322,6 @@ class JobDispatcher {
         success: false,
 
         message: 'Failed to dispatch TECHNICAL_DOMAIN job to Python worker',
-
-        error: error.message
-
-      };
-
-    }
-
-  }
-
-
-
-  /**
-
-   * Dispatch KEYWORD_RESEARCH job directly to Python worker via HTTP
-
-   * This is PUSH model - Node actively calls Python
-
-   * STANDALONE: Not part of the SEO audit pipeline
-
-   */
-
-  async dispatchKeywordResearchJob(job) {
-
-    try {
-
-      // Update job status to processing first
-
-      await jobService.updateJobStatus(job._id, 'PROCESSING', {
-
-        started_at: new Date(),
-
-        last_attempted_at: new Date()
-
-      });
-
-
-
-      // Direct HTTP call to Python worker
-
-      const response = await axios.post(`${this.pythonBaseURL}/api/jobs/keyword-research`, {
-
-        jobId: job._id.toString(),
-
-        projectId: job.project_id.toString(),
-
-        userId: job.user_id.toString(),
-
-        keyword: job.input_data.keyword,
-
-        depth: job.input_data.depth || 2
-
-      }, {
-
-        timeout: 120000,
-
-        headers: {
-
-          'Content-Type': 'application/json'
-
-        }
-
-      });
-
-
-
-      return {
-
-        success: true,
-
-        jobId: job._id
-
-      };
-
-    } catch (error) {
-
-      console.error(`[ERROR] KEYWORD_RESEARCH dispatch failed | jobId=${job._id} | reason="${error.message}"`);
-
-
-
-      // Mark job as failed if dispatch fails
-
-      await jobService.updateJobStatus(job._id, 'FAILED', {
-
-        completed_at: new Date(),
-
-        error_message: `Dispatch failed: ${error.message}`
-
-      });
-
-
-
-      return {
-
-        success: false,
-
-        message: 'Failed to dispatch KEYWORD_RESEARCH job to Python worker',
 
         error: error.message
 
@@ -1675,8 +1575,10 @@ class JobDispatcher {
         projectId: job.project_id.toString(),
         userId: job.user_id.toString(),
         sourceJobId: job.input_data.source_job_id,
+        canonicalHost: job.input_data.canonical_host || null,
       }, {
-        timeout: 30000,
+        // 180s — see the identical note in dispatchPageAnalysisJob above.
+        timeout: 180000,
         headers: { 'Content-Type': 'application/json' },
       });
 
@@ -1696,6 +1598,71 @@ class JobDispatcher {
   }
 
 
+
+  /**
+   * Dispatch PROJECT_SEO_AGGREGATION job directly to Python worker via HTTP.
+   * F4-016 — PUSH model only reachable if USE_PULL_MODEL is ever toggled
+   * off; in PULL mode (the current deployment) chainingEngine never calls
+   * this, the job stays 'pending' and main.py's poller claims it directly,
+   * same as SEO_SCORING/AI_VISIBILITY.
+   */
+  async dispatchProjectSeoAggregationJob(job) {
+    try {
+      const response = await axios.post(`${this.pythonBaseURL}/api/jobs/project-seo-aggregation`, {
+        jobId: job._id.toString(),
+        projectId: job.project_id.toString(),
+        userId: job.user_id ? job.user_id.toString() : null,
+        batchId: job.input_data?.batchId,
+        sourceJobId: job.input_data?.source_job_id
+      }, {
+        timeout: 180000,
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      return { success: true, jobId: job._id };
+
+    } catch (error) {
+      console.error(`[ERROR] PROJECT_SEO_AGGREGATION dispatch failed | jobId=${job._id} | reason="${error.message}"`);
+
+      await jobService.updateJobStatus(job._id, 'FAILED', {
+        completed_at: new Date(),
+        error_message: `Dispatch failed: ${error.message}`
+      });
+
+      return { success: false, message: 'Failed to dispatch PROJECT_SEO_AGGREGATION job', error: error.message };
+    }
+  }
+
+  /**
+   * Dispatch PROJECT_AI_AGGREGATION job directly to Python worker via HTTP.
+   * F4-016 — see dispatchProjectSeoAggregationJob's note on PULL vs PUSH.
+   */
+  async dispatchProjectAiAggregationJob(job) {
+    try {
+      const response = await axios.post(`${this.pythonBaseURL}/api/jobs/project-ai-aggregation`, {
+        jobId: job._id.toString(),
+        projectId: job.project_id.toString(),
+        userId: job.user_id ? job.user_id.toString() : null,
+        batchId: job.input_data?.batchId,
+        sourceJobId: job.input_data?.source_job_id
+      }, {
+        timeout: 180000,
+        headers: { 'Content-Type': 'application/json' }
+      });
+
+      return { success: true, jobId: job._id };
+
+    } catch (error) {
+      console.error(`[ERROR] PROJECT_AI_AGGREGATION dispatch failed | jobId=${job._id} | reason="${error.message}"`);
+
+      await jobService.updateJobStatus(job._id, 'FAILED', {
+        completed_at: new Date(),
+        error_message: `Dispatch failed: ${error.message}`
+      });
+
+      return { success: false, message: 'Failed to dispatch PROJECT_AI_AGGREGATION job', error: error.message };
+    }
+  }
 
   /**
 

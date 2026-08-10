@@ -55,18 +55,28 @@ export class LoggerUtil {
    * @param {Object} context - Additional context
    */
   static error(message, error = {}, context = {}) {
+    // For Axios (and any HTTP-client) errors, error.response carries the
+    // actual remote status/body/headers — dropping it here (as this used
+    // to) meant every caller's error log showed only name/message/stack,
+    // never the real reason a 3rd-party API rejected the request (e.g. a
+    // missing required parameter, which HTTP 400/422 bodies explain but
+    // Error.message alone does not).
     const errorDetails = error instanceof Error ? {
       name: error.name,
       message: error.message,
       stack: error.stack,
-      type: error.type || 'UNKNOWN'
+      type: error.type || 'UNKNOWN',
+      ...(error.response ? {
+        responseStatus: error.response.status,
+        responseData: error.response.data,
+      } : {})
     } : error;
 
     const logEntry = this.createLogEntry('error', message, {
       ...context,
       error: errorDetails
     });
-    
+
     console.error(JSON.stringify(logEntry));
   }
 

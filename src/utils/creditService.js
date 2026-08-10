@@ -1,99 +1,278 @@
 import User from '../modules/user/model/User.js';
 
 /**
- * Enhanced credit consumption with monthly/permanent priority
- * @param {Object} user - User document
- * @param {number} cost - Number of credits to deduct
- * @returns {Promise<Object>} Updated user document
- * @throws {Error} If insufficient credits
+ * Subscription quota operations — two independent resources, both stored the
+ * same way on the User document: {limit, used}. `remaining` is never
+ * stored — always derived as `limit - used`.
+ *
+ *  - Project credits: User.subscription.credits
+ *  - Crawl pages:     User.subscription.pages
  */
-export const useCredits = async (user, cost) => {
-  // Handle legacy single credit field during migration
-  let monthlyCredits, permanentCredits;
-  
-  if (user.credits && typeof user.credits === 'object') {
-    // New structure
-    monthlyCredits = user.credits.monthly || 0;
-    permanentCredits = user.credits.permanent || 0;
-  } else {
-    // Legacy structure - treat as permanent credits
-    monthlyCredits = 0;
-    permanentCredits = user.credits || 1;
-  }
-  
-  const totalCredits = monthlyCredits + permanentCredits;
-  
-  if (totalCredits < cost) {
-    const error = new Error(`Not enough credits. Required: ${cost}, Available: ${totalCredits} (${monthlyCredits} monthly + ${permanentCredits} permanent)`);
+
+/**
+ * Read-only check: does this user have at least `amount` credits remaining?
+ * Accepts an already-loaded User document/plain object — does not hit the DB.
+ * @param {Object} user - User document with subscription.credits
+ * @param {number} [amount=1]
+ * @returns {boolean}
+ */
+export function hasCredits(user, amount = 1) {
+  const { limit, used } = user.subscription.credits;
+  return (limit - used) >= amount;
+}
+
+/**
+ * Atomically deduct `amount` credits. Guarded via $expr so concurrent
+ * requests can never push `used` past `limit` — MongoDB serializes
+ * concurrent updates to the same document, so this is race-safe without a
+ * separate lock.
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {number} [amount=1]
+ * @returns {Promise<Object>} updated User document
+ * @throws {Error} code === 'INSUFFICIENT_CREDITS' if the balance is too low
+ */
+export async function deductCredits(userId, amount = 1) {
+  const user = await User.findOneAndUpdate(
+    {
+      _id: userId,
+      $expr: {
+        $gte: [
+          { $subtract: ['$subscription.credits.limit', '$subscription.credits.used'] },
+          amount
+        ]
+      }
+    },
+    { $inc: { 'subscription.credits.used': amount } },
+    { new: true }
+  );
+
+  if (!user) {
+    const error = new Error(`Not enough credits to deduct ${amount}`);
     error.code = 'INSUFFICIENT_CREDITS';
     throw error;
   }
 
-  // Priority: Use monthly credits first
-  let monthlyToUse = Math.min(monthlyCredits, cost);
-  let permanentToUse = cost - monthlyToUse;
-  
-  // ATOMIC UPDATE: Deduct from appropriate buckets
-  const updateQuery = {
-    $inc: {},
-    $set: {
-      updatedAt: new Date()
-    }
-  };
-  
-  // Handle legacy vs new structure
-  if (user.credits && typeof user.credits === 'object') {
-    updateQuery.$inc['credits.monthly'] = -monthlyToUse;
-    updateQuery.$inc['credits.permanent'] = -permanentToUse;
-  } else {
-    // Legacy - deduct from single field
-    updateQuery.$inc['credits'] = -cost;
-  }
-  
-  const updatedUser = await User.findByIdAndUpdate(
-    user._id,
-    updateQuery,
-    { new: true }
-  );
-  
-  console.log(`[CREDITS] Consumed | userId=${user._id} | cost=${cost} | monthlyUsed=${monthlyToUse} | permanentUsed=${permanentToUse} | remainingMonthly=${updatedUser.credits.monthly || 0} | remainingPermanent=${updatedUser.credits.permanent || updatedUser.credits || 0}`);
-  
-  return updatedUser;
-};
+  return user;
+}
 
 /**
- * Get user's total available credits with breakdown
- * @param {string} userId - User ID
- * @returns {Promise<Object>} Credit breakdown
+ * Compensating action for a deduction whose follow-up work failed after the
+ * deduction already succeeded (e.g. project creation failed post-deduct).
+ * Lowers `used` — never invalid, since `used` only ever increases via
+ * deductCredits().
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {number} [amount=1]
+ * @returns {Promise<Object>} updated User document
  */
-export const getUserCredits = async (userId) => {
-  const user = await User.findById(userId, 'credits credits.nextResetDate subscription.plan');
-  
+export async function refundCredits(userId, amount = 1) {
+  return User.findByIdAndUpdate(
+    userId,
+    { $inc: { 'subscription.credits.used': -amount } },
+    { new: true }
+  );
+}
+
+/**
+ * Grant additional credit capacity (e.g. a top-up purchase). Raises `limit`
+ * — never touches `used` — since remaining is always `limit - used`.
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {number} amount
+ * @returns {Promise<Object>} updated User document
+ */
+export async function addCredits(userId, amount) {
+  return User.findByIdAndUpdate(
+    userId,
+    { $inc: { 'subscription.credits.limit': amount } },
+    { new: true }
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Pages
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Read-only check: does this user have at least `amount` pages remaining?
+ * Accepts an already-loaded User document/plain object — does not hit the DB.
+ * @param {Object} user - User document with subscription.pages
+ * @param {number} amount
+ * @returns {boolean}
+ */
+export function hasPages(user, amount) {
+  const { limit, used } = user.subscription.pages;
+  return (limit - used) >= amount;
+}
+
+/**
+ * Atomically deduct `amount` pages. Guarded via $expr so concurrent
+ * requests can never push `used` past `limit` — same single-document atomic
+ * pattern as deductCredits().
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {number} amount
+ * @returns {Promise<Object>} updated User document
+ * @throws {Error} code === 'INSUFFICIENT_PAGES' if the balance is too low
+ */
+export async function deductPages(userId, amount) {
+  const user = await User.findOneAndUpdate(
+    {
+      _id: userId,
+      $expr: {
+        $gte: [
+          { $subtract: ['$subscription.pages.limit', '$subscription.pages.used'] },
+          amount
+        ]
+      }
+    },
+    { $inc: { 'subscription.pages.used': amount } },
+    { new: true }
+  );
+
+  if (!user) {
+    const error = new Error(`Not enough pages to deduct ${amount}`);
+    error.code = 'INSUFFICIENT_PAGES';
+    throw error;
+  }
+
+  return user;
+}
+
+/**
+ * Compensating action for a page deduction whose follow-up work failed after
+ * the deduction already succeeded. Lowers `used` — never invalid, since
+ * `used` only ever increases via deductPages().
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {number} amount
+ * @returns {Promise<Object>} updated User document
+ */
+export async function refundPages(userId, amount) {
+  return User.findByIdAndUpdate(
+    userId,
+    { $inc: { 'subscription.pages.used': -amount } },
+    { new: true }
+  );
+}
+
+/**
+ * Grant additional page capacity (e.g. a top-up purchase). Raises `limit`
+ * — never touches `used` — since remaining is always `limit - used`. Pages
+ * are a lifetime quota: nothing ever resets `used` automatically.
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {number} amount
+ * @returns {Promise<Object>} updated User document
+ */
+export async function addPages(userId, amount) {
+  return User.findByIdAndUpdate(
+    userId,
+    { $inc: { 'subscription.pages.limit': amount } },
+    { new: true }
+  );
+}
+
+/**
+ * Sets both credits and pages to a plan's defaults — `limit` from the plan,
+ * `used` reset to 0 for both. This is an ABSOLUTE allocation, distinct from
+ * every other function in this file (which are all relative/$inc). It
+ * exists for exactly two callers: subscription activation
+ * (checkout.session.completed) and monthly renewal (invoice.paid) — see
+ * subscriptionWebhookService.js. Both call this same function rather than
+ * each independently constructing the same $set, so there is exactly one
+ * place "what does allocating a plan's quota mean" is defined.
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {{credits:number, pages:number}} planLimits - typically from getPlanLimits()
+ * @returns {Promise<Object>} updated User document
+ */
+export async function allocateQuotaFromPlan(userId, planLimits) {
+  return User.findByIdAndUpdate(
+    userId,
+    {
+      $set: {
+        'subscription.credits.limit': planLimits.credits,
+        'subscription.credits.used': 0,
+        'subscription.pages.limit': planLimits.pages,
+        'subscription.pages.used': 0,
+      },
+    },
+    { new: true }
+  );
+}
+
+/**
+ * Reallocates both credits and pages `limit` to a new plan's values —
+ * WITHOUT touching `used`. This is the plan-CHANGE counterpart to
+ * allocateQuotaFromPlan() (which is for activation/renewal and always
+ * resets `used` to 0): a mid-cycle upgrade or downgrade must never erase
+ * usage the user has already consumed this period, only ever change the
+ * ceiling against it.
+ *
+ * On an upgrade, `remaining` (limit - used, computed by summarizeQuota())
+ * increases immediately. On a downgrade, `remaining` can drop to zero or go
+ * negative if `used` already exceeds the new `limit` — that's intentional,
+ * not a bug: hasCredits()/hasPages() already correctly block any further
+ * consumption in that case (`limit - used >= amount` is false), and `used`
+ * naturally resets to 0 at the next renewal via allocateQuotaFromPlan(), the
+ * same as it always has. No credit/page value is ever fabricated or lost.
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {{credits:number, pages:number}} newPlanLimits - typically from getPlanLimits()
+ * @returns {Promise<Object>} updated User document
+ */
+export async function reallocateQuotaForPlanChange(userId, newPlanLimits) {
+  return User.findByIdAndUpdate(
+    userId,
+    {
+      $set: {
+        'subscription.credits.limit': newPlanLimits.credits,
+        'subscription.pages.limit': newPlanLimits.pages,
+      },
+    },
+    { new: true }
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Combined summary
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Synchronous {limit,used,remaining} breakdown for both quota resources,
+ * from an already-loaded User document/plain object — no DB access.
+ * `remaining` is calculated here, never read from a stored field. This is
+ * the single place that calculation happens; getQuotaSummary() below and
+ * any auth-response formatting both build on top of this instead of
+ * recomputing it.
+ * @param {Object} user - User document/plain object with `subscription`
+ * @returns {{credits:{limit:number,used:number,remaining:number}, pages:{limit:number,used:number,remaining:number}}}
+ */
+export function summarizeQuota(user) {
+  const { credits, pages } = user.subscription;
+
+  return {
+    credits: {
+      limit: credits.limit,
+      used: credits.used,
+      remaining: credits.limit - credits.used,
+    },
+    pages: {
+      limit: pages.limit,
+      used: pages.used,
+      remaining: pages.limit - pages.used,
+    },
+  };
+}
+
+/**
+ * Read-only combined credits + pages summary for a user, fetched fresh from
+ * the DB. Thin wrapper around summarizeQuota() — see that function for the
+ * actual calculation.
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @returns {Promise<{credits:{limit:number,used:number,remaining:number}, pages:{limit:number,used:number,remaining:number}}>}
+ * @throws {Error} if the user does not exist
+ */
+export async function getQuotaSummary(userId) {
+  const user = await User.findById(userId, 'subscription').lean();
+
   if (!user) {
     throw new Error('User not found');
   }
-  
-  // Handle legacy vs new structure
-  let monthly, permanent, nextResetDate;
-  
-  if (user.credits && typeof user.credits === 'object') {
-    monthly = user.credits.monthly || 0;
-    permanent = user.credits.permanent || 0;
-    nextResetDate = user.credits.nextResetDate;
-  } else {
-    // Legacy structure
-    monthly = 0;
-    permanent = user.credits || 1;
-    nextResetDate = null;
-  }
-  
-  const total = monthly + permanent;
-  
-  return {
-    total,
-    monthly,
-    permanent,
-    nextResetDate,
-    plan: user.subscription.plan
-  };
-};
+
+  return summarizeQuota(user);
+}

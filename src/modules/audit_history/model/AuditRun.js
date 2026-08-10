@@ -31,6 +31,13 @@ const auditRunSchema = new mongoose.Schema(
     // Null when AI_VISIBILITY_SCORING failed or did not complete
     aiVisibilityScore: { type: Number, min: 0, max: 100, default: null },
 
+    // ── AI V2 Scores (sourced from ai_projects at snapshot time) ──────────
+    overall_ai_score: { type: Number, min: 0, max: 100, default: null },
+    aiso_score:       { type: Number, min: 0, max: 100, default: null },
+    aeo_score:        { type: Number, min: 0, max: 100, default: null },
+    geo_score:        { type: Number, min: 0, max: 100, default: null },
+    ai_issue_count:   { type: Number, min: 0, default: null },
+
     // ── Performance & Technical Health ────────────────────────────────────
     // Sourced at snapshot time from seo_domain_performance and
     // domain_technical_reports respectively. Both collections are overwritten
@@ -39,9 +46,8 @@ const auditRunSchema = new mongoose.Schema(
     technicalHealthScore: { type: Number, min: 0, max: 100, default: null },
 
     // ── AI Visibility Issues ───────────────────────────────────────────────
-    // Counts from seo_ai_visibility_issues at audit completion.
-    // aiVisibilityCriticalIssueCount combines 'critical' and 'high' severities
-    // (treated as equivalent in the issue engine).
+    // Counts from ai_issues at audit completion.
+    // aiVisibilityCriticalIssueCount is the count of 'critical' severity issues.
     aiVisibilityIssueCount:         { type: Number, min: 0, default: null },
     aiVisibilityCriticalIssueCount: { type: Number, min: 0, default: null },
 

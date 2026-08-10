@@ -20,19 +20,26 @@ export class ImageResolver extends BaseResolver {
     switch (issueId) {
 
       case 'images_missing_alt_text': {
-        // Filter to images with empty/missing alt
+        // Filter to images with empty/missing alt.
+        // Row keys must exactly match the column names so TableRenderer can look them up.
         const affected = images
           .filter(img => !img.alt || img.alt.trim() === '')
           .map(img => ({
-            src: img.src || img.url || '',
-            alt: img.alt || '',
-            status: 'missing',
+            'Image':       img.src || img.url || '',
+            'Current Alt': img.alt || 'Missing',
+            'Status':      'Missing',
           }));
+
+        const fallback = _parseDetectedImages(detectedFromDoc).map(item => ({
+          'Image':       item.src || item.url || String(item),
+          'Current Alt': 'Missing',
+          'Status':      'Missing',
+        }));
 
         return {
           currentState: this._tableState(
             ['Image', 'Current Alt', 'Status'],
-            affected.length > 0 ? affected : _parseDetectedImages(detectedFromDoc)
+            affected.length > 0 ? affected : fallback
           ),
           expectedState: this._expectedState(
             'All content images have a descriptive alt attribute'
@@ -59,9 +66,9 @@ export class ImageResolver extends BaseResolver {
         const oversized = images
           .filter(img => img.file_size_kb > 100 || img.size_kb > 100)
           .map(img => ({
-            src: img.src || img.url || '',
-            size: `${img.file_size_kb || img.size_kb || '?'} KB`,
-            threshold: '100 KB',
+            'Image':     img.src || img.url || '',
+            'File Size': `${img.file_size_kb || img.size_kb || '?'} KB`,
+            'Limit':     '100 KB',
           }));
 
         return {
@@ -83,9 +90,9 @@ export class ImageResolver extends BaseResolver {
             return fmt && fmt !== 'webp' && fmt !== 'avif';
           })
           .map(img => ({
-            src: img.src || img.url || '',
-            format: img.format || img.extension || 'unknown',
-            loading: img.loading || 'not set',
+            'Image':   img.src || img.url || '',
+            'Format':  img.format || img.extension || 'unknown',
+            'Loading': img.loading || 'not set',
           }));
 
         return {
@@ -103,9 +110,9 @@ export class ImageResolver extends BaseResolver {
         const noDims = images
           .filter(img => !img.width || !img.height)
           .map(img => ({
-            src: img.src || img.url || '',
-            width: img.width || 'missing',
-            height: img.height || 'missing',
+            'Image':  img.src || img.url || '',
+            'Width':  img.width || 'Missing',
+            'Height': img.height || 'Missing',
           }));
 
         return {
@@ -123,8 +130,8 @@ export class ImageResolver extends BaseResolver {
         const noLazy = images
           .filter(img => img.loading !== 'lazy' && !img.is_above_fold)
           .map(img => ({
-            src: img.src || img.url || '',
-            loading: img.loading || 'not set',
+            'Image':             img.src || img.url || '',
+            'Loading Attribute': img.loading || 'not set',
           }));
 
         return {

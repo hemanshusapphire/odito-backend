@@ -70,6 +70,12 @@ const PAGE_DATA_ALIASES = {
 
   // Image paths use wildcard-like notation — resolve to the images array
   'images':               'images',
+
+  // Title pixel width: the rule suffixes .desktop/.mobile so the two device
+  // findings get distinct dedup_keys (they'd otherwise collide to one issue
+  // identity), but both resolve to the same numeric field in seo_page_data.
+  'title_pixel_width.desktop': 'title_pixel_width',
+  'title_pixel_width.mobile':  'title_pixel_width',
 };
 
 // AI visibility issues reference paths inside seo_ai_visibility documents.

@@ -1,5 +1,5 @@
 import express from 'express';
-import { startScraping, startVerification, getScrapingStatus, cancelAudit, getPageRawHtml } from '../controller/scrapingController.js';
+import { startScraping, startVerification, startUrlVerification, startVerificationBatch, getScrapingStatus, cancelAudit, getPageRawHtml } from '../controller/scrapingController.js';
 import auth from '../../user/middleware/auth.js';
 import { validateProjectAccess } from '../../../middleware/auth.middleware.js';
 
@@ -21,6 +21,23 @@ router.post('/start-scraping', startScraping);
  * @access  Private
  */
 router.post('/start-verification', startVerification);
+
+/**
+ * @route   POST /api/seo/start-url-verification
+ * @desc    Start a URL Verification run — single-page recheck, isolated from
+ *          Full Audit / project-wide Quick Recheck (see urlVerificationService)
+ * @access  Private
+ */
+router.post('/start-url-verification', startUrlVerification);
+
+/**
+ * @route   POST /api/seo/start-verification-batch
+ * @desc    F4-013 — create a Verification Batch (VerificationBatch +
+ *          PageVerificationRun documents only). No jobs are created or
+ *          dispatched by this endpoint yet — that's a later phase.
+ * @access  Private
+ */
+router.post('/start-verification-batch', startVerificationBatch);
 
 /**
  * @route   GET /api/seo/scraping-status/:id

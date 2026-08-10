@@ -84,7 +84,7 @@ export const getVideoData = async (req, res) => {
         name: snapshot.projectName || 'Website',
         url: snapshot.url || 'N/A'
       },
-      aiAnalysis: snapshot.aiAnalysis || { score: 0, schemaMarkupCount: 0, hasKnowledgeGraph: false }
+      aiHubSnapshot: snapshot.aiHubSnapshot || null,
     };
 
     // Step 4: Keep script from AIScript (for reference)
@@ -269,12 +269,6 @@ export const getSlideTemplate = async (req, res) => {
         opportunities: [
           { keyword: 'local seo', position: 45, volume: 800 }
         ]
-      },
-      aiAnalysis: {
-        score: 70,
-        schemaMarkupCount: 3,
-        hasKnowledgeGraph: false,
-        entityCount: 12
       },
       recommendations: [
         'Optimize page load speed',

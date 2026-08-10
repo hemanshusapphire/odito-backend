@@ -103,7 +103,15 @@ const seoRankingSchema = new mongoose.Schema({
       rank: { type: Number, required: true, min: 1, max: 100 },
       url:  { type: String, required: true, trim: true },
       type: { type: String, enum: ['homepage', 'internal_page'], default: 'internal_page' }
-    }]
+    }],
+    // Google Maps position and business details (local SEO only)
+    maps_rank: { type: Number, default: null, min: 1, max: 20 },
+    maps_listing: {
+      title:   { type: String, default: null },
+      rating:  { type: Number, default: null },
+      reviews: { type: Number, default: null },
+      address: { type: String, default: null }
+    }
   }],
 
   created_at: {

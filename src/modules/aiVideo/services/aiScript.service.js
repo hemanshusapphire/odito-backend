@@ -1,11 +1,10 @@
-import AIScript from '../models/aiScript.model.js';
+﻿import AIScript from '../models/aiScript.model.js';
 import { AiDataService } from './aiData.service.js';
+import { AiHubSnapshotService } from './AiHubSnapshotService.js';
 import { NarrationGeneratorService } from './narrationGenerator.service.js';
 import { GroqService } from '../../../services/groq.service.js';
 import { GeminiService } from '../../../services/gemini.service.js';
 import SeoProject from '../../app_user/model/SeoProject.js';
-import { Page19Service } from '../../pdf/service/page19Service.js';
-import { Page22Service } from '../../pdf/service/page22Service.js';
 
 /**
  * AI Script Service
@@ -124,7 +123,8 @@ export class AiScriptService {
 
       // Step 4: Build audit snapshot from REAL DATA
       console.log(`[SCRIPT_GEN] Building audit snapshot from unified service data...`);
-      const auditSnapshot = await this.buildAuditSnapshot(auditData);
+      const aiHubSnapshot = await AiHubSnapshotService.getSnapshot(projectId);
+      const auditSnapshot = await this.buildAuditSnapshot(auditData, aiHubSnapshot);
       console.log('[SCRIPT_GEN] auditSnapshot.scores:', auditSnapshot.scores);
       
       // 🔧 STEP 8: VERIFY FIX WITH TEST SCRIPT OUTPUT
@@ -135,7 +135,7 @@ export class AiScriptService {
       
       // Step 4b: Structure for prompt building
       console.log(`[SCRIPT_GEN] Structuring data for Gemini prompt...`);
-      const structuredData = this.buildPromptData(auditData);
+      const structuredData = this.buildPromptData(auditData, aiHubSnapshot);
 
       // Step 5: Save audit snapshot with REAL DATA
       console.log(`[SCRIPT_GEN] Saving audit snapshot...`);
@@ -144,7 +144,7 @@ export class AiScriptService {
       console.log('\n🔍 STEP 4 - Before DB save:');
       console.log('auditSnapshot.issueDistribution.critical:', auditSnapshot.issueDistribution.critical);
       console.log('auditSnapshot.issueDistribution.total:', auditSnapshot.issueDistribution.total);
-      console.log('auditSnapshot.scores.aiVisibility:', auditSnapshot.scores.aiVisibility);
+      console.log('auditSnapshot.aiHubSnapshot.overallScore:', auditSnapshot.aiHubSnapshot?.overallScore ?? 0);
       console.log('auditSnapshot.scores.overall:', auditSnapshot.scores.overall);
       console.log('auditSnapshot frozen:', Object.isFrozen(auditSnapshot));
       
@@ -347,68 +347,10 @@ export class AiScriptService {
    * @param {Object} auditData - Structured audit data from AiDataService
    * @returns {Object} Audit snapshot for storage with REAL DATA
    */
-  static async buildAuditSnapshot(auditData) {
+  static async buildAuditSnapshot(auditData, aiHubSnapshot = null) {
     try {
       console.log('[AUDIT_SNAPSHOT] Building snapshot from real audit data');
       
-      // Extract projectId from auditData for Page19/Page22 services
-      const projectId = auditData.project?.id || auditData.projectId || auditData.metadata?.projectId;
-      console.log('[AUDIT_SNAPSHOT] ProjectId for Page19/Page22:', projectId);
-      console.log('[AUDIT_SNAPSHOT] auditData.project keys:', Object.keys(auditData.project || {}));
-      console.log('[AUDIT_SNAPSHOT] auditData keys:', Object.keys(auditData));
-      console.log('[AUDIT_SNAPSHOT] auditData.metadata:', auditData.metadata);
-      
-      // � STEP 1.5: FETCH PAGE19 AND PAGE22 DATA FOR ENHANCED AI ANALYSIS
-      console.log('\n🔧 STEP 1.5: FETCHING PAGE19 AND PAGE22 DATA');
-      console.log('-'.repeat(50));
-      
-      let page19Data = null;
-      let page22Data = null;
-      
-      if (projectId) {
-        try {
-          console.log('[AUDIT_SNAPSHOT] Fetching Page19 data...');
-          const page19Result = await Page19Service.getPage19Data(projectId);
-          console.log('[AUDIT_SNAPSHOT] Page19 full response:', JSON.stringify(page19Result, null, 2));
-          if (page19Result?.success) {
-            page19Data = page19Result.data;
-            console.log('[AUDIT_SNAPSHOT] ✅ Page19 data fetched:', Object.keys(page19Data));
-            console.log('[AUDIT_SNAPSHOT] Page19 sample values:', {
-              aiReadiness: page19Data.aiReadiness,
-              geoScore: page19Data.geoScore,
-              aeoScore: page19Data.aeoScore,
-              summary: page19Data.summary
-            });
-          } else {
-            console.warn('[AUDIT_SNAPSHOT] ⚠️ Page19 service failed:', page19Result?.error?.message);
-          }
-        } catch (error) {
-          console.warn('[AUDIT_SNAPSHOT] ⚠️ Page19 service error:', error.message);
-        }
-        
-        try {
-          console.log('[AUDIT_SNAPSHOT] Fetching Page22 data...');
-          const page22Result = await Page22Service.getPage22Data(projectId);
-          console.log('[AUDIT_SNAPSHOT] Page22 full response:', JSON.stringify(page22Result, null, 2));
-          if (page22Result?.success) {
-            page22Data = page22Result.data;
-            console.log('[AUDIT_SNAPSHOT] ✅ Page22 data fetched:', Object.keys(page22Data));
-            console.log('[AUDIT_SNAPSHOT] Page22 sample values:', {
-              signals: page22Data.signals,
-              checklistCount: page22Data.checklist?.length,
-              signalsKeys: page22Data.signals ? Object.keys(page22Data.signals) : 'no signals'
-            });
-          } else {
-            console.warn('[AUDIT_SNAPSHOT] ⚠️ Page22 service failed:', page22Result?.error?.message);
-          }
-        } catch (error) {
-          console.warn('[AUDIT_SNAPSHOT] ⚠️ Page22 service error:', error.message);
-        }
-      } else {
-        console.warn('[AUDIT_SNAPSHOT] ⚠️ No projectId found, skipping Page19/Page22 services');
-      }
-      
-      // � STEP 1: LOG FULL API RESPONSE (CRITICAL)
       console.log('FULL API RESPONSE:');
       console.log(JSON.stringify(auditData, null, 2));
       
@@ -459,12 +401,12 @@ export class AiScriptService {
       // Extract individual scores first
       const performance = Math.round(this.get(auditData, "scores.performance"));
       const seo = Math.round(this.get(auditData, "scores.seo", this.get(auditData, "scores.seoHealth")));
-      const aiVisibility = Math.round(this.get(auditData, "scores.aiVisibility"));
+      const aiVisibility = aiHubSnapshot?.overallScore ?? 0;
       const technicalHealth = Math.round(this.get(auditData, "scores.technicalHealth"));
-      
+
       // Calculate overall as average of all 4 metrics (same as unifiedJsonService)
       const overall = Math.round((seo + performance + aiVisibility + technicalHealth) / 4);
-      
+
       const scores = {
         overall,
         performance,
@@ -584,10 +526,6 @@ export class AiScriptService {
 
       // Extract other data safely
       const aiObj = this.safe(auditData.ai, {});
-      const aiVisibilityScore =
-        auditData.scores?.aiVisibility != null
-          ? Number(auditData.scores.aiVisibility)
-          : Number(aiObj.visibility ?? 0);
       const schemaMarkup = this.safeArray(aiObj.schemaMarkup);
       const recommendations = this.safeArray(auditData.recommendations).slice(0, 5);
       
@@ -685,115 +623,16 @@ export class AiScriptService {
           notRanking: notRanking
         },
         
-        // 🔧 STEP 8.5: BUILD ENHANCED AI ANALYSIS WITH PAGE19/PAGE22 DATA
-        aiAnalysis: (() => {
-          console.log('\n🔧 STEP 8.5: BUILDING ENHANCED AI ANALYSIS');
-          console.log('-'.repeat(50));
-          console.log('[AUDIT_SNAPSHOT] page19Data exists:', !!page19Data);
-          console.log('[AUDIT_SNAPSHOT] page22Data exists:', !!page22Data);
-          console.log('[AUDIT_SNAPSHOT] page19Data type:', typeof page19Data);
-          console.log('[AUDIT_SNAPSHOT] page22Data type:', typeof page22Data);
-          console.log('[AUDIT_SNAPSHOT] Condition (page19Data && page22Data):', !!(page19Data && page22Data));
-          
-          // 🔧 FIX: LOG KEYWORD DATA BEING ADDED TO SNAPSHOT
-          console.log('🔍 KEYWORD DATA ADDED TO auditSnapshot:', {
-            totalKeywords: this.safe(auditData.keywords?.totalKeywords, 0),
-            topRankingsCount: topRankings.length,
-            opportunitiesCount: opportunities.length,
-            notRankingCount: notRanking.length,
-            sampleTopRanking: topRankings[0],
-            sampleOpportunity: opportunities[0],
-            sampleNotRanking: notRanking[0]
-          });
-          
-          if (page19Data && page22Data) {
-            // Build comprehensive aiAnalysis with Page19 and Page22 data
-            console.log('[AUDIT_SNAPSHOT] ✅ Building full AI analysis with Page19+Page22 data');
-            
-            const enhancedAiAnalysis = {
-              score: Math.round(scores.aiVisibility), // 🔧 FIX: Use same source as scores.aiVisibility
-              
-              categories: {
-                aiImpact: page19Data.geoScore || 0,
-                citationProbability: page19Data.aiCitation || 0,
-                llmReadiness: page19Data.topScore || 0,
-                aeoScore: page19Data.aeoScore || 0,
-                topicalAuthority: page19Data.aiTopicalAuthority || 0,
-                voiceIntent: page19Data.voiceIntent || 0
-              },
-              
-              detailedMetrics: {
-                schemaCoverage: page22Data.signals?.schemaCoverage || 0,
-                faqOptimization: page22Data.signals?.faqOptimization || 0,
-                conversationalScore: page22Data.signals?.conversationalScore || 0,
-                aiSnippetProbability: page22Data.signals?.aiSnippetProbability || 0,
-                aiCitationRate: page22Data.signals?.aiCitationRate || 0,
-                knowledgeGraph: page22Data.signals?.knowledgeGraph || 0
-              },
-              
-              checklist: (page22Data.checklist || []).slice(0, 5), // 🔧 FIX: Limit to top 5 items
-              summary: page19Data.summary || ""
-            };
-            
-            // Add hasKnowledgeGraph based on detailedMetrics.knowledgeGraph
-            enhancedAiAnalysis.hasKnowledgeGraph = enhancedAiAnalysis.detailedMetrics.knowledgeGraph > 0;
-            
-            console.log('[AUDIT_SNAPSHOT] ✅ Enhanced AI analysis created:', {
-              score: enhancedAiAnalysis.score,
-              categoriesCount: Object.keys(enhancedAiAnalysis.categories).length,
-              detailedMetricsCount: Object.keys(enhancedAiAnalysis.detailedMetrics).length,
-              checklistItems: enhancedAiAnalysis.checklist.length,
-              hasSummary: !!enhancedAiAnalysis.summary,
-              knowledgeGraphScore: enhancedAiAnalysis.detailedMetrics.knowledgeGraph,
-              hasKnowledgeGraph: enhancedAiAnalysis.hasKnowledgeGraph,
-              aiScoreConsistency: {
-                scoresAiVisibility: scores.aiVisibility,
-                aiAnalysisScore: enhancedAiAnalysis.score,
-                match: scores.aiVisibility === enhancedAiAnalysis.score
-              }
-            });
-            
-            return enhancedAiAnalysis;
-            
-          } else {
-            // Fallback to existing minimal aiAnalysis
-            console.log('[AUDIT_SNAPSHOT] ⚠️ Using fallback AI analysis (Page19/Page22 data unavailable)');
-            
-            return {
-              score: Math.round(scores.aiVisibility), // 🔧 FIX: Use same source as scores.aiVisibility
-              
-              // Add empty structures for backward compatibility
-              categories: {
-                aiImpact: 0,
-                citationProbability: 0,
-                llmReadiness: 0,
-                aeoScore: 0,
-                topicalAuthority: 0,
-                voiceIntent: 0
-              },
-              detailedMetrics: {
-                schemaCoverage: 0,
-                faqOptimization: 0,
-                conversationalScore: 0,
-                aiSnippetProbability: 0,
-                aiCitationRate: 0,
-                knowledgeGraph: 0
-              },
-              checklist: [], // 🔧 FIX: Empty checklist (no data available)
-              summary: "AI analysis data unavailable - using fallback",
-              
-              // Add hasKnowledgeGraph based on detailedMetrics.knowledgeGraph
-              hasKnowledgeGraph: false
-            };
-          }
-        })(),
         
         // 🔧 STEP 4: FIX RECOMMENDATIONS (IMPORTANT)
         // Convert objects to readable text
-        recommendations: this.safeArray(auditData.recommendations).map(r => 
+        recommendations: this.safeArray(auditData.recommendations).map(r =>
           typeof r === 'object' ? r.title || r.description || JSON.stringify(r) : r
         ).slice(0, 5),
-        
+
+        // AI Hub data (AISO / AEO / GEO) — queried directly from ai_projects + ai_issues
+        aiHubSnapshot: aiHubSnapshot || null,
+
         // Metadata for tracking
         metadata: {
           source: 'UnifiedJsonService',
@@ -871,7 +710,7 @@ export class AiScriptService {
    * @param {Object} auditData - Structured audit data
    * @returns {Object} Compact data for prompt with safe defaults
    */
-  static buildPromptData(auditData) {
+  static buildPromptData(auditData, aiHubSnapshot = null) {
     try {
       // 🔍 STEP 1: DEBUG LOGGING - Understand data structure
       console.log('[SCRIPT_DATA] DEBUG - auditData structure:', {
@@ -895,12 +734,12 @@ export class AiScriptService {
       // Extract individual scores first
       const performance = Math.round(this.get(auditData, "scores.performance"));
       const seo = Math.round(this.get(auditData, "scores.seo", this.get(auditData, "scores.seoHealth")));
-      const aiVisibility = Math.round(this.get(auditData, "scores.aiVisibility"));
+      const aiVisibility = aiHubSnapshot?.overallScore ?? 0;
       const technicalHealth = Math.round(this.get(auditData, "scores.technicalHealth"));
-      
+
       // Calculate overall as average of all 4 metrics (same as unifiedJsonService)
       const overall = Math.round((seo + performance + aiVisibility + technicalHealth) / 4);
-      
+
       const scores = {
         overall,
         performance,
@@ -994,16 +833,16 @@ export class AiScriptService {
       // Extract individual scores first (use different variable names to avoid redeclaration)
       const perfScore = Math.round(this.get(auditData, "scores.performance"));
       const seoScore = Math.round(this.get(auditData, "scores.seo", this.get(auditData, "scores.seoHealth")));
-      const aiScore = Math.round(this.get(auditData, "scores.aiVisibility"));
+      const aiScore = aiHubSnapshot?.overallScore ?? 0;
       const techScore = Math.round(this.get(auditData, "scores.technicalHealth"));
-      
+
       // Calculate overall as average of all 4 metrics (same as unifiedJsonService)
       const overallScore = Math.round((seoScore + perfScore + aiScore + techScore) / 4);
-      
+
       return {
         projectName: this.safe(auditData.project?.name, 'Website'),
         url: this.safe(auditData.project?.url, 'N/A'),
-        
+
         // 🔧 STEP 3: FIX SCORES from unified service - Use same get() method as buildAuditSnapshot
         scores: {
           overall: overallScore,
@@ -1034,8 +873,7 @@ export class AiScriptService {
           notRanking: notRanking
         },
         aiVisibility: {
-          score: Math.round(scores.aiVisibility || aiObj.visibility || 0),
-          hasKnowledgeGraph: !!(aiObj.knowledgeGraph?.exists)
+          score: Math.round(aiScore)
         },
         // 🔧 STEP 4: FIX RECOMMENDATIONS - Use formatted recommendations
         topRecommendations: formattedRecommendations
@@ -1082,8 +920,7 @@ export class AiScriptService {
           notRanking: []
         },
         aiVisibility: {
-          score: 0,
-          hasKnowledgeGraph: false
+          score: 0
         },
         topRecommendations: []
       };
@@ -1105,7 +942,7 @@ Critical Issues: ${auditSnapshot.issueDistribution.critical}
 Medium Issues: ${auditSnapshot.issueDistribution.medium}
 Total Issues: ${auditSnapshot.issueDistribution.total}
 
-AI Score: ${auditSnapshot.scores.aiVisibility}
+AI Hub Score: ${auditSnapshot.aiHubSnapshot?.overallScore ?? 0}
 Overall Score: ${auditSnapshot.scores.overall}
 Performance Score: ${auditSnapshot.scores.performance}
 SEO Score: ${auditSnapshot.scores.seo}
@@ -1116,12 +953,7 @@ Performance Consistency Check:
 - performanceMetrics.pageSpeed: ${auditSnapshot.performanceMetrics?.pageSpeed}
 - Match: ${auditSnapshot.scores.performance === auditSnapshot.performanceMetrics?.pageSpeed ? '✅ YES' : '❌ NO'}
 
-AI Score Consistency Check:
-- scores.aiVisibility: ${auditSnapshot.scores.aiVisibility}
-- aiAnalysis.score: ${auditSnapshot.aiAnalysis?.score}
-- Match: ${auditSnapshot.scores.aiVisibility === auditSnapshot.aiAnalysis?.score ? '✅ YES' : '❌ NO'}
-
-Checklist Items: ${auditSnapshot.aiAnalysis?.checklist?.length || 0}
+AI Hub Score: ${auditSnapshot.aiHubSnapshot?.overallScore ?? 0}
 Recommendations: ${auditSnapshot.recommendations.length}
 Sample Recommendation: ${auditSnapshot.recommendations[0] || 'None'}
     `.trim();
@@ -1159,7 +991,7 @@ This indicates ${overallAssessment} performance for search engine optimization.
 
 Performance Score: ${scores.performance}/100
 SEO Score: ${scores.seo}/100
-AI Visibility Score: ${scores.aiVisibility}/100
+AI Hub Score: ${scores.aiVisibility}/100
 Technical Health Score: ${scores.technicalHealth}/100
 
 Mobile PageSpeed: ${pm?.mobileScore ?? 0}/100
@@ -1178,7 +1010,7 @@ Addressing them will have the most significant impact on your rankings.
 Investigations show that these issues directly affect:
 - Search engine crawlability: ${scores.seo >= 70 ? 'Adequate' : 'Needs improvement'}
 - Page performance: ${scores.performance >= 70 ? 'Adequate' : 'Needs improvement'}
-- AI bot discoverability: ${scores.aiVisibility >= 70 ? 'Adequate' : 'Needs improvement'}
+- AI hub visibility: ${scores.aiVisibility >= 70 ? 'Adequate' : 'Needs improvement'}
 
 [ACTION PLAN]
 We recommend focusing on these priorities in the next 30 days:
@@ -1221,7 +1053,7 @@ Website: ${url}
 - Overall Score: ${scores?.overall || 0}/100
 - Performance: ${scores?.performance || 0}/100
 - SEO Health: ${scores?.seo || 0}/100
-- AI Visibility: ${scores?.aiVisibility || 0}/100
+- AI Hub Score: ${scores?.aiVisibility || 0}/100
 - Technical Health: ${scores?.technicalHealth || 0}/100
 
 ⚠️ KEY ISSUES (${issueDistribution?.total || 0} total — ${issueDistribution?.high || 0} high, ${issueDistribution?.medium || 0} medium, ${issueDistribution?.low || 0} low/info):
@@ -1247,7 +1079,6 @@ Top Rankings: ${(keywordData?.topRankings || []).join(', ') || 'No ranking data'
 
 🤖 AI VISIBILITY:
 AI Discovery Score: ${aiVisibility?.score || 0}
-Knowledge Graph: ${aiVisibility?.hasKnowledgeGraph ? 'Present' : 'Not present'}
 
 💡 TOP RECOMMENDATIONS:
 ${topRecommendations.map((rec, i) => `  ${i + 1}. ${rec}`).join('\n') || '  - General site optimization recommended'}

@@ -85,6 +85,21 @@ export const externalOnboardController = async (req, res) => {
     // Process external onboarding
     const result = await externalService.onboardFromEmail(email, website);
 
+    if (!result.success) {
+      if (result.code === 'INSUFFICIENT_CREDITS') {
+        return res.status(403).json({
+          success: false,
+          code: 'INSUFFICIENT_CREDITS',
+          message: result.message
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        message: result.message || 'External onboarding failed',
+        error: process.env.NODE_ENV === 'development' ? result.error : undefined
+      });
+    }
+
     res.status(201).json({
       success: true,
       message: 'External onboarding completed successfully',

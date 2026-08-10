@@ -84,16 +84,11 @@ export class VideoDataService {
           opportunities: this.extractKeywordData(auditData.keywords?.opportunities || []).slice(0, 3)
         },
 
-        // AI visibility analysis (scores and counts only)
-        aiAnalysis: {
-          score: Math.round(Number(auditData.scores?.aiVisibility || auditData.ai?.visibility || 0)),
-          schemaMarkupCount: Number(auditData.ai?.schemaMarkup?.length || 0),
-          hasKnowledgeGraph: Boolean(auditData.ai?.knowledgeGraph?.exists),
-          entityCount: Number(auditData.ai?.entities?.length || 0)
-        },
-
         // Recommendations (titles only)
         recommendations: this.extractRecommendationTitles(auditData.recommendations || []).slice(0, 5),
+
+        // AI Hub data not available in fallback path (no AIScript snapshot)
+        aiHubSnapshot: null,
 
         // Metadata
         metadata: {
@@ -231,14 +226,6 @@ export class VideoDataService {
           page: 'keywords',
           scores: data.scores,
           keywordData: data.keywordData
-        };
-
-      case 'ai':
-        return {
-          page: 'ai',
-          scores: data.scores,
-          aiAnalysis: data.aiAnalysis,
-          recommendations: data.recommendations
         };
 
       default:

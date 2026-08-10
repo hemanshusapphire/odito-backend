@@ -6,6 +6,8 @@ import mongoose from 'mongoose';
 import axios from 'axios';
 import { getEnvVar } from '../../../config/env.js';
 import { searchBusinesses, getPlaceDetails } from '../../../services/googlePlacesService.js';
+import { getGrade } from '../../homepageAuditPdf/constants/homepageAuditConstants.js';
+import { deductCredits, refundCredits } from '../../../utils/creditService.js';
 
 class ExternalService {
   constructor() {
@@ -27,11 +29,38 @@ class ExternalService {
       const user = await this.findOrCreateUser(email);
       console.log(`[EXTERNAL] User ${user.isNew ? 'created' : 'found'}: ${user._id}`);
 
-      // 2. Create default project
-      const project = await this.createDefaultProject(user._id, email, website);
+      // 2. Same project-credit rule as the authenticated creation endpoint
+      // (seoProjectController.js): 1 credit = 1 project, atomic deduction via
+      // the shared creditService, refunded if project creation itself fails.
+      // Reuses the exact same service functions — no duplicated credit logic.
+      try {
+        await deductCredits(user._id, 1);
+      } catch (creditError) {
+        if (creditError.code === 'INSUFFICIENT_CREDITS') {
+          return {
+            success: false,
+            code: 'INSUFFICIENT_CREDITS',
+            message: 'No credits remaining for this account.'
+          };
+        }
+        throw creditError;
+      }
+
+      // 3. Create default project
+      let project;
+      try {
+        project = await this.createDefaultProject(user._id, email, website);
+      } catch (projectError) {
+        // Project creation failed after the credit was already spent —
+        // refund it. A later failure (e.g. job dispatch, below) does NOT
+        // refund: the credit pays for the project existing, not for the
+        // audit pipeline starting, matching every other creation path.
+        await refundCredits(user._id, 1);
+        throw projectError;
+      }
       console.log(`[EXTERNAL] Project created: ${project._id} with URL: ${project.main_url}`);
 
-      // 3. Create and dispatch LINK_DISCOVERY job
+      // 4. Create and dispatch LINK_DISCOVERY job
       const job = await this.createAndDispatchLinkDiscoveryJob(user._id, project._id, project);
       console.log(`[EXTERNAL] LINK_DISCOVERY job created: ${job._id}`);
 
@@ -79,8 +108,7 @@ class ExternalService {
       password: 'EXTERNAL_USER_NO_PASSWORD', // Placeholder password
       roleId: 5, // Regular user
       isEmailVerified: true, // Auto-verify for external users
-      oauthProvider: 'external', // Mark as external user
-      source: 'external' // Track source
+      oauthProvider: 'external' // Mark as external user
     });
 
     user.isNew = true;
@@ -104,6 +132,11 @@ class ExternalService {
       location: 'India',
       country: 'IN',
       language: 'en',
+      // seo_scope has no neutral default at the schema level (its `default:
+      // null` is not itself a valid enum value, so the field must always be
+      // set explicitly on creation) — 'national' since external onboarding
+      // has no local-business context to infer from.
+      seo_scope: 'national',
       keywords: [domain.replace(/[.-]/g, '')], // Use cleaned domain as initial keyword
       description: `External onboarding project for ${email}`,
       status: 'active',
@@ -249,9 +282,11 @@ class ExternalService {
         total_pages = 25; // Fallback value
       }
 
-      // Calculate grade with fallback
+      // Grade: trust Python's mapper.py (canonical 85/70/50/F formula).
+      // Fall back to the shared backend getGrade() only if Python omitted it —
+      // never a locally hand-rolled formula.
       const score = auditData.score || 0;
-      const grade = score > 80 ? 'A' : score > 60 ? 'B' : score > 40 ? 'C' : 'D';
+      const grade = auditData.grade || getGrade(score);
 
       // Calculate hidden_issues with fallback
       const hidden_issues = issuesCount + Math.floor(Math.random() * 30) + 10;

@@ -16,7 +16,8 @@
  */
 
 // Max text lengths for display
-const PREVIEW_MAX   = 500;  // rawText preview in states
+const PREVIEW_MAX   = 500;  // BeforeState rawText — the CURRENT (already-short) content, a genuine preview
+const FULL_MAX       = 8000; // AfterState rawText for text/absent — the actual rewritten content the frontend renders as the full diff (RecommendationDiffViewer), NOT a preview
 const SUMMARY_MAX   = 200;  // summary string
 
 export class BeforeAfterBuilder {
@@ -124,16 +125,25 @@ export class BeforeAfterBuilder {
     switch (dT) {
       case 'text': {
         const text = recommendedVersion || null;
-        base.rawText  = text ? _truncate(text, PREVIEW_MAX) : null;
+        // FULL_MAX, not PREVIEW_MAX — this is the actual rewritten content
+        // RecommendationDiffViewer renders as the full diff, not a preview.
+        base.rawText  = text ? _truncate(text, FULL_MAX) : null;
         if (text) {
-          base.measurement.value = text.trim().length;
+          const trimmed = text.trim();
+          // es.unit is frequently 'words' (e.g. thin_content's "at least 300
+          // words") — measuring .length there silently reports a character
+          // count mislabeled as a word count. Count words when the unit says
+          // words; otherwise character length is correct as before.
+          base.measurement.value = (es.unit || '').toLowerCase() === 'words'
+            ? trimmed.split(/\s+/).filter(Boolean).length
+            : trimmed.length;
           base.satisfiesConstraint = _checkRange(
-            text.trim().length, es.targetMin, es.targetMax
+            base.measurement.value, es.targetMin, es.targetMax
           );
         }
         base.isAbsent = !text;
         base.summary  = text
-          ? `"${_preview(text, 80)}" (${text.trim().length} ${es.unit || 'chars'})`
+          ? `"${_preview(text, 80)}" (${base.measurement.value} ${es.unit || 'chars'})`
           : 'Not provided';
         break;
       }
@@ -193,8 +203,10 @@ export class BeforeAfterBuilder {
 
       case 'absent': {
         // Element was missing — AfterState represents the generated element
+        // (e.g. a full FAQ section), which can be substantial — FULL_MAX,
+        // not PREVIEW_MAX, for the same reason as the 'text' case above.
         const content = recommendedVersion || implCode;
-        base.rawText  = content ? _truncate(content, PREVIEW_MAX) : null;
+        base.rawText  = content ? _truncate(content, FULL_MAX) : null;
         base.isAbsent = !content;
         base.satisfiesConstraint = Boolean(content && content.trim().length > 10);
 

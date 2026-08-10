@@ -18,97 +18,17 @@ export class JobService {
 
    */
 
-  /**
-
-   * Atomically finds and claims a job of a specific type.
-
-   * This is the primary method for workers to get jobs.
-
-   */
-
-  async claimJob(job_type) {
-
-    console.log(`🔍 claimJob called with type: ${job_type}`);
-
-
-
-    const query = {
-
-      jobType: job_type,
-
-      status: { $in: ['pending', 'retrying'] },
-
-      $or: [
-
-        { last_attempted_at: { $lt: new Date(Date.now() - 5 * 60 * 1000) } }, // 5 min stale
-
-        { last_attempted_at: null },
-
-      ],
-
-    };
-
-
-
-    console.log(`📋 Query for ${job_type}:`, JSON.stringify(query, null, 2));
-
-
-
-    const update = {
-
-      $set: {
-
-        status: 'processing',
-
-        claimed_at: new Date(),
-
-        started_at: new Date(),
-
-        last_attempted_at: new Date(),
-
-      },
-
-      $inc: { attempts: 1 },
-
-    };
-
-
-
-    const options = {
-
-      new: true,
-
-      sort: { priority: -1, created_at: 1 },
-
-    };
-
-
-
-    try {
-
-      const job = await Job.findOneAndUpdate(query, update, options);
-
-      if (job) {
-
-        console.log(`✅ Found and claimed ${job_type} job: ${job._id}`);
-
-      } else {
-
-        console.log(`❌ No ${job_type} jobs found matching query`);
-
-      }
-
-      return job;
-
-    } catch (error) {
-
-      console.log(`[ERROR] Job claiming failed | jobType=${job_type} | reason="${error.message}"`);
-
-      return null;
-
-    }
-
-  }
+  // F4-018: the duplicate claimJob() definition that used to live here (a
+  // second `async claimJob(job_type)` further down in this same class body,
+  // originally at what's now the definition below) silently shadowed this
+  // one — JavaScript class bodies keep only the LAST method with a given
+  // name, so this earlier definition was dead code, never actually called.
+  // It intended to reclaim 'retrying' jobs (this one did not), which is
+  // exactly the bug fixed below: the surviving claimJob() now correctly
+  // reclaims both 'pending' and 'retrying' jobs, with the 'retrying' branch
+  // honoring failJob's own computed backoff delay instead of adding an
+  // extra unintended 5-minute wait on top of it. See the single claimJob()
+  // definition later in this file for the fix and its rationale.
 
 
 
@@ -122,7 +42,13 @@ export class JobService {
 
     input_data = {},
 
-    priority = null
+    priority = null,
+
+    run_id = null,
+
+    group_id = null,
+
+    chunk_index = null
 
   }) {
 
@@ -165,6 +91,12 @@ export class JobService {
       attempts: 0,
 
       max_attempts: config.maxAttempts || 3,
+
+      run_id,
+
+      group_id,
+
+      chunk_index,
 
     });
 
@@ -411,9 +343,23 @@ export class JobService {
 
   async updateJobStatus(job_id, status, data = {}) {
 
+    // Normalize case: several call sites (e.g. dispatchLinkDiscoveryJob,
+    // dispatchDomainPerformanceJob) historically passed uppercase status
+    // strings ('PROCESSING', 'FAILED'). The Job schema's enum is lowercase
+    // ('pending','claimed','processing','completed','failed','retrying'),
+    // and findByIdAndUpdate skips Mongoose enum validation by default, so an
+    // uppercase string silently persisted as-is — invisible to every
+    // lowercase status comparison downstream (this function's own
+    // completed_at/failed_at side effects below, and
+    // scrapingController.getScrapingStatus's per-jobType counters, which is
+    // why "processing" jobs of these types never appeared as Running in the
+    // frontend). Normalizing once, here, fixes it at the single choke point
+    // every status write flows through.
+    const normalizedStatus = typeof status === 'string' ? status.toLowerCase() : status;
+
     const updateData = {
 
-      status: status,
+      status: normalizedStatus,
 
       ...data
 
@@ -421,7 +367,7 @@ export class JobService {
 
 
 
-    if (status === 'completed') {
+    if (normalizedStatus === 'completed') {
 
       updateData.completed_at = new Date();
 
@@ -431,7 +377,7 @@ export class JobService {
 
 
 
-    if (status === 'failed') {
+    if (normalizedStatus === 'failed') {
 
       updateData.failed_at = data.failed_at || new Date();
 
@@ -863,6 +809,8 @@ export class JobService {
 
         },
 
+        run_id: pageScrapingJob.run_id,
+
         priority: JOB_TYPE_CONFIG[JOB_TYPES.PERFORMANCE_MOBILE].priority
 
       });
@@ -923,6 +871,8 @@ export class JobService {
 
         },
 
+        run_id: pageScrapingJob.run_id,
+
         priority: JOB_TYPE_CONFIG[JOB_TYPES.PERFORMANCE_DESKTOP].priority
 
       });
@@ -961,26 +911,31 @@ export class JobService {
 
    */
 
-  async createAndDispatchUrlQualificationJob(technicalDomainJob) {
+  async createAndDispatchUrlQualificationJob(linkDiscoveryJob) {
     try {
-      console.log(`[DEBUG] createAndDispatchUrlQualificationJob called | sourceJobId=${technicalDomainJob._id}`);
+      console.log(`[DEBUG] createAndDispatchUrlQualificationJob called | sourceJobId=${linkDiscoveryJob._id}`);
 
       const urlQualJob = await this.createJob({
-        user_id: technicalDomainJob.user_id,
-        seo_project_id: technicalDomainJob.project_id,
+        user_id: linkDiscoveryJob.user_id,
+        seo_project_id: linkDiscoveryJob.project_id,
         jobType: JOB_TYPES.URL_QUALIFICATION,
         input_data: {
-          source_job_id: technicalDomainJob._id.toString(),
-          projectId: technicalDomainJob.project_id.toString()
+          source_job_id: linkDiscoveryJob._id.toString(),
+          projectId: linkDiscoveryJob.project_id.toString(),
+          // Host canonicalization: forward the exact host LINK_DISCOVERY
+          // already resolved so URL_QUALIFICATION folds any stray www/non-www
+          // (or other host-alias) duplicate onto it before qualifying/probing.
+          canonical_host: linkDiscoveryJob.result_data?.canonicalHost || null
         },
-        priority: JOB_TYPE_CONFIG[JOB_TYPES.URL_QUALIFICATION].priority
+        priority: JOB_TYPE_CONFIG[JOB_TYPES.URL_QUALIFICATION].priority,
+        run_id: linkDiscoveryJob.run_id
       });
 
-      console.log(`[QUEUE] URL_QUALIFICATION job queued | jobId=${urlQualJob._id} | sourceJobId=${technicalDomainJob._id}`);
+      console.log(`[QUEUE] URL_QUALIFICATION job queued | jobId=${urlQualJob._id} | sourceJobId=${linkDiscoveryJob._id}`);
       return urlQualJob;
 
     } catch (error) {
-      console.error(`[ERROR] URL_QUALIFICATION creation failed | sourceJobId=${technicalDomainJob._id} | reason="${error.message}"`);
+      console.error(`[ERROR] URL_QUALIFICATION creation failed | sourceJobId=${linkDiscoveryJob._id} | reason="${error.message}"`);
       throw error;
     }
   }
@@ -1014,7 +969,9 @@ export class JobService {
 
         },
 
-        priority: JOB_TYPE_CONFIG[JOB_TYPES.HEADLESS_ACCESSIBILITY].priority
+        priority: JOB_TYPE_CONFIG[JOB_TYPES.HEADLESS_ACCESSIBILITY].priority,
+
+        run_id: urlQualificationJob.run_id
 
       });
 
@@ -1074,7 +1031,9 @@ export class JobService {
 
         },
 
-        priority: JOB_TYPE_CONFIG[JOB_TYPES.CRAWL_GRAPH].priority
+        priority: JOB_TYPE_CONFIG[JOB_TYPES.CRAWL_GRAPH].priority,
+
+        run_id: pageScrapingJob.run_id
 
       });
 
@@ -1116,6 +1075,14 @@ export class JobService {
 
       // Create PAGE_ANALYSIS job with source job reference
 
+      // P3-003: propagate mode/target_url/urls from the source job when this
+      // is a url_verification run, so PAGE_ANALYSIS's existing (Phase 2,
+      // previously dormant) `urls` filter actually narrows to the one page
+      // being verified. Full Audit and legacy 'verification' mode are
+      // unaffected — isUrlVerification is false for both, so input_data
+      // is byte-identical to before.
+      const isUrlVerification = pageScrapingJob.input_data?.mode === 'url_verification';
+
       const pageAnalysisJob = await this.createJob({
 
         user_id: pageScrapingJob.user_id,
@@ -1126,9 +1093,21 @@ export class JobService {
 
         input_data: {
 
-          source_job_id: pageScrapingJob._id.toString()
+          source_job_id: pageScrapingJob._id.toString(),
+
+          ...(isUrlVerification && {
+            mode: 'url_verification',
+            target_url: pageScrapingJob.input_data.target_url,
+            urls: [pageScrapingJob.input_data.target_url],
+            // F4-016: propagate batchId the same way target_url/urls already
+            // are — without this, PAGE_ANALYSIS (and everything chained from
+            // it) has no way to know it's part of a Verification Batch.
+            ...(pageScrapingJob.input_data.batchId && { batchId: pageScrapingJob.input_data.batchId }),
+          }),
 
         },
+
+        run_id: pageScrapingJob.run_id,
 
         priority: JOB_TYPE_CONFIG[JOB_TYPES.PAGE_ANALYSIS].priority
 
@@ -1170,6 +1149,12 @@ export class JobService {
 
       // Create SEO_SCORING job with source job reference
 
+      // P3-003: propagate mode/target_url/urls from PAGE_ANALYSIS (its own
+      // immediate parent, already carrying these fields when it was itself
+      // created with the propagation added above) so SEO_SCORING's Phase 2
+      // `urls` filter narrows to the one page being verified.
+      const isUrlVerification = pageAnalysisJob.input_data?.mode === 'url_verification';
+
       const seoScoringJob = await this.createJob({
 
         user_id: pageAnalysisJob.user_id,
@@ -1180,9 +1165,19 @@ export class JobService {
 
         input_data: {
 
-          source_job_id: pageAnalysisJob._id.toString()
+          source_job_id: pageAnalysisJob._id.toString(),
+
+          ...(isUrlVerification && {
+            mode: 'url_verification',
+            target_url: pageAnalysisJob.input_data.target_url,
+            urls: [pageAnalysisJob.input_data.target_url],
+            // F4-016: propagate batchId (see PAGE_ANALYSIS's own identical comment above).
+            ...(pageAnalysisJob.input_data.batchId && { batchId: pageAnalysisJob.input_data.batchId }),
+          }),
 
         },
+
+        run_id: pageAnalysisJob.run_id,
 
         priority: JOB_TYPE_CONFIG[JOB_TYPES.SEO_SCORING].priority
 
@@ -1212,134 +1207,6 @@ export class JobService {
 
   /**
 
-   * Atomically create and dispatch AI_VISIBILITY_SCORING job
-
-   * CRITICAL: This operation must be atomic to prevent duplicates
-
-   */
-
-  async createAndDispatchAiVisibilityScoringJob(aiVisibilityAnalysisJob) {
-
-    try {
-
-      // Create AI_VISIBILITY_SCORING job with source job reference
-
-      const aiVisibilityScoringJob = await this.createJob({
-
-        user_id: aiVisibilityAnalysisJob.user_id,
-
-        seo_project_id: aiVisibilityAnalysisJob.project_id,
-
-        jobType: JOB_TYPES.AI_VISIBILITY_SCORING,
-
-        input_data: {
-
-          source_job_id: aiVisibilityAnalysisJob._id.toString()
-
-        },
-
-        priority: JOB_TYPE_CONFIG[JOB_TYPES.AI_VISIBILITY_SCORING].priority
-
-      });
-
-
-
-      console.log(`[QUEUE] AI_VISIBILITY_SCORING job queued | jobId=${aiVisibilityScoringJob._id} | sourceJobId=${aiVisibilityAnalysisJob._id}`);
-
-
-
-      return aiVisibilityScoringJob;
-
-
-
-    } catch (error) {
-
-      console.error(`[ERROR] AI_VISIBILITY_SCORING creation failed | sourceJobId=${aiVisibilityAnalysisJob._id} | reason="${error.message}"`);
-
-      throw error;
-
-    }
-
-  }
-
-  /**
-
-   * Atomically create and dispatch TECHNICAL_DOMAIN job
-
-   * CRITICAL: This is a pure data-collection step, no scoring or rule logic
-
-   */
-
-  async createAndDispatchTechnicalDomainJob(linkDiscoveryJob) {
-
-    try {
-
-      // Extract domain from the LINK_DISCOVERY job's main_url
-
-      const mainUrl = linkDiscoveryJob.input_data?.main_url || '';
-
-      let domain = mainUrl;
-
-      try {
-
-        const urlObj = new URL(mainUrl);
-
-        domain = urlObj.origin; // e.g. "https://example.com"
-
-      } catch (e) {
-
-        // If URL parsing fails, use the raw main_url
-
-        console.log(`[WARN] Could not parse main_url for domain extraction: ${mainUrl}`);
-
-      }
-
-
-
-      const technicalDomainJob = await this.createJob({
-
-        user_id: linkDiscoveryJob.user_id,
-
-        seo_project_id: linkDiscoveryJob.project_id,
-
-        jobType: JOB_TYPES.TECHNICAL_DOMAIN,
-
-        input_data: {
-
-          source_job_id: linkDiscoveryJob._id.toString(),
-
-          domain: domain,
-
-          main_url: mainUrl
-
-        },
-
-        priority: JOB_TYPE_CONFIG[JOB_TYPES.TECHNICAL_DOMAIN].priority
-
-      });
-
-
-
-      console.log(`[QUEUE] TECHNICAL_DOMAIN job queued | jobId=${technicalDomainJob._id} | sourceJobId=${linkDiscoveryJob._id} | domain=${domain}`);
-
-
-
-      return technicalDomainJob;
-
-    } catch (error) {
-
-      console.error(`[ERROR] TECHNICAL_DOMAIN creation failed | sourceJobId=${linkDiscoveryJob._id} | reason="${error.message}"`);
-
-      throw error;
-
-    }
-
-  }
-
-
-
-  /**
-
    * Atomically create and dispatch AI_VISIBILITY job
 
    * CRITICAL: This operation must be atomic to prevent duplicates
@@ -1351,6 +1218,16 @@ export class JobService {
   async createAndDispatchAiVisibilityJob(urlQualificationJob) {
 
     const canonicalUrls = urlQualificationJob._canonicalUrls || urlQualificationJob.input_data?.canonical_urls || [];
+
+    // P3-003: propagate mode/target_url/urls from PAGE_SCRAPING (this
+    // function's source job, per pipelineConfig.js's PAGE_SCRAPING -> parallel
+    // (CRAWL_GRAPH, AI_VISIBILITY)) so AI_VISIBILITY's Phase 2 `urls` filter
+    // narrows to the one page being verified. Note: canonical_urls above is
+    // a separate, legacy field the Python AI_VISIBILITY worker does not read
+    // (confirmed: execute_ai_visibility_v2 reads job.urls) — kept unchanged
+    // for whatever else may rely on it; `urls` is the field that actually
+    // activates filtering.
+    const isUrlVerification = urlQualificationJob.input_data?.mode === 'url_verification';
 
     console.log("Creating AI_VISIBILITY job", {
 
@@ -1376,11 +1253,21 @@ export class JobService {
 
         source_job_id: urlQualificationJob._id.toString(),
 
-        canonical_urls: canonicalUrls
+        canonical_urls: canonicalUrls,
+
+        ...(isUrlVerification && {
+          mode: 'url_verification',
+          target_url: urlQualificationJob.input_data.target_url,
+          urls: [urlQualificationJob.input_data.target_url],
+          // F4-016: propagate batchId (see PAGE_ANALYSIS's own identical comment above).
+          ...(urlQualificationJob.input_data.batchId && { batchId: urlQualificationJob.input_data.batchId }),
+        }),
 
       },
 
-      priority: JOB_TYPE_CONFIG[JOB_TYPES.AI_VISIBILITY].priority
+      priority: JOB_TYPE_CONFIG[JOB_TYPES.AI_VISIBILITY].priority,
+
+      run_id: urlQualificationJob.run_id
 
     });
 
@@ -1424,7 +1311,9 @@ export class JobService {
 
         },
 
-        priority: JOB_TYPE_CONFIG[JOB_TYPES.PAGE_SCRAPING].priority
+        priority: JOB_TYPE_CONFIG[JOB_TYPES.PAGE_SCRAPING].priority,
+
+        run_id: urlQualificationJob.run_id
 
       });
 
@@ -1446,6 +1335,136 @@ export class JobService {
 
     }
 
+  }
+
+
+
+  /**
+   * F4-016: Create the PROJECT_SEO_AGGREGATION job that starts a
+   * Verification Batch's project-level aggregation chain. Unlike every
+   * other createAndDispatchXXXJob above, this has no "source job" — it is
+   * created directly by chainingEngine's batch barrier once every
+   * PageVerificationRun in the batch has reached a terminal state, not in
+   * response to another job's completion. Exactly-once is guaranteed by the
+   * barrier's own atomic RUNNING -> AGGREGATING transition (only the caller
+   * that wins that transition ever reaches this method for a given batch).
+   */
+  async createAndDispatchProjectSeoAggregationJob({ projectId, batchId, userId = null }) {
+    const job = await this.createJob({
+      user_id: userId,
+      seo_project_id: projectId,
+      jobType: JOB_TYPES.PROJECT_SEO_AGGREGATION,
+      input_data: { batchId },
+      priority: JOB_TYPE_CONFIG[JOB_TYPES.PROJECT_SEO_AGGREGATION].priority
+    });
+
+    console.log(`[QUEUE] PROJECT_SEO_AGGREGATION job queued | jobId=${job._id} | batchId=${batchId}`);
+    return job;
+  }
+
+  /**
+   * F4-016: Create PROJECT_AI_AGGREGATION from the completed
+   * PROJECT_SEO_AGGREGATION job (its source, via JOB_CREATION_MAP/
+   * chainingEngine.process — the normal chaining path every other job type
+   * in this file already uses).
+   */
+  async createAndDispatchProjectAiAggregationJob(projectSeoAggregationJob) {
+    const job = await this.createJob({
+      user_id: projectSeoAggregationJob.user_id,
+      seo_project_id: projectSeoAggregationJob.project_id,
+      jobType: JOB_TYPES.PROJECT_AI_AGGREGATION,
+      input_data: {
+        source_job_id: projectSeoAggregationJob._id.toString(),
+        batchId: projectSeoAggregationJob.input_data?.batchId
+      },
+      priority: JOB_TYPE_CONFIG[JOB_TYPES.PROJECT_AI_AGGREGATION].priority
+    });
+
+    console.log(`[QUEUE] PROJECT_AI_AGGREGATION job queued | jobId=${job._id} | sourceJobId=${projectSeoAggregationJob._id} | batchId=${job.input_data.batchId}`);
+    return job;
+  }
+
+  /**
+   * F4-016: Create PROJECT_TASK_VERIFICATION from the completed
+   * PROJECT_AI_AGGREGATION job. Node-self-processed (see
+   * chainingEngine._runProjectTaskVerificationJob) — this method only
+   * creates the Job document (status 'pending', for observability/retry
+   * tracking); chainingEngine runs the actual verification logic itself
+   * instead of dispatching to Python.
+   */
+  async createAndDispatchProjectTaskVerificationJob(projectAiAggregationJob) {
+    const job = await this.createJob({
+      user_id: projectAiAggregationJob.user_id,
+      seo_project_id: projectAiAggregationJob.project_id,
+      jobType: JOB_TYPES.PROJECT_TASK_VERIFICATION,
+      input_data: {
+        source_job_id: projectAiAggregationJob._id.toString(),
+        batchId: projectAiAggregationJob.input_data?.batchId
+      },
+      priority: JOB_TYPE_CONFIG[JOB_TYPES.PROJECT_TASK_VERIFICATION].priority
+    });
+
+    console.log(`[QUEUE] PROJECT_TASK_VERIFICATION job queued | jobId=${job._id} | sourceJobId=${projectAiAggregationJob._id} | batchId=${job.input_data.batchId}`);
+    return job;
+  }
+
+  /**
+   * Phase 6.3: Create GOOGLE_ADS_SYNC. Node-self-processed, same shape as
+   * createAndDispatchProjectTaskVerificationJob above — this method only
+   * creates the Job document (status 'pending'); the caller (currently only
+   * googleAdsController's refresh endpoint — this job type is never chained
+   * from another job) is responsible for actually running it via
+   * googleAdsSyncService.runGoogleAdsSync(job), exactly like chainingEngine
+   * explicitly calls _runProjectTaskVerificationJob right after creating
+   * that job, rather than this method triggering execution itself.
+   */
+  async createAndDispatchGoogleAdsSyncJob(userId, projectId, connectionId, customerId) {
+    const job = await this.createJob({
+      user_id: userId,
+      seo_project_id: projectId,
+      jobType: JOB_TYPES.GOOGLE_ADS_SYNC,
+      input_data: { connectionId, customerId },
+      priority: JOB_TYPE_CONFIG[JOB_TYPES.GOOGLE_ADS_SYNC].priority
+    });
+
+    console.log(`[QUEUE] GOOGLE_ADS_SYNC job queued | jobId=${job._id} | projectId=${projectId} | customerId=${customerId}`);
+    return job;
+  }
+
+  /**
+   * Phase 6.4: Create GOOGLE_ADS_KEYWORD_SYNC. Same shape as
+   * createAndDispatchGoogleAdsSyncJob above - only creates the Job
+   * document; the caller (googleAdsController's keyword refresh endpoint)
+   * runs it via googleAdsSyncService.runGoogleAdsKeywordSync(job).
+   */
+  async createAndDispatchGoogleAdsKeywordSyncJob(userId, projectId, connectionId, customerId) {
+    const job = await this.createJob({
+      user_id: userId,
+      seo_project_id: projectId,
+      jobType: JOB_TYPES.GOOGLE_ADS_KEYWORD_SYNC,
+      input_data: { connectionId, customerId },
+      priority: JOB_TYPE_CONFIG[JOB_TYPES.GOOGLE_ADS_KEYWORD_SYNC].priority
+    });
+
+    console.log(`[QUEUE] GOOGLE_ADS_KEYWORD_SYNC job queued | jobId=${job._id} | projectId=${projectId} | customerId=${customerId}`);
+    return job;
+  }
+
+  /**
+   * Phase 6.4: Create GOOGLE_ADS_RECOMMENDATION_SYNC. Same shape - the
+   * caller runs it via googleAdsSyncService.runGoogleAdsRecommendationSync(job).
+   */
+  async createAndDispatchGoogleAdsRecommendationSyncJob(userId, projectId, connectionId, customerId) {
+    const job = await this.createJob({
+      user_id: userId,
+      seo_project_id: projectId,
+      jobType: JOB_TYPES.GOOGLE_ADS_RECOMMENDATION_SYNC,
+      input_data: { connectionId, customerId },
+      priority: JOB_TYPE_CONFIG[JOB_TYPES.GOOGLE_ADS_RECOMMENDATION_SYNC].priority
+    });
+
+    console.log(`[QUEUE] GOOGLE_ADS_RECOMMENDATION_SYNC job queued | jobId=${job._id} | projectId=${projectId} | customerId=${customerId}`);
+    return job;
   }
 
 
@@ -1712,21 +1731,27 @@ export class JobService {
 
         if (job.jobType === 'PAGE_SCRAPING' && job.result_data) {
 
-          stats.PAGE_SCRAPING = {
-
-            totalUrls: job.result_data.totalUrls || 0,
-
-            successfulPages: job.result_data.successfulPages || 0,
-
-            failedPages: job.result_data.failedPages || 0,
-
-            successRate: job.result_data.successRate || 0,
-
-            created_at: job.created_at,
-
-            completed_at: job.completed_at
-
+          // PAGE_SCRAPING is chunked (JobGroup architecture) — there can be
+          // N completed jobs for one run, not one. Aggregate across all of
+          // them instead of overwriting with whichever job this forEach
+          // happens to visit last (previously: only the most-recently-
+          // created chunk's numbers survived, silently discarding every
+          // other chunk's contribution).
+          const existing = stats.PAGE_SCRAPING || {
+            totalUrls: 0, successfulPages: 0, failedPages: 0,
+            created_at: job.created_at, completed_at: job.completed_at
           };
+
+          stats.PAGE_SCRAPING = {
+            totalUrls: existing.totalUrls + (job.result_data.totalUrls || 0),
+            successfulPages: existing.successfulPages + (job.result_data.successfulPages || 0),
+            failedPages: existing.failedPages + (job.result_data.failedPages || 0),
+            created_at: job.created_at < existing.created_at ? job.created_at : existing.created_at,
+            completed_at: job.completed_at > existing.completed_at ? job.completed_at : existing.completed_at
+          };
+          stats.PAGE_SCRAPING.successRate = stats.PAGE_SCRAPING.totalUrls > 0
+            ? Math.round((stats.PAGE_SCRAPING.successfulPages / stats.PAGE_SCRAPING.totalUrls) * 100)
+            : 0;
 
         }
 
@@ -1802,99 +1827,11 @@ export class JobService {
 
 
 
-      // Check if this is a standalone AI project
-
-      let isStandalone = false;
-
-      let aiProjectData = null;
-
-
-
-      try {
-
-        aiProjectData = await AIVisibilityProject.findOne({ _id: projectId });
-
-        isStandalone = aiProjectData?.isStandalone || false;
-
-
-
-        if (isStandalone) {
-
-          console.log(`[AI_PROJECT] Detected standalone AI project | projectId=${projectId}`);
-
-        }
-
-      } catch (e) {
-
-        // Not an AI project, continue with normal flow
-
-      }
-
-
-
       let discoveredTotal, internalLinks, externalLinks, socialLinks;
 
       let crawledSuccessful, crawledFailed, crawledTotal, pagesAnalyzed;
 
-
-
-      if (isStandalone && aiProjectData) {
-
-        // For standalone AI projects, get data from AI-specific collections
-
-        try {
-
-          const db = mongoose.connection.db;
-
-          const seo_ai_internal_links = db.collection('seo_ai_internal_links');
-
-          const seo_ai_visibility = db.collection('seo_ai_visibility');
-
-          const seo_ai_visibility_issues = db.collection('seo_ai_visibility_issues');
-
-
-
-          // Count discovered links from AI discovery - use correct field name
-
-          internalLinks = await seo_ai_internal_links.countDocuments({ projectId: projectId });
-
-          externalLinks = 0; // AI discovery doesn't track external separately
-
-          socialLinks = 0;    // AI discovery doesn't track social separately
-
-          discoveredTotal = internalLinks;
-
-
-
-          // Count analyzed pages from AI visibility - use correct field name
-
-          crawledSuccessful = await seo_ai_visibility.countDocuments({ projectId: projectId });
-
-          crawledFailed = 0; // AI visibility doesn't track failures separately
-
-          crawledTotal = crawledSuccessful;
-
-          pagesAnalyzed = crawledSuccessful;
-
-
-
-          console.log(`[AI_PROJECT] Standalone stats | internal=${internalLinks} | analyzed=${pagesAnalyzed} | projectId=${projectId}`);
-
-        } catch (e) {
-
-          console.error(`[ERROR] Failed to get AI project stats: ${e}`);
-
-          // Fallback to zero values
-
-          internalLinks = externalLinks = socialLinks = discoveredTotal = 0;
-
-          crawledSuccessful = crawledFailed = crawledTotal = pagesAnalyzed = 0;
-
-        }
-
-      } else {
-
-        // Original logic for SEO projects (external links disabled)
+      // Original logic for SEO projects (external links disabled)
         discoveredTotal = (jobStats.LINK_DISCOVERY?.internalLinksCount || 0) +
           (jobStats.LINK_DISCOVERY?.socialLinksCount || 0);
 
@@ -1978,8 +1915,6 @@ export class JobService {
 
         pagesAnalyzed = resolveCount(baseAnalysisResults.pages_analyzed, jobStats.PAGE_ANALYSIS?.pagesAnalyzed ?? crawledSuccessful);
 
-      }
-
 
 
       const computedCrawlSuccessRate = crawledTotal > 0
@@ -1990,11 +1925,7 @@ export class JobService {
 
 
 
-      const totalDurationMs = isStandalone
-
-        ? (crawlSummary?.timing?.total_crawl_duration_ms ?? 60000) // Default 1 minute for AI projects
-
-        : (crawlSummary?.timing?.total_crawl_duration_ms ?? (jobStats.crawlDuration * 1000) ?? 0);
+      const totalDurationMs = crawlSummary?.timing?.total_crawl_duration_ms ?? (jobStats.crawlDuration * 1000) ?? 0;
 
 
 
@@ -2002,15 +1933,11 @@ export class JobService {
 
         ? Math.max(0, new Date(jobStats.PAGE_ANALYSIS.completed_at) - new Date(jobStats.PAGE_ANALYSIS.created_at))
 
-        : (isStandalone ? 30000 : 0); // Default 30 seconds for AI projects
+        : 0;
 
 
 
-      const pageAnalysisDurationMs = isStandalone
-
-        ? derivedAnalysisDurationMs
-
-        : (crawlSummary?.timing?.page_analysis_duration_ms ?? derivedAnalysisDurationMs);
+      const pageAnalysisDurationMs = crawlSummary?.timing?.page_analysis_duration_ms ?? derivedAnalysisDurationMs;
 
 
 
@@ -2052,9 +1979,9 @@ export class JobService {
 
           pages_analyzed: pagesAnalyzed,
 
-          issues_found: isStandalone ? 0 : (crawlSummary?.analysis_results?.issues_found ?? 0),
+          issues_found: crawlSummary?.analysis_results?.issues_found ?? 0,
 
-          failed_analyses: isStandalone ? 0 : (crawlSummary?.analysis_results?.failed_analyses ?? 0)
+          failed_analyses: crawlSummary?.analysis_results?.failed_analyses ?? 0
 
         },
 
@@ -2099,52 +2026,145 @@ export class JobService {
 
 
   /**
-
-   * Clean up stale locks (jobs locked but not completed after timeout)
-
+   * Clean up stale locks (jobs locked in 'processing' but never completed,
+   * e.g. a worker crashed mid-job) after lockTimeoutMs has elapsed.
+   *
+   * F4-018: previously this forced every matched job straight to 'failed'
+   * via a raw Job.updateMany, bypassing failJob's own retry-vs-permanent
+   * decision AND the entire chunk-outcome/url_verification/batch-scoped/
+   * full-audit branching chainingEngine and the live /fail HTTP callback
+   * already apply to a real-time failure — meaning a stale PROJECT_SEO_
+   * AGGREGATION/PROJECT_AI_AGGREGATION job (or a stale chunk) recovered by
+   * this sweep never advanced its downstream chain, and a Verification
+   * Batch could get stuck in AGGREGATING forever.
+   *
+   * Now routes each stale job through the SAME shared path as a real-time
+   * failure: this.failJob() (respects max_attempts — a job with attempts
+   * remaining goes to 'retrying', where the fixed claimJob() will correctly
+   * reclaim it once its backoff delay elapses, not straight to permanently
+   * 'failed') followed by advanceAfterJobFailure() (chunk-outcome
+   * accounting + url_verification/batch-scoped/full-audit routing) — one
+   * implementation, three callers (this sweep, recoverOrphanedUrlVerification
+   * Jobs below, and jobController.js's live /fail handler), matching the
+   * exact requirement: recover -> failJob() -> process() -> normal chain.
+   *
+   * Previously dead code before H2: the query/update used a `job_status`
+   * field that does not exist on the Job schema (the real field is
+   * `status`), so this never matched a document and was never called from
+   * anywhere.
    */
-
   async cleanupStaleLocks(lockTimeoutMs = 10 * 60 * 1000) { // 10 minutes default
 
     const staleTime = new Date(Date.now() - lockTimeoutMs);
 
+    const staleJobs = await Job.find({
+      status: 'processing',
+      claimed_at: { $lt: staleTime }
+    }).lean();
 
-
-    const result = await Job.updateMany(
-
-      {
-
-        job_status: 'processing',
-
-        claimed_at: { $lt: staleTime }
-
-      },
-
-      {
-
-        $set: {
-
-          job_status: 'pending',
-
-          claimed_at: null
-
-        }
-
-      }
-
-    );
-
-
-
-    if (result.modifiedCount > 0) {
-
-      console.log(`🧹 Cleaned up ${result.modifiedCount} stale locks`);
-
+    if (staleJobs.length === 0) {
+      return { modifiedCount: 0 };
     }
 
+    // Dynamic import breaks a static-import cycle: jobFailureHandler.js
+    // imports chainingEngine.js, which imports this file (JobService) —
+    // a top-level `import` here would create jobService.js -> jobFailureHandler.js
+    // -> chainingEngine.js -> jobService.js. Deferred to call time (well
+    // after the whole module graph has finished loading), this is safe.
+    const { advanceAfterJobFailure } = await import('./jobFailureHandler.js');
 
+    let modifiedCount = 0;
+    for (const staleJob of staleJobs) {
+      try {
+        const updatedJob = await this.failJob(staleJob._id, {
+          message: 'stale_lock_recovered',
+        });
+        modifiedCount++;
+        console.log(`[RECOVERY] stale_lock_recovered | jobId=${staleJob._id} | jobType=${staleJob.jobType} | newStatus=${updatedJob.status}`);
+        await advanceAfterJobFailure(
+          updatedJob,
+          { message: 'Stale lock recovered — worker did not complete in time' },
+          { source: 'stale_lock_sweep' }
+        );
+      } catch (error) {
+        console.error(`[RECOVERY] stale_lock_recovery_failed | jobId=${staleJob._id} | reason="${error.message}"`);
+      }
+    }
 
-    return result;
+    if (modifiedCount > 0) {
+      console.log(`🧹 Cleaned up ${modifiedCount} stale locks`);
+    }
+
+    return { modifiedCount };
+
+  }
+
+  /**
+   * F4-018 (widened from H2's original url_verification-only scope):
+   * recovers jobs stuck in 'pending' forever — never claimed by any worker
+   * (Python polling loop down, or PUSH-mode dispatch silently failed) or,
+   * for the Node-self-processed PROJECT_TASK_VERIFICATION, never picked up
+   * because Node crashed between job creation and its synchronous inline
+   * run. cleanupStaleLocks above only matches 'processing' jobs that hold a
+   * claim (via claimed_at) — a job that was never claimed has no
+   * claimed_at at all, so it needs this separate sweep.
+   *
+   * Scope: input_data.mode:'url_verification' (H2's original scope,
+   * unchanged) PLUS PROJECT_SEO_AGGREGATION/PROJECT_AI_AGGREGATION/
+   * PROJECT_TASK_VERIFICATION (F4-018 — these are the other job types that
+   * can strand a Verification Batch in AGGREGATING if never claimed). Full
+   * Audit's other job types are still out of scope — same pre-existing gap,
+   * not introduced or widened by this change, and not part of what F4-018
+   * was asked to fix.
+   *
+   * Routes through the same shared this.failJob() + advanceAfterJobFailure()
+   * path as cleanupStaleLocks above, instead of a raw Job.updateMany.
+   *
+   * @param {number} pendingTimeoutMs
+   * @returns {Promise<{modifiedCount:number}>}
+   */
+  async recoverOrphanedUrlVerificationJobs(pendingTimeoutMs = 10 * 60 * 1000) {
+
+    const staleTime = new Date(Date.now() - pendingTimeoutMs);
+
+    const orphanedJobs = await Job.find({
+      status: 'pending',
+      created_at: { $lt: staleTime },
+      $or: [
+        { 'input_data.mode': 'url_verification' },
+        { jobType: { $in: [JOB_TYPES.PROJECT_SEO_AGGREGATION, JOB_TYPES.PROJECT_AI_AGGREGATION, JOB_TYPES.PROJECT_TASK_VERIFICATION] } },
+      ],
+    }).lean();
+
+    if (orphanedJobs.length === 0) {
+      return { modifiedCount: 0 };
+    }
+
+    const { advanceAfterJobFailure } = await import('./jobFailureHandler.js');
+
+    let modifiedCount = 0;
+    for (const orphanedJob of orphanedJobs) {
+      try {
+        const updatedJob = await this.failJob(orphanedJob._id, {
+          message: 'orphaned_pending_job_recovered',
+        });
+        modifiedCount++;
+        console.log(`[RECOVERY] orphaned_pending_recovered | jobId=${orphanedJob._id} | jobType=${orphanedJob.jobType} | newStatus=${updatedJob.status}`);
+        await advanceAfterJobFailure(
+          updatedJob,
+          { message: 'Job was never claimed by a worker' },
+          { source: 'orphaned_pending_sweep' }
+        );
+      } catch (error) {
+        console.error(`[RECOVERY] orphaned_pending_recovery_failed | jobId=${orphanedJob._id} | reason="${error.message}"`);
+      }
+    }
+
+    if (modifiedCount > 0) {
+      console.log(`🧹 Recovered ${modifiedCount} orphaned pending job(s)`);
+    }
+
+    return { modifiedCount };
 
   }
 
@@ -2160,62 +2180,74 @@ export class JobService {
 
    */
 
-  async claimJob(workerType) {
+  /**
+   * Atomically claim a job of the given type for PULL-model processing.
+   * The single source of truth for job claiming (see the F4-018 note where
+   * this method's former duplicate used to live, above) — matches:
+   *
+   *   - 'pending' jobs: claimable immediately (claimed_at null), or after
+   *     the existing defensive 5-minute staleness window if one was
+   *     somehow left claimed without transitioning to 'processing'.
+   *     Unchanged from before this fix.
+   *
+   *   - 'retrying' jobs: reclaimed once failJob's own computed backoff
+   *     delay has elapsed (last_attempted_at, pushed into the future at
+   *     failure time, is now <= now). This branch is the F4-018 fix — the
+   *     duplicate definition that used to shadow this method omitted
+   *     'retrying' entirely, so a job that failed once with attempts
+   *     remaining was never reclaimed by anything, for any job type
+   *     using this claim path.
+   *
+   * attempts is intentionally NOT incremented here (unlike the dead
+   * duplicate's own version, which double-counted against failJob's own
+   * attempts++) — failJob is the single place attempts is incremented, at
+   * the moment an attempt actually fails.
+   */
+  async claimJob(job_type) {
+
+    const now = new Date();
+    const staleWindow = new Date(now.getTime() - 5 * 60 * 1000);
 
     try {
-
-      // Job is already imported as ES module at top of file
-
       const job = await Job.findOneAndUpdate(
-
-        { 
-
-          status: 'pending', 
-
-          jobType: workerType,
-
+        {
+          jobType: job_type,
           $or: [
-
-            { claimed_at: { $lt: new Date(Date.now() - 5 * 60 * 1000) } },
-
-            { claimed_at: null }
-
-          ]
-
+            { status: 'pending', claimed_at: null },
+            { status: 'pending', claimed_at: { $lt: staleWindow } },
+            { status: 'retrying', last_attempted_at: { $lte: now } },
+          ],
         },
-
-        { 
-
-          $set: { 
-
-            status: 'processing', 
-
-            claimed_at: new Date(),
-
-            started_at: new Date(),
-
-            claimed_by: process.env.WORKER_ID || 'unknown'
-
-          }
-
+        {
+          $set: {
+            status: 'processing',
+            claimed_at: now,
+            started_at: now,
+            last_attempted_at: now,
+            claimed_by: process.env.WORKER_ID || 'unknown',
+          },
         },
-
         { new: true, sort: { priority: -1, created_at: 1 } }
-
       );
 
-      
+      if (job) {
+        // attempts is only ever incremented by failJob at failure time, so
+        // attempts > 0 here means this claim reclaimed a job that had
+        // previously failed at least once (was sitting in 'retrying') —
+        // attempts === 0 is an ordinary first-time claim of a fresh
+        // 'pending' job. Distinguished for observability (F4-018 §7).
+        if (job.attempts > 0) {
+          console.log(`[RECOVERY] retry_reclaimed | jobType=${job_type} | jobId=${job._id} | attempts=${job.attempts}`);
+        } else {
+          console.log(`[CLAIM] job_claimed | jobType=${job_type} | jobId=${job._id}`);
+        }
+      }
 
       return job;
-
     } catch (error) {
-
       console.error('Failed to claim job:', error);
-
       throw error;
-
     }
-
   }
 
 

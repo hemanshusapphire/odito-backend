@@ -85,20 +85,6 @@ router.get('/:projectId/page11', validateProjectAccess(), PDFDataController.getP
 router.get('/:projectId/page16', validateProjectAccess(), PDFDataController.getPage16Data);
 
 /**
- * @route GET /api/pdf/:projectId/page19
- * @desc Generate Page 19 - AI Visibility Overview data
- * @access Private
- */
-router.get('/:projectId/page19', validateProjectAccess(), PDFDataController.getPage19Data);
-
-/**
- * @route GET /api/pdf/:projectId/page22
- * @desc Generate Page 22 - AI Content Readiness data
- * @access Private
- */
-router.get('/:projectId/page22', validateProjectAccess(), PDFDataController.getPage22Data);
-
-/**
  * @route GET /api/pdf/:projectId/executive
  * @desc Generate executive summary data
  * @access Private

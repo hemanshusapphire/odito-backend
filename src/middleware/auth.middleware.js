@@ -138,12 +138,17 @@ export class AuthMiddleware {
   }
 
   /**
-   * Admin access middleware
+   * Admin access middleware.
+   *
+   * Checks the real User schema field (roleId, numeric 1-5 — see
+   * modules/user/model/User.js) rather than a 'role' string field that does
+   * not exist on the model. roleId <= 3 covers systemadmin/superadmin/admin;
+   * 4 (agency admin) and 5 (regular user) are not admin-authorized.
    */
   static requireAdmin() {
     return (req, res, next) => {
-      const userId = req.user?.id || req.userId;
-      const userRole = req.user?.role || req.userRole;
+      const userId = req.user?.id || req.user?._id || req.userId;
+      const roleId = req.user?.roleId;
 
       if (!userId) {
         return res.status(401).json(
@@ -151,11 +156,11 @@ export class AuthMiddleware {
         );
       }
 
-      if (userRole !== 'admin') {
+      if (!roleId || roleId > 3) {
         LoggerUtil.security('Admin access denied', userId, {
           endpoint: req.path,
           method: req.method,
-          userRole: userRole
+          roleId: roleId
         });
 
         return res.status(403).json(
@@ -164,7 +169,45 @@ export class AuthMiddleware {
       }
 
       req.userId = userId;
-      req.userRole = userRole;
+      req.userRole = roleId;
+      next();
+    };
+  }
+
+  /**
+   * System Admin access middleware.
+   *
+   * Narrower than requireAdmin(): the System Admin console is reserved for
+   * roleId === 1 only (superadmin/admin/agency_admin/user are all rejected).
+   * Fails closed — any missing/non-numeric/mismatched roleId is denied.
+   * Reuses the same req.user populated by the existing auth middleware; does
+   * not perform its own token verification or DB lookup.
+   */
+  static requireSystemAdmin() {
+    return (req, res, next) => {
+      const userId = req.user?.id || req.user?._id || req.userId;
+      const roleId = req.user?.roleId;
+
+      if (!userId) {
+        return res.status(401).json(
+          ResponseUtil.error('Authentication required', 401)
+        );
+      }
+
+      if (roleId !== 1) {
+        LoggerUtil.security('System Admin access denied', userId, {
+          endpoint: req.path,
+          method: req.method,
+          roleId: roleId
+        });
+
+        return res.status(403).json(
+          ResponseUtil.accessDenied('System Admin access required')
+        );
+      }
+
+      req.userId = userId;
+      req.userRole = roleId;
       next();
     };
   }
@@ -177,5 +220,6 @@ export const {
   validateProjectAccess,
   optionalProjectAccess,
   requireAuth,
-  requireAdmin
+  requireAdmin,
+  requireSystemAdmin
 } = AuthMiddleware;

@@ -9,7 +9,7 @@
  * GROUP  NAME                  PROMPT MODE(S)         MAX_TOKENS
  * ─────────────────────────────────────────────────────────────────────
  *   1    Text Optimization      content_rewrite         1200
- *   2    Content Optimization   content_rewrite         2000
+ *   2    Content Optimization   content_rewrite         3200  // thin_content etc. rewrite full paragraphs, not a title/meta — 2000 was observed truncating at 100% utilization; live-verified need is ~3093
  *   3    Technical SEO          comparison_fix          1500
  *                               structural_fix
  *                               list_fix
@@ -53,7 +53,7 @@ export const GROUP_LABELS = {
 /** Max output tokens per group — schema/content need more room than text rewrites. */
 export const GROUP_MAX_TOKENS = {
   [GROUP.TEXT_OPTIMIZATION]:    1200,
-  [GROUP.CONTENT_OPTIMIZATION]: 2000,
+  [GROUP.CONTENT_OPTIMIZATION]: 3200,  // live-verified: a real thin_content response needed 3093 output tokens and still truncated at 2800 — 3200 covers it with headroom; the retry-with-boosted-budget path (claudeService.js/recommendationService.js) is the remaining safety net beyond this
   [GROUP.TECHNICAL_SEO]:        1500,
   [GROUP.SCHEMA]:               3000,  // FAQ/Schema JSON-LD appears in both recommendedVersion AND implementationCode
   [GROUP.ACCESSIBILITY]:        1200,
@@ -231,13 +231,45 @@ const ISSUE_GROUP_MAP = {
 
 /**
  * Resolve the group for a given issueId.
- * Falls back to GROUP.TECHNICAL_SEO for unregistered issues (broadest coverage).
+ *
+ * For legacy on-page / technical-check / ai_visibility issues: explicit map lookup.
+ * For V2 hub issues (AISO-*, AEO-*, GEO-*): pattern-based routing by hub + card prefix.
+ * This means new V2 rules added to the Python pipeline automatically route to the
+ * correct prompt group with zero JS changes required.
+ *
+ * AISO card routing:
+ *   A*  (authority)    → ENTITY_EEAT        — author/org/about-page signals
+ *   CV* (coverage)     → CONTENT_OPTIMIZATION — word-count, internal links, sitemap
+ *   C*  (citability)   → TECHNICAL_SEO       — canonical, noindex, js-render
+ *   00* (crawlability) → TECHNICAL_SEO       — robots, llms.txt, broken URLs
+ *
+ * AEO-*  → AEO_VOICE   — FAQ, direct answers, voice search
+ * GEO-*  → ENTITY_EEAT — NAP, coordinates, hreflang, knowledge graph
  *
  * @param {string} issueId
  * @returns {number} GROUP constant
  */
 export function resolveGroup(issueId) {
-  return ISSUE_GROUP_MAP[issueId] ?? GROUP.TECHNICAL_SEO;
+  // Fast path: explicit registration (all legacy on-page / technical / ai_visibility issues)
+  if (ISSUE_GROUP_MAP[issueId] != null) return ISSUE_GROUP_MAP[issueId];
+
+  // V2 AISO-* pattern: route by card prefix (suffix after "AISO-")
+  if (/^AISO-/i.test(issueId)) {
+    const suffix = issueId.slice(5).toLowerCase(); // e.g. "a2", "cv1", "c3", "001"
+    if (suffix.startsWith('a'))  return GROUP.ENTITY_EEAT;          // A1, A2, A3 — authority
+    if (suffix.startsWith('cv')) return GROUP.CONTENT_OPTIMIZATION; // CV1, CV2, CV3 — coverage (must precede 'c')
+    if (suffix.startsWith('c'))  return GROUP.TECHNICAL_SEO;        // C1, C2, C3 — citability
+    return GROUP.TECHNICAL_SEO;                                     // 001-010 — crawlability
+  }
+
+  // V2 AEO-* → Answer Engine Optimization / Voice Search
+  if (/^AEO-/i.test(issueId)) return GROUP.AEO_VOICE;
+
+  // V2 GEO-* → Entity / E-E-A-T (NAP, coordinates, knowledge graph, hreflang)
+  if (/^GEO-/i.test(issueId)) return GROUP.ENTITY_EEAT;
+
+  // Unknown issue — broadest fallback
+  return GROUP.TECHNICAL_SEO;
 }
 
 /**

@@ -1,47 +1,55 @@
-import { getValidAccessToken, createAuthenticatedClient } from './googleApiService.js';
-import axios from 'axios';
+import {
+  getAuthenticatedHttpClient,
+  withRetry,
+  logAxiosError,
+  getCacheKey,
+  getCachedData,
+  setCachedData
+} from './businessProfileService.js';
 
 /**
  * Search Console API Service
- * 
- * MVP Implementation:
- * - Site discovery and verification
- * - Minimal performance data fetching (28 days, pages only, top 50)
- * - Safe token management via googleApiService
- * - No data persistence, no aggregation, no bulk operations
- * 
- * Safety Features:
- * - Uses centralized token refresh
- * - Limits data to prevent quota issues
- * - Comprehensive error handling
- * - Normalized output format
+ *
+ * Site discovery, explicit property selection, and performance data fetching
+ * with backfill/incremental sync support.
+ *
+ * Reuses businessProfileService.js's generic HTTP/retry/cache helpers rather
+ * than reimplementing them - see that file's exports (getAuthenticatedHttpClient,
+ * withRetry, logAxiosError, getCacheKey/getCachedData/setCachedData), all of
+ * which are already parameterized over baseUrl/cache-key and not
+ * Business-Profile-specific.
+ *
+ * API host: https://www.googleapis.com/webmasters/v3
+ * Verified live (2026-07-21) against a real webmasters.readonly-scoped
+ * connection: this host returns 200 with real data. The rebranded host
+ * (https://searchconsole.googleapis.com) was also tested and returns an
+ * identical response on the same /webmasters/v3/... path - Google renamed
+ * the product/host but kept the v3 REST path structure. Since the current
+ * host is confirmed working, it is kept as-is (no migration risk for zero
+ * functional benefit); SEARCH_CONSOLE_API_BASE is the only place a future
+ * switch to the rebranded host would need to change.
  */
 
-// Search Console API base URL
 const SEARCH_CONSOLE_API_BASE = 'https://www.googleapis.com/webmasters/v3';
 
-/**
- * Get authenticated HTTP client for Search Console API calls
- * @param {Object} googleConnection - GoogleConnection document
- * @returns {Object} - Axios instance with authentication headers
- */
-async function getAuthenticatedHttpClient(googleConnection) {
-  const accessToken = await getValidAccessToken(googleConnection);
-  
-  return axios.create({
-    baseURL: SEARCH_CONSOLE_API_BASE,
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
-    timeout: 30000 // 30 second timeout
-  });
+// The URL Inspection API lives on a different host/version than the rest of
+// this file's webmasters/v3 calls - it was introduced later as part of the
+// "Search Console API" rebrand and was never folded into webmasters/v3.
+// getAuthenticatedHttpClient() is already generic over baseUrl (see
+// businessProfileService.js), so this needs no new OAuth/token logic - just
+// a second client pointed at a different host.
+const SEARCH_CONSOLE_INSPECTION_API_BASE = 'https://searchconsole.googleapis.com/v1';
+
+// Same TTL class as businessProfileService's general cache (10 min) - site
+// lists change rarely enough that this is safe, and setCachedData's
+// "never cache an empty result" guard already prevents a one-off empty
+// response from being treated as "this user has no sites" for the full TTL.
+async function getAuthenticatedSearchConsoleClient(googleConnection) {
+  return getAuthenticatedHttpClient(googleConnection, SEARCH_CONSOLE_API_BASE);
 }
 
 /**
  * Extract domain from project URL for site matching
- * @param {string} projectUrl - Project main URL
- * @returns {string} - Extracted domain
  */
 function extractDomainFromUrl(projectUrl) {
   try {
@@ -54,376 +62,614 @@ function extractDomainFromUrl(projectUrl) {
 }
 
 /**
- * Find matching Search Console site for a project
- * @param {Array} sites - List of accessible sites from Search Console
- * @param {string} projectUrl - Project main URL
- * @returns {string|null} - Matching site URL or null
+ * Find matching Search Console site for a project.
+ *
+ * Priority: exact HTTPS URL-prefix match -> exact HTTP URL-prefix match ->
+ * domain property (sc-domain:) match -> no match (caller must fall back to
+ * explicit user selection via the sites list).
+ *
+ * The previous implementation's 4th tier - a bare `siteUrl.includes(domain)`
+ * substring check - is intentionally removed: it could match an unrelated
+ * property whose URL merely contains the domain as a substring (e.g.
+ * "example.com" matching "notexample.com.example.com"), which is a real
+ * correctness risk for zero practical benefit once explicit site selection
+ * exists as a fallback.
  */
 function findMatchingSite(sites, projectUrl) {
   const projectDomain = extractDomainFromUrl(projectUrl);
-  
+
   console.log('[SEARCH_CONSOLE] Finding matching site', {
     projectDomain,
-    projectUrl,
     availableSites: sites.length
   });
-  
-  // Priority 1: Exact HTTPS match
-  const httpsMatch = sites.find(site => 
-    site.siteUrl === `https://${projectDomain}/` || 
+
+  const httpsMatch = sites.find(site =>
+    site.siteUrl === `https://${projectDomain}/` ||
     site.siteUrl === `https://${projectDomain}`
   );
-  
-  if (httpsMatch) {
-    console.log('[SEARCH_CONSOLE] Found HTTPS match:', httpsMatch.siteUrl);
-    return httpsMatch.siteUrl;
-  }
-  
-  // Priority 2: Exact HTTP match
-  const httpMatch = sites.find(site => 
-    site.siteUrl === `http://${projectDomain}/` || 
+  if (httpsMatch) return httpsMatch.siteUrl;
+
+  const httpMatch = sites.find(site =>
+    site.siteUrl === `http://${projectDomain}/` ||
     site.siteUrl === `http://${projectDomain}`
   );
-  
-  if (httpMatch) {
-    console.log('[SEARCH_CONSOLE] Found HTTP match:', httpMatch.siteUrl);
-    return httpMatch.siteUrl;
-  }
-  
-  // Priority 3: Domain-scoped match
-  const scDomainMatch = sites.find(site => 
-    site.siteUrl === `sc-domain:${projectDomain}`
-  );
-  
-  if (scDomainMatch) {
-    console.log('[SEARCH_CONSOLE] Found sc-domain match:', scDomainMatch.siteUrl);
-    return scDomainMatch.siteUrl;
-  }
-  
-  // Priority 4: Partial match (contains domain)
-  const partialMatch = sites.find(site => 
-    site.siteUrl.includes(projectDomain)
-  );
-  
-  if (partialMatch) {
-    console.log('[SEARCH_CONSOLE] Found partial match:', partialMatch.siteUrl);
-    return partialMatch.siteUrl;
-  }
-  
-  console.log('[SEARCH_CONSOLE] No matching site found for domain:', projectDomain);
+  if (httpMatch) return httpMatch.siteUrl;
+
+  const scDomainMatch = sites.find(site => site.siteUrl === `sc-domain:${projectDomain}`);
+  if (scDomainMatch) return scDomainMatch.siteUrl;
+
+  console.log('[SEARCH_CONSOLE] No confident automatic match for domain:', projectDomain);
   return null;
 }
 
 /**
- * Get list of accessible sites from Search Console
- * @param {Object} googleConnection - GoogleConnection document
- * @returns {Promise<Array>} - List of accessible sites
+ * Get list of accessible sites from Search Console (cached, retried).
  */
 export async function getSearchConsoleSites(googleConnection) {
+  const cacheKey = getCacheKey('sc_sites', googleConnection._id);
+  const cached = getCachedData(cacheKey);
+  if (cached) return cached;
+
   try {
     console.log('[SEARCH_CONSOLE] Fetching accessible sites');
-    
-    const client = await getAuthenticatedHttpClient(googleConnection);
-    
-    const response = await client.get('/sites');
-    
-    // Log the COMPLETE raw response for debugging
-    console.log('[SEARCH_CONSOLE] RAW API RESPONSE:', {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-      data: response.data,
-      dataType: typeof response.data,
-      dataKeys: response.data ? Object.keys(response.data) : 'null',
-      // Check for all possible response structures
-      hasSiteEntry: response.data?.hasOwnProperty('siteEntry'),
-      hasSiteEntryArray: Array.isArray(response.data?.siteEntry),
-      hasSites: response.data?.hasOwnProperty('sites'),
-      hasSitesArray: Array.isArray(response.data?.sites),
-      directArray: Array.isArray(response.data)
-    });
-    
-    // Handle different possible response structures
+
+    const client = await getAuthenticatedSearchConsoleClient(googleConnection);
+    const response = await withRetry(() => client.get('/sites'));
+
     let sites = [];
-    
     if (response.data?.siteEntry && Array.isArray(response.data.siteEntry)) {
-      // Standard format: { siteEntry: [...] }
       sites = response.data.siteEntry;
-      console.log('[SEARCH_CONSOLE] Using siteEntry format');
     } else if (response.data?.sites && Array.isArray(response.data.sites)) {
-      // Alternative format: { sites: [...] }
       sites = response.data.sites;
-      console.log('[SEARCH_CONSOLE] Using sites format');
     } else if (Array.isArray(response.data)) {
-      // Direct array format: [...]
       sites = response.data;
-      console.log('[SEARCH_CONSOLE] Using direct array format');
-    } else {
-      // No sites found - user might not have any Search Console properties
-      console.log('[SEARCH_CONSOLE] No sites found in response');
-      console.log('[SEARCH_CONSOLE] This likely means user has no Search Console properties');
-      return []; // Return empty array instead of throwing
     }
-    
-    console.log('[SEARCH_CONSOLE] Found accessible sites:', {
-      count: sites.length,
-      sites: sites.map(site => ({
-        url: site.siteUrl,
-        permissionLevel: site.permissionLevel
-      }))
-    });
-    
+
+    console.log('[SEARCH_CONSOLE] Found accessible sites:', { count: sites.length });
+
+    setCachedData(cacheKey, sites);
     return sites;
-    
+
   } catch (error) {
-    console.error('[SEARCH_CONSOLE] Failed to fetch sites', {
-      error: error.message,
-      status: error.response?.status,
-      data: error.response?.data,
-      // Log axios error details
-      isAxiosError: error.isAxiosError,
-      config: error.config?.url,
-      responseAvailable: !!error.response
-    });
-    
-    // Handle common errors
+    logAxiosError('getSearchConsoleSites', error);
+
     if (error.response?.status === 403) {
       throw new Error('Access denied: User does not have Search Console permissions. Please ensure the user has at least one Search Console property added to their account.');
     }
-    
     if (error.response?.status === 401) {
       throw new Error('Authentication failed: Invalid or expired credentials');
     }
-    
+
     throw new Error(`Failed to fetch Search Console sites: ${error.message}`);
   }
 }
 
 /**
- * Find the appropriate Search Console site for a project
- * @param {Object} googleConnection - GoogleConnection document
- * @param {string} projectUrl - Project main URL
- * @returns {Promise<string|null>} - Matching site URL or null
+ * Find the appropriate Search Console site for a project (automatic
+ * best-effort match, used to pre-select a suggestion - not a substitute for
+ * explicit selection when no confident match exists).
  */
 export async function findProjectSearchConsoleSite(googleConnection, projectUrl) {
-  try {
-    console.log('[SEARCH_CONSOLE] Finding site for project', { projectUrl });
-    
-    const sites = await getSearchConsoleSites(googleConnection);
-    
-    if (sites.length === 0) {
-      throw new Error(`No Search Console properties found in user account. Please add ${projectUrl} to Google Search Console first.`);
-    }
-    
-    const matchingSite = findMatchingSite(sites, projectUrl);
-    
-    if (!matchingSite) {
-      const availableSites = sites.map(site => site.siteUrl).join(', ');
-      throw new Error(`No matching Search Console property found for project: ${projectUrl}. Available properties: ${availableSites}`);
-    }
-    
-    return matchingSite;
-    
-  } catch (error) {
-    console.error('[SEARCH_CONSOLE] Failed to find project site', {
-      projectUrl,
-      error: error.message
-    });
-    
-    throw error;
+  const sites = await getSearchConsoleSites(googleConnection);
+
+  if (sites.length === 0) {
+    throw new Error(`No Search Console properties found in user account. Please add ${projectUrl} to Google Search Console first.`);
   }
+
+  const matchingSite = findMatchingSite(sites, projectUrl);
+
+  if (!matchingSite) {
+    const availableSites = sites.map(site => site.siteUrl).join(', ');
+    throw new Error(`No matching Search Console property found for project: ${projectUrl}. Available properties: ${availableSites}`);
+  }
+
+  return matchingSite;
 }
 
 /**
- * Fetch minimal Search Console performance data (MVP)
- * 
- * Scope: Last 28 days, pages only, top 50 rows
- * Metrics: clicks, impressions, ctr, position
- * 
- * @param {Object} googleConnection - GoogleConnection document
- * @param {string} siteUrl - Search Console site URL
- * @returns {Promise<Array>} - Normalized performance data
+ * Validate that a specific site URL is genuinely accessible to this
+ * connection - the Search Console equivalent of
+ * businessProfileService.validateBusinessProfileAccess() /
+ * analyticsService.validateAnalyticsPropertyAccess(). Used by the explicit
+ * property-selection endpoint so a user (or a stale/tampered request) can
+ * never select a site this Google account doesn't actually have access to.
  */
-export async function getSearchConsolePerformanceData(googleConnection, siteUrl) {
+export async function validateSearchConsoleSiteAccess(googleConnection, siteUrl) {
+  const sites = await getSearchConsoleSites(googleConnection);
+  const hasAccess = sites.some(site => site.siteUrl === siteUrl);
+
+  if (!hasAccess) {
+    throw new Error(`Site ${siteUrl} not found in user's accessible Search Console properties`);
+  }
+
+  return true;
+}
+
+/**
+ * Low-level Search Analytics `searchAnalytics.query` call, shared by every
+ * dimension this service queries (page, date, query, country, device,
+ * searchAppearance). Does the HTTP call + retry + date-range math only -
+ * callers own row normalization, since each dimension's row shape differs.
+ *
+ * Factored out of what used to be two near-identical copies of this exact
+ * fetch (in getSearchConsolePerformanceData and getSearchConsoleTrendData)
+ * so adding more dimensions doesn't mean copy-pasting the POST/retry block
+ * again - both of those functions now delegate here with identical external
+ * behavior.
+ *
+ * @param {Object} googleConnection
+ * @param {string} siteUrl
+ * @param {Object} options
+ * @param {number} [options.days=28]
+ * @param {string[]} options.dimensions
+ * @param {number} [options.rowLimit=50]
+ * @returns {Promise<{rows: Array, date_range: {start: string, end: string}}>}
+ */
+async function querySearchAnalytics(googleConnection, siteUrl, options = {}) {
+  const {
+    days = 28,
+    dimensions,
+    rowLimit = 50
+  } = options;
+
+  const client = await getAuthenticatedSearchConsoleClient(googleConnection);
+
+  const endDate = new Date();
+  const startDate = new Date();
+  startDate.setDate(endDate.getDate() - days);
+
+  const startDateStr = startDate.toISOString().split('T')[0];
+  const endDateStr = endDate.toISOString().split('T')[0];
+
+  const requestBody = {
+    startDate: startDateStr,
+    endDate: endDateStr,
+    dimensions,
+    rowLimit,
+    type: 'web'
+  };
+
+  const response = await withRetry(() =>
+    client.post(`/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, requestBody)
+  );
+
+  return {
+    rows: response.data?.rows || [],
+    date_range: { start: startDateStr, end: endDateStr }
+  };
+}
+
+/**
+ * Fetch Search Console performance data for a site.
+ *
+ * @param {Object} googleConnection
+ * @param {string} siteUrl
+ * @param {Object} [options]
+ * @param {number} [options.days=28] - Lookback window. Controller passes a
+ *   larger value (e.g. 90) for a first-ever sync and a small rolling value
+ *   (e.g. 7) for incremental syncs - see searchConsoleController.js. 28 is
+ *   kept as the default only for direct/manual callers that don't specify it.
+ * @param {string[]} [options.dimensions=['page']]
+ * @param {number} [options.rowLimit=50]
+ */
+export async function getSearchConsolePerformanceData(googleConnection, siteUrl, options = {}) {
+  const {
+    days = 28,
+    dimensions = ['page'],
+    rowLimit = 50
+  } = options;
+
   try {
-    console.log('[SEARCH_CONSOLE] Fetching performance data', { siteUrl });
-    
-    const client = await getAuthenticatedHttpClient(googleConnection);
-    
-    // Calculate date range (last 28 days)
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setDate(endDate.getDate() - 28);
-    
-    const startDateStr = startDate.toISOString().split('T')[0];
-    const endDateStr = endDate.toISOString().split('T')[0];
-    
-    console.log('[SEARCH_CONSOLE] Query parameters', {
-      startDate: startDateStr,
-      endDate: endDateStr,
-      dimensions: ['page'],
-      rowLimit: 50
-    });
-    
-    const requestBody = {
-      startDate: startDateStr,
-      endDate: endDateStr,
-      dimensions: ['page'],
-      rowLimit: 50,
-      type: 'web' // Web search only (no images, video, etc.)
-    };
-    
-    const response = await client.post(`/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`, requestBody);
-    
-    if (!response.data || !response.data.rows) {
-      console.log('[SEARCH_CONSOLE] No performance data available');
-      return [];
+    console.log('[SEARCH_CONSOLE] Fetching performance data', { siteUrl, days, dimensions, rowLimit });
+
+    const { rows: rawData, date_range: { start: startDateStr, end: endDateStr } } =
+      await querySearchAnalytics(googleConnection, siteUrl, { days, dimensions, rowLimit });
+
+    if (rawData.length === 0) {
+      console.log('[SEARCH_CONSOLE] No performance data available for this range');
+      return { data: [], synced_pages: 0, skipped_pages: 0, date_range: { start: startDateStr, end: endDateStr } };
     }
-    
-    const rawData = response.data.rows;
-    console.log('[SEARCH_CONSOLE] Retrieved performance data', {
-      totalRows: rawData.length,
-      responseKeys: response.data.keys || [],
-      sampleRows: rawData.slice(0, 2).map(row => ({
-        hasKeys: !!row.keys,
-        hasClicks: 'clicks' in row,
-        hasImpressions: 'impressions' in row,
-        hasCtr: 'ctr' in row,
-        hasPosition: 'position' in row,
-        keysType: typeof row.keys,
-        keysLength: row.keys?.length,
-        clicks: row.clicks,
-        impressions: row.impressions
-      }))
-    });
-    
-    // Defensive row normalization function
-    const normalizeRow = (row, index) => {
-      // Validate row structure
-      if (!row || typeof row !== 'object') {
-        console.log(`[SEARCH_CONSOLE] Skipping invalid row ${index}: not an object`);
+
+    const normalizeRow = (row) => {
+      if (!row || typeof row !== 'object' || !Array.isArray(row.keys) || row.keys.length === 0) {
         return null;
       }
-      
-      // Validate keys array (required for page URL)
-      if (!Array.isArray(row.keys) || row.keys.length === 0) {
-        console.log(`[SEARCH_CONSOLE] Skipping row ${index}: missing or empty keys array`);
-        return null;
-      }
-      
-      // Extract values safely - Search Console returns metrics as TOP-LEVEL properties
+
       const pageUrl = row.keys[0] || '';
       const clicks = row.clicks || 0;
       const impressions = row.impressions || 0;
-      const ctr = row.ctr || 0;
-      const position = row.position || 0;
-      
-      // Validate that we have at least some meaningful data
+
       if (!pageUrl && clicks === 0 && impressions === 0) {
-        console.log(`[SEARCH_CONSOLE] Skipping row ${index}: no meaningful data`);
         return null;
       }
-      
+
       return {
         page_url: pageUrl,
         clicks: parseInt(clicks, 10),
         impressions: parseInt(impressions, 10),
-        ctr: parseFloat(ctr),
-        position: parseFloat(position)
+        ctr: parseFloat(row.ctr || 0),
+        position: parseFloat(row.position || 0)
       };
     };
-    
-    // Normalize data with defensive filtering
-    const normalizedData = rawData
-      .map(normalizeRow)
-      .filter(Boolean); // Remove null entries
-    
-    // Log processing results
+
+    const normalizedData = rawData.map(normalizeRow).filter(Boolean);
     const skippedCount = rawData.length - normalizedData.length;
-    if (skippedCount > 0) {
-      console.log(`[SEARCH_CONSOLE] Processing summary: ${normalizedData.length} rows stored, ${skippedCount} rows skipped due to invalid format`);
-    }
-    
+
     console.log('[SEARCH_CONSOLE] Normalized performance data', {
-      totalClicks: normalizedData.reduce((sum, item) => sum + item.clicks, 0),
-      totalImpressions: normalizedData.reduce((sum, item) => sum + item.impressions, 0),
-      avgCtr: normalizedData.length > 0 ? normalizedData.reduce((sum, item) => sum + item.ctr, 0) / normalizedData.length : 0,
-      avgPosition: normalizedData.length > 0 ? normalizedData.reduce((sum, item) => sum + item.position, 0) / normalizedData.length : 0
+      rowsIn: rawData.length,
+      rowsOut: normalizedData.length,
+      skipped: skippedCount
     });
-    
-    // Return both data and processing summary
+
     return {
       data: normalizedData,
       synced_pages: normalizedData.length,
-      skipped_pages: skippedCount
+      skipped_pages: skippedCount,
+      date_range: { start: startDateStr, end: endDateStr }
     };
-    
+
   } catch (error) {
-    console.error('[SEARCH_CONSOLE] Failed to fetch performance data', {
-      siteUrl,
-      error: error.message,
-      status: error.response?.status,
-      data: error.response?.data
-    });
-    
-    // Handle common errors
+    logAxiosError('getSearchConsolePerformanceData', error);
+
     if (error.response?.status === 403) {
       throw new Error(`Access denied: No permission for site ${siteUrl}`);
     }
-    
     if (error.response?.status === 404) {
       throw new Error(`Site not found in Search Console: ${siteUrl}`);
     }
-    
     if (error.response?.status === 400) {
       const errorDetails = error.response?.data?.error?.message || error.message;
       throw new Error(`Invalid request: ${errorDetails}`);
     }
-    
+
     throw new Error(`Failed to fetch Search Console performance data: ${error.message}`);
   }
 }
 
 /**
- * Complete MVP workflow: Find site and fetch performance data
- * @param {Object} googleConnection - GoogleConnection document
- * @param {string} projectUrl - Project main URL
- * @returns {Promise<Object>} - Object with data, synced_pages, and skipped_pages
+ * Complete workflow: find (or use a given) site and fetch performance data.
+ *
+ * @param {Object} googleConnection
+ * @param {string} projectUrl
+ * @param {Object} [options] - forwarded to getSearchConsolePerformanceData
+ *   (days/dimensions/rowLimit); siteUrl may be passed explicitly to skip
+ *   automatic matching once a site has been selected via
+ *   validateSearchConsoleSiteAccess()/selectSearchConsoleSite.
  */
-export async function getProjectSearchConsoleData(googleConnection, projectUrl) {
+export async function getProjectSearchConsoleData(googleConnection, projectUrl, options = {}) {
+  const siteUrl = options.siteUrl || await findProjectSearchConsoleSite(googleConnection, projectUrl);
+  const performanceResult = await getSearchConsolePerformanceData(googleConnection, siteUrl, options);
+
+  console.log('[SEARCH_CONSOLE] Workflow completed', {
+    siteUrl,
+    dataPoints: performanceResult.data.length
+  });
+
+  return performanceResult;
+}
+
+/**
+ * Fetch day-by-day Search Console performance for a site, using the `date`
+ * dimension instead of `page`. Powers the Search Performance Trends chart -
+ * getSearchConsolePerformanceData's `page` dimension has no per-day
+ * resolution to chart (it returns one aggregate row per page for the whole
+ * requested window).
+ *
+ * @param {Object} googleConnection
+ * @param {string} siteUrl
+ * @param {Object} [options]
+ * @param {number} [options.days=90] - Lookback window.
+ * @param {number} [options.rowLimit=1000] - One row per calendar day, so
+ *   even a 400-day backfill is well within this default.
+ */
+export async function getSearchConsoleTrendData(googleConnection, siteUrl, options = {}) {
+  const {
+    days = 90,
+    rowLimit = 1000
+  } = options;
+
   try {
-    console.log('[SEARCH_CONSOLE] Starting MVP workflow', { projectUrl });
-    
-    // Step 1: Find matching Search Console site
-    const siteUrl = await findProjectSearchConsoleSite(googleConnection, projectUrl);
-    
-    // Step 2: Fetch performance data
-    const performanceResult = await getSearchConsolePerformanceData(googleConnection, siteUrl);
-    
-    console.log('[SEARCH_CONSOLE] MVP workflow completed', {
-      projectUrl,
-      siteUrl,
-      dataPoints: performanceResult.data.length,
-      syncedPages: performanceResult.synced_pages,
-      skippedPages: performanceResult.skipped_pages
+    console.log('[SEARCH_CONSOLE] Fetching daily trend data', { siteUrl, days, rowLimit });
+
+    const { rows: rawData, date_range: { start: startDateStr, end: endDateStr } } =
+      await querySearchAnalytics(googleConnection, siteUrl, { days, dimensions: ['date'], rowLimit });
+
+    if (rawData.length === 0) {
+      console.log('[SEARCH_CONSOLE] No trend data available for this range');
+      return { data: [], date_range: { start: startDateStr, end: endDateStr } };
+    }
+
+    const normalizeRow = (row) => {
+      if (!row || typeof row !== 'object' || !Array.isArray(row.keys) || row.keys.length === 0) {
+        return null;
+      }
+
+      const date = row.keys[0] || '';
+      if (!date) return null;
+
+      return {
+        date,
+        clicks: parseInt(row.clicks || 0, 10),
+        impressions: parseInt(row.impressions || 0, 10),
+        ctr: parseFloat(row.ctr || 0),
+        position: parseFloat(row.position || 0)
+      };
+    };
+
+    const normalizedData = rawData.map(normalizeRow).filter(Boolean);
+
+    console.log('[SEARCH_CONSOLE] Normalized trend data', {
+      rowsIn: rawData.length,
+      rowsOut: normalizedData.length
     });
-    
-    // Return the complete result object
-    return performanceResult;
-    
+
+    return {
+      data: normalizedData,
+      date_range: { start: startDateStr, end: endDateStr }
+    };
+
   } catch (error) {
-    console.error('[SEARCH_CONSOLE] MVP workflow failed', {
-      projectUrl,
-      error: error.message
+    logAxiosError('getSearchConsoleTrendData', error);
+
+    if (error.response?.status === 403) {
+      throw new Error(`Access denied: No permission for site ${siteUrl}`);
+    }
+    if (error.response?.status === 404) {
+      throw new Error(`Site not found in Search Console: ${siteUrl}`);
+    }
+    if (error.response?.status === 400) {
+      const errorDetails = error.response?.data?.error?.message || error.message;
+      throw new Error(`Invalid request: ${errorDetails}`);
+    }
+
+    throw new Error(`Failed to fetch Search Console trend data: ${error.message}`);
+  }
+}
+
+/**
+ * Complete workflow: find (or use a given) site and fetch daily trend data.
+ * Mirrors getProjectSearchConsoleData for the `date`-dimension query.
+ */
+export async function getProjectSearchConsoleTrends(googleConnection, projectUrl, options = {}) {
+  const siteUrl = options.siteUrl || await findProjectSearchConsoleSite(googleConnection, projectUrl);
+  const trendResult = await getSearchConsoleTrendData(googleConnection, siteUrl, options);
+
+  console.log('[SEARCH_CONSOLE] Trends workflow completed', {
+    siteUrl,
+    dataPoints: trendResult.data.length
+  });
+
+  return trendResult;
+}
+
+// The 4 additional dimensions the Search Analytics API supports beyond
+// `page`/`date` (already used above) - query terms, geography, device
+// class, and how the result appeared in Google's SERP. One row per
+// dimension value, keyed generically as `dimension_value` since the
+// meaning changes per dimension (a query string, an ISO country code, a
+// device class, a search-appearance type).
+export const BREAKDOWN_DIMENSIONS = ['query', 'country', 'device', 'searchAppearance'];
+
+/**
+ * Fetch a single-dimension breakdown (query/country/device/searchAppearance)
+ * for a site. Same underlying `searchAnalytics.query` call as
+ * getSearchConsolePerformanceData/getSearchConsoleTrendData - only the
+ * dimension and row normalization differ, via the shared
+ * querySearchAnalytics() helper.
+ *
+ * @param {Object} googleConnection
+ * @param {string} siteUrl
+ * @param {string} dimension - one of BREAKDOWN_DIMENSIONS
+ * @param {Object} [options]
+ * @param {number} [options.days=28]
+ * @param {number} [options.rowLimit=25]
+ */
+export async function getSearchConsoleBreakdownData(googleConnection, siteUrl, dimension, options = {}) {
+  if (!BREAKDOWN_DIMENSIONS.includes(dimension)) {
+    throw new Error(`Invalid breakdown dimension: ${dimension}. Must be one of: ${BREAKDOWN_DIMENSIONS.join(', ')}`);
+  }
+
+  const { days = 28, rowLimit = 25 } = options;
+
+  try {
+    console.log('[SEARCH_CONSOLE] Fetching breakdown data', { siteUrl, dimension, days, rowLimit });
+
+    const { rows: rawData, date_range } =
+      await querySearchAnalytics(googleConnection, siteUrl, { days, dimensions: [dimension], rowLimit });
+
+    const normalizeRow = (row) => {
+      if (!row || typeof row !== 'object' || !Array.isArray(row.keys) || row.keys.length === 0) {
+        return null;
+      }
+
+      const dimensionValue = row.keys[0] || '';
+      const clicks = row.clicks || 0;
+      const impressions = row.impressions || 0;
+
+      if (!dimensionValue && clicks === 0 && impressions === 0) {
+        return null;
+      }
+
+      return {
+        dimension_value: dimensionValue,
+        clicks: parseInt(clicks, 10),
+        impressions: parseInt(impressions, 10),
+        ctr: parseFloat(row.ctr || 0),
+        position: parseFloat(row.position || 0)
+      };
+    };
+
+    const normalizedData = rawData.map(normalizeRow).filter(Boolean);
+
+    console.log('[SEARCH_CONSOLE] Normalized breakdown data', {
+      dimension,
+      rowsIn: rawData.length,
+      rowsOut: normalizedData.length
     });
-    
-    throw error;
+
+    return { data: normalizedData, date_range };
+
+  } catch (error) {
+    logAxiosError('getSearchConsoleBreakdownData', error);
+
+    if (error.response?.status === 403) {
+      throw new Error(`Access denied: No permission for site ${siteUrl}`);
+    }
+    if (error.response?.status === 404) {
+      throw new Error(`Site not found in Search Console: ${siteUrl}`);
+    }
+    if (error.response?.status === 400) {
+      const errorDetails = error.response?.data?.error?.message || error.message;
+      throw new Error(`Invalid request: ${errorDetails}`);
+    }
+
+    throw new Error(`Failed to fetch Search Console ${dimension} breakdown: ${error.message}`);
+  }
+}
+
+/**
+ * Complete workflow: find (or use a given) site and fetch a breakdown.
+ * Mirrors getProjectSearchConsoleData/getProjectSearchConsoleTrends.
+ */
+export async function getProjectSearchConsoleBreakdown(googleConnection, projectUrl, dimension, options = {}) {
+  const siteUrl = options.siteUrl || await findProjectSearchConsoleSite(googleConnection, projectUrl);
+  const result = await getSearchConsoleBreakdownData(googleConnection, siteUrl, dimension, options);
+
+  console.log('[SEARCH_CONSOLE] Breakdown workflow completed', {
+    siteUrl,
+    dimension,
+    dataPoints: result.data.length
+  });
+
+  return result;
+}
+
+/**
+ * List submitted sitemaps for a site (Sitemaps API - same webmasters/v3
+ * host as everything else in this file, just a different resource).
+ * Live-fetched and cached like getSearchConsoleSites(), not synced to Mongo:
+ * a site typically has only a handful of sitemaps, so there's no need for
+ * the sync/store pattern used for performance data.
+ */
+export async function getSearchConsoleSitemaps(googleConnection, siteUrl) {
+  const cacheKey = getCacheKey('sc_sitemaps', googleConnection._id, siteUrl);
+  const cached = getCachedData(cacheKey);
+  if (cached) return cached;
+
+  try {
+    console.log('[SEARCH_CONSOLE] Fetching sitemaps', { siteUrl });
+
+    const client = await getAuthenticatedSearchConsoleClient(googleConnection);
+    const response = await withRetry(() =>
+      client.get(`/sites/${encodeURIComponent(siteUrl)}/sitemaps`)
+    );
+
+    const rawSitemaps = Array.isArray(response.data?.sitemap) ? response.data.sitemap : [];
+
+    const sitemaps = rawSitemaps.map((s) => ({
+      path: s.path,
+      last_submitted: s.lastSubmitted || null,
+      last_downloaded: s.lastDownloaded || null,
+      is_pending: !!s.isPending,
+      is_sitemaps_index: !!s.isSitemapsIndex,
+      type: s.type || null,
+      warnings: s.warnings != null ? parseInt(s.warnings, 10) : 0,
+      errors: s.errors != null ? parseInt(s.errors, 10) : 0,
+      contents: Array.isArray(s.contents)
+        ? s.contents.map((c) => ({ type: c.type, submitted: parseInt(c.submitted || 0, 10), indexed: parseInt(c.indexed || 0, 10) }))
+        : []
+    }));
+
+    console.log('[SEARCH_CONSOLE] Sitemaps retrieved', { siteUrl, count: sitemaps.length });
+
+    setCachedData(cacheKey, sitemaps);
+    return sitemaps;
+
+  } catch (error) {
+    logAxiosError('getSearchConsoleSitemaps', error);
+
+    if (error.response?.status === 403) {
+      throw new Error(`Access denied: No permission for site ${siteUrl}`);
+    }
+    if (error.response?.status === 404) {
+      throw new Error(`Site not found in Search Console: ${siteUrl}`);
+    }
+
+    throw new Error(`Failed to fetch Search Console sitemaps: ${error.message}`);
+  }
+}
+
+/**
+ * Inspect a single URL's indexing status (URL Inspection API). Live,
+ * on-demand, user-triggered - not synced/stored, matching how the
+ * inspection widget itself works (type a URL, inspect it, see the result).
+ *
+ * Uses SEARCH_CONSOLE_INSPECTION_API_BASE, not SEARCH_CONSOLE_API_BASE -
+ * this endpoint was never added to webmasters/v3.
+ */
+export async function inspectSearchConsoleUrl(googleConnection, siteUrl, inspectionUrl) {
+  try {
+    console.log('[SEARCH_CONSOLE] Inspecting URL', { siteUrl, inspectionUrl });
+
+    const client = await getAuthenticatedHttpClient(googleConnection, SEARCH_CONSOLE_INSPECTION_API_BASE);
+
+    const response = await withRetry(() =>
+      client.post('/urlInspection/index:inspect', { inspectionUrl, siteUrl })
+    );
+
+    const result = response.data?.inspectionResult || {};
+    const indexStatus = result.indexStatusResult || {};
+    const richResults = result.richResultsResult || {};
+    // mobileUsabilityResult is only present for connections/properties Google
+    // still returns it for - the standalone Mobile-Friendly Test API this
+    // fed was deprecated, so most inspections will have no mobile usability
+    // data at all. Normalized to null (not fabricated) when absent; the
+    // frontend renders that as "—", never a guessed value.
+    const mobileUsability = result.mobileUsabilityResult || {};
+
+    return {
+      inspection_url: inspectionUrl,
+      verdict: indexStatus.verdict || 'UNKNOWN',
+      coverage_state: indexStatus.coverageState || null,
+      robots_txt_state: indexStatus.robotsTxtState || null,
+      indexing_state: indexStatus.indexingState || null,
+      page_fetch_state: indexStatus.pageFetchState || null,
+      last_crawl_time: indexStatus.lastCrawlTime || null,
+      google_canonical: indexStatus.googleCanonical || null,
+      user_canonical: indexStatus.userCanonical || null,
+      sitemap: Array.isArray(indexStatus.sitemap) ? indexStatus.sitemap : [],
+      referring_urls: Array.isArray(indexStatus.referringUrls) ? indexStatus.referringUrls : [],
+      crawled_as: indexStatus.crawledAs || null,
+      mobile_usability_verdict: mobileUsability.verdict || null,
+      rich_results_verdict: richResults.verdict || null,
+      inspection_result_link: result.inspectionResultLink || null
+    };
+
+  } catch (error) {
+    logAxiosError('inspectSearchConsoleUrl', error);
+
+    if (error.response?.status === 403) {
+      throw new Error(`Access denied: No permission for site ${siteUrl}`);
+    }
+    if (error.response?.status === 400) {
+      const errorDetails = error.response?.data?.error?.message || error.message;
+      throw new Error(`Invalid request: ${errorDetails}`);
+    }
+
+    throw new Error(`Failed to inspect URL: ${error.message}`);
   }
 }
 
 export default {
   getSearchConsoleSites,
   findProjectSearchConsoleSite,
+  validateSearchConsoleSiteAccess,
   getSearchConsolePerformanceData,
-  getProjectSearchConsoleData
+  getProjectSearchConsoleData,
+  getSearchConsoleTrendData,
+  getProjectSearchConsoleTrends,
+  getSearchConsoleBreakdownData,
+  getProjectSearchConsoleBreakdown,
+  getSearchConsoleSitemaps,
+  inspectSearchConsoleUrl
 };

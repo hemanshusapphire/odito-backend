@@ -3,15 +3,33 @@ import AuditRun from '../model/AuditRun.js';
 import SeoProject from '../../app_user/model/SeoProject.js';
 import Job from '../../jobs/model/Job.js';
 import { JOB_TYPES } from '../../jobs/constants/jobTypes.js';
+import { PIPELINE_CONFIG } from '../../jobs/pipelineConfig.js';
 import { ProjectPerformanceService } from '../../app_user/service/projectPerformance.service.js';
 import { TechnicalChecksService } from '../../app_user/service/technicalChecks.service.js';
+
+// The set of job types whose completion can legitimately signal "the whole
+// audit may be done" is read directly from PIPELINE_CONFIG (every entry with
+// hooks.onComplete === 'emitCompleted') instead of being hardcoded here, so
+// adding a new terminal branch to the pipeline automatically extends this
+// check without a second edit. Today this evaluates to
+// [SEO_SCORING, AI_VISIBILITY].
+const REQUIRED_TERMINAL_TYPES = Object.entries(PIPELINE_CONFIG)
+  .filter(([, config]) => config?.hooks?.onComplete === 'emitCompleted')
+  .map(([jobType]) => jobType);
+
+// Most terminal types must reach 'completed' to count as resolved. AI_VISIBILITY
+// is the one documented exception (pre-existing behavior, preserved as-is): it
+// is best-effort AI analysis layered on top of the core SEO audit, so a
+// failure there must not block the rest of the report from being considered
+// done — 'failed' counts as resolved for this type only.
+const GRACEFUL_FAILURE_TYPES = new Set([JOB_TYPES.AI_VISIBILITY]);
 
 /**
  * AuditHistoryService
  *
  * Captures an immutable snapshot of each completed audit into the audit_runs
  * collection. Called from the chainingEngine after each terminal job
- * (SEO_SCORING and AI_VISIBILITY_SCORING) fires its onComplete hook.
+ * (SEO_SCORING or AI_VISIBILITY) fires its onComplete hook.
  *
  * The service is idempotent — it can be called from either terminal job without
  * creating duplicate records. A snapshot is written only when BOTH terminals
@@ -23,21 +41,25 @@ import { TechnicalChecksService } from '../../app_user/service/technicalChecks.s
 class AuditHistoryService {
 
   /**
-   * Main entry point. Called after SEO_SCORING or AI_VISIBILITY_SCORING
-   * completes. Creates one audit run record when both terminals are resolved.
+   * Main entry point. Called after SEO_SCORING or AI_VISIBILITY completes.
+   * Creates one audit run record when both terminals are resolved.
    *
    * @param {string|mongoose.Types.ObjectId} projectId
+   * @param {string|mongoose.Types.ObjectId} [runId] - Current audit run_id (from the
+   *   completed job). Scopes the terminal-resolution check to this run only, so a
+   *   stale SEO_SCORING/AI_VISIBILITY job from a superseded run can't be mistaken
+   *   for "both terminals resolved" and trigger a premature/incorrect snapshot.
    * @param {string} requestId  - Trace ID from the calling chainingEngine request
    * @returns {Object|null}     - The saved AuditRun document, or null if skipped
    */
-  async captureIfComplete(projectId, requestId = 'AH') {
+  async captureIfComplete(projectId, runId, requestId = 'AH') {
     const pidStr = projectId.toString();
 
     console.log(`[AUDIT_HISTORY:${requestId}] Creating audit snapshot | projectId=${pidStr}`);
 
-    // 1. Both terminal jobs must be resolved before we write anything
-    const bothResolved = await this._checkBothTerminalsResolved(pidStr, requestId);
-    if (!bothResolved) {
+    // 1. Every required terminal job must be resolved before we write anything
+    const allResolved = await this.allTerminalsResolved(pidStr, runId, requestId);
+    if (!allResolved) {
       console.log(`[AUDIT_HISTORY:${requestId}] Terminals not yet fully resolved — deferring snapshot | projectId=${pidStr}`);
       return null;
     }
@@ -75,7 +97,7 @@ class AuditHistoryService {
     //    race guard if two concurrent calls reach this point simultaneously
     const auditRun = await AuditRun.create(snapshot);
 
-    console.log(`[AUDIT_HISTORY:${requestId}] Audit snapshot saved | projectId=${pidStr} | auditNumber=${auditNumber} | websiteScore=${snapshot.websiteScore} | performanceScore=${snapshot.performanceScore} | technicalHealthScore=${snapshot.technicalHealthScore} | aiVisibilityIssueCount=${snapshot.aiVisibilityIssueCount} | totalIssues=${snapshot.totalIssues}`);
+    console.log(`[AUDIT_HISTORY:${requestId}] Audit snapshot saved | projectId=${pidStr} | auditNumber=${auditNumber} | websiteScore=${snapshot.websiteScore} | performanceScore=${snapshot.performanceScore} | technicalHealthScore=${snapshot.technicalHealthScore} | overall_ai_score=${snapshot.overall_ai_score} | aiso=${snapshot.aiso_score} | aeo=${snapshot.aeo_score} | geo=${snapshot.geo_score} | ai_issue_count=${snapshot.ai_issue_count} | aiVisibilityIssueCount=${snapshot.aiVisibilityIssueCount} | totalIssues=${snapshot.totalIssues}`);
     console.log(`[AUDIT_HISTORY:${requestId}] Audit #${auditNumber} stored successfully | projectId=${pidStr}`);
 
     return auditRun;
@@ -84,48 +106,47 @@ class AuditHistoryService {
   // ── Private helpers ────────────────────────────────────────────────────────
 
   /**
-   * Returns true when the audit pipeline is fully resolved:
-   *   - SEO_SCORING must be completed
-   *   - AI path must be resolved: AI_VISIBILITY_SCORING completed/failed,
-   *     OR AI_VISIBILITY itself failed (scoring job was never created)
+   * Single source of truth for "is the entire audit pipeline resolved".
+   * Required terminal types are read from PIPELINE_CONFIG (see
+   * REQUIRED_TERMINAL_TYPES above), not hardcoded — every type must reach
+   * 'completed', except types listed in GRACEFUL_FAILURE_TYPES, which also
+   * accept 'failed'. Scoped to a single run_id so a stale terminal job from a
+   * superseded run can never be mistaken for the current run being resolved.
    *
-   * @param {string} projectId
+   * Called both by captureIfComplete (audit-history snapshot) and by
+   * chainingEngine (crawl_status finalization + the single audit:completed
+   * websocket emission) — one check, two consumers, no duplicated logic.
+   *
+   * @param {string|mongoose.Types.ObjectId} projectId
+   * @param {string|mongoose.Types.ObjectId} [runId]
    * @param {string} requestId
+   * @returns {boolean}
    */
-  async _checkBothTerminalsResolved(projectId, requestId) {
-    const [seoJob, aiScoringJob, aiVisibilityFailed] = await Promise.all([
-      Job.findOne({
-        project_id: projectId,
-        jobType: JOB_TYPES.SEO_SCORING,
-        status: 'completed'
-      }).select('_id').lean(),
+  async allTerminalsResolved(projectId, runId, requestId = 'AH') {
+    const pidStr = projectId.toString();
 
-      Job.findOne({
-        project_id: projectId,
-        jobType: JOB_TYPES.AI_VISIBILITY_SCORING,
-        status: { $in: ['completed', 'failed'] }
-      }).select('_id status').lean(),
+    const results = await Promise.all(
+      REQUIRED_TERMINAL_TYPES.map((jobType) => {
+        const acceptedStatuses = GRACEFUL_FAILURE_TYPES.has(jobType)
+          ? ['completed', 'failed']
+          : ['completed'];
+        return Job.findOne({
+          project_id: pidStr,
+          ...(runId ? { run_id: runId } : {}),
+          jobType,
+          status: { $in: acceptedStatuses }
+        }).select('_id').lean();
+      })
+    );
 
-      // Handles the edge case where AI_VISIBILITY itself fails and
-      // AI_VISIBILITY_SCORING is never created
-      Job.findOne({
-        project_id: projectId,
-        jobType: JOB_TYPES.AI_VISIBILITY,
-        status: 'failed'
-      }).select('_id').lean()
-    ]);
-
-    if (!seoJob) {
-      console.log(`[AUDIT_HISTORY:${requestId}] SEO_SCORING not yet completed | projectId=${projectId}`);
-      return false;
+    for (let i = 0; i < REQUIRED_TERMINAL_TYPES.length; i++) {
+      if (!results[i]) {
+        console.log(`[AUDIT_HISTORY:${requestId}] ${REQUIRED_TERMINAL_TYPES[i]} not yet resolved | projectId=${pidStr}`);
+        return false;
+      }
     }
 
-    const aiPathResolved = !!(aiScoringJob || aiVisibilityFailed);
-    if (!aiPathResolved) {
-      console.log(`[AUDIT_HISTORY:${requestId}] AI path not yet resolved | projectId=${projectId}`);
-    }
-
-    return aiPathResolved;
+    return true;
   }
 
   /**
@@ -188,16 +209,29 @@ class AuditHistoryService {
       infoIssues     = severityAgg[0].infoIssues     ?? 0;
     }
 
-    // ── AI visibility score ──────────────────────────────────────────────────
-    // Only populated when AI_VISIBILITY_SCORING actually completed (not failed)
-    const aiScoringCompleted = await Job.findOne({
-      project_id: projectId,
-      jobType: JOB_TYPES.AI_VISIBILITY_SCORING,
-      status: 'completed'
-    }).select('_id').lean();
+    // ── AI V2 Scores (from ai_projects) ─────────────────────────────────────
+    let overall_ai_score = null;
+    let aiso_score       = null;
+    let aeo_score        = null;
+    let geo_score        = null;
+    try {
+      const aiProjectDoc = await db.collection('ai_projects')
+        .find({ project_id: projectIdObj })
+        .sort({ computed_at: -1 })
+        .limit(1)
+        .next();
+      if (aiProjectDoc) {
+        overall_ai_score = aiProjectDoc.overall_score   ?? null;
+        aiso_score       = aiProjectDoc.hubs?.aiso?.score ?? null;
+        aeo_score        = aiProjectDoc.hubs?.aeo?.score  ?? null;
+        geo_score        = aiProjectDoc.hubs?.geo?.score  ?? null;
+      }
+    } catch (err) {
+      console.warn(`[AUDIT_HISTORY] AI V2 score capture failed | projectId=${projectId} | reason="${err.message}"`);
+    }
 
-    const aiVisibilityScore  = aiScoringCompleted ? (project.ai_visibility?.score           ?? null) : null;
-    const aiScoringVersion   = aiScoringCompleted ? (project.ai_visibility?.scoring_version  ?? null) : null;
+    const aiVisibilityScore = overall_ai_score;
+    const aiScoringVersion  = 'v2';
 
     const websiteScore = project.website_score ?? null;
 
@@ -222,18 +256,18 @@ class AuditHistoryService {
       console.warn(`[AUDIT_HISTORY] Technical health score capture failed | projectId=${projectId} | reason="${err.message}"`);
     }
 
-    // ── AI Visibility Issue Counts ─────────────────────────────────────────
-    // seo_ai_visibility_issues is overwritten on every AI_VISIBILITY_SCORING run.
-    // 'critical' and 'high' severities are treated as equivalent in the issue engine.
+    // ── AI V2 Issue Counts (from ai_issues, keyed by ObjectId) ───────────────
     let aiVisibilityIssueCount = null;
     let aiVisibilityCriticalIssueCount = null;
+    let ai_issue_count = null;
     try {
       [aiVisibilityIssueCount, aiVisibilityCriticalIssueCount] = await Promise.all([
-        db.collection('seo_ai_visibility_issues').countDocuments({ projectId: projectIdObj }),
-        db.collection('seo_ai_visibility_issues').countDocuments({ projectId: projectIdObj, severity: 'high' })
+        db.collection('ai_issues').countDocuments({ project_id: projectIdObj }),
+        db.collection('ai_issues').countDocuments({ project_id: projectIdObj, severity: 'critical' })
       ]);
+      ai_issue_count = aiVisibilityIssueCount;
     } catch (err) {
-      console.warn(`[AUDIT_HISTORY] AI visibility issue counts failed | projectId=${projectId} | reason="${err.message}"`);
+      console.warn(`[AUDIT_HISTORY] AI V2 issue counts failed | projectId=${projectId} | reason="${err.message}"`);
     }
 
     return {
@@ -248,6 +282,12 @@ class AuditHistoryService {
       seoScore:     websiteScore,           // alias
 
       aiVisibilityScore,
+
+      overall_ai_score,
+      aiso_score,
+      aeo_score,
+      geo_score,
+      ai_issue_count,
 
       performanceScore,
       technicalHealthScore,

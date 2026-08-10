@@ -250,29 +250,75 @@ searchConsoleDataSchema.statics.upsertPerformanceData = async function(
 };
 
 /**
+ * Forensic note (2026-07-24): filtering by date_range.end_date alone
+ * (a prior fix) was NOT sufficient to deduplicate page_url rows. Two sync
+ * windows can share the same end_date while differing in start_date - e.g.
+ * a 90-day backfill (start_date = D-90, end_date = D) followed by a same-day
+ * "Refresh Data" click running the 7-day incremental sync (start_date = D-7,
+ * end_date = D). Both windows have end_date = D, so an end_date-only filter
+ * matches documents from both, and any page_url present in both windows'
+ * top-N results comes back twice. Confirmed live against
+ * search_console_data: a project had 19 rows under window
+ * 2026-04-25->2026-07-24 and 15 rows under 2026-07-17->2026-07-24, both
+ * ending 2026-07-24, producing exactly the duplicate-key symptom reported.
+ *
+ * The only field that actually identifies "this page's current
+ * performance" is page_url itself, not any date_range field - a page can
+ * legitimately appear in many stored windows across sync history, and the
+ * one that matters is whichever was fetched most recently. So every read
+ * below groups by page_url and keeps the most-recently-fetched (fetched_at)
+ * row for each, via an aggregation pipeline instead of a plain find().
+ *
+ * (This also required switching from find() to aggregate(): Mongoose casts
+ * find()'s filter against the schema automatically, but aggregate()
+ * pipelines are not - project_id must be cast to ObjectId explicitly or the
+ * $match silently matches nothing. getProjectAggregates below had exactly
+ * this bug already, independent of the above: it always returned the
+ * all-zero fallback because its $match compared a raw string project_id
+ * against a stored ObjectId field.)
+ */
+function toProjectObjectId(projectId) {
+  return typeof projectId === 'string' ? new mongoose.Types.ObjectId(projectId) : projectId;
+}
+
+/**
+ * Aggregation stages that collapse the collection down to one row per
+ * page_url (the most recently fetched one), before any date-range match is
+ * even relevant to the "no explicit range" case. Shared by every read
+ * method below so there's one definition of "current" per page.
+ */
+function dedupeByPageUrlStages() {
+  return [
+    { $sort: { fetched_at: -1 } },
+    { $group: { _id: '$page_url', doc: { $first: '$$ROOT' } } },
+    { $replaceRoot: { newRoot: '$doc' } }
+  ];
+}
+
+/**
  * Get performance data for a project within a date range
- * 
+ *
  * @param {string} projectId - Project ID
  * @param {Date} startDate - Start date filter
  * @param {Date} endDate - End date filter
  * @param {Object} options - Query options (sort, limit, etc.)
- * @returns {Promise<Array>} - Performance data array
+ * @returns {Promise<Array>} - Performance data array, one row per page_url
  */
 searchConsoleDataSchema.statics.getProjectPerformanceData = async function(
-  projectId, 
-  startDate, 
-  endDate, 
+  projectId,
+  startDate,
+  endDate,
   options = {}
 ) {
-  const query = {
-    project_id: projectId
-  };
+  const matchStage = { project_id: toProjectObjectId(projectId) };
 
-  // Add date range filter if provided
   if (startDate || endDate) {
-    query['date_range.start_date'] = {};
-    if (startDate) query['date_range.start_date'].$gte = startDate;
-    if (endDate) query['date_range.start_date'].$lte = endDate;
+    // Caller asked for a specific historical range - honor it exactly,
+    // across however many sync windows fall inside it (still deduped by
+    // page_url below, keeping the freshest row within that range).
+    matchStage['date_range.start_date'] = {};
+    if (startDate) matchStage['date_range.start_date'].$gte = startDate;
+    if (endDate) matchStage['date_range.start_date'].$lte = endDate;
   }
 
   const {
@@ -281,24 +327,26 @@ searchConsoleDataSchema.statics.getProjectPerformanceData = async function(
     skip = 0
   } = options;
 
-  return await this.find(query)
-    .sort(sort)
-    .limit(limit)
-    .skip(skip)
-    .lean(); // Return plain objects for better performance
+  return this.aggregate([
+    { $match: matchStage },
+    ...dedupeByPageUrlStages(),
+    { $sort: sort },
+    { $skip: skip },
+    { $limit: limit }
+  ]);
 };
 
 /**
  * Get top performing pages for a project
- * 
+ *
  * @param {string} projectId - Project ID
  * @param {string} metric - Metric to sort by (clicks, impressions, position)
  * @param {number} limit - Number of results
- * @returns {Promise<Array>} - Top pages data
+ * @returns {Promise<Array>} - Top pages data, one row per page_url
  */
 searchConsoleDataSchema.statics.getTopPages = async function(
-  projectId, 
-  metric = 'clicks', 
+  projectId,
+  metric = 'clicks',
   limit = 50
 ) {
   const validMetrics = ['clicks', 'impressions', 'position'];
@@ -309,26 +357,28 @@ searchConsoleDataSchema.statics.getTopPages = async function(
   const sort = {};
   sort[metric] = metric === 'position' ? 1 : -1; // Position: ascending (lower is better)
 
-  return await this.find({ project_id: projectId })
-    .sort(sort)
-    .limit(limit)
-    .lean();
+  return this.aggregate([
+    { $match: { project_id: toProjectObjectId(projectId) } },
+    ...dedupeByPageUrlStages(),
+    { $sort: sort },
+    { $limit: limit }
+  ]);
 };
 
 /**
  * Get aggregated metrics for a project
- * 
+ *
  * @param {string} projectId - Project ID
  * @param {Date} startDate - Start date
  * @param {Date} endDate - End date
- * @returns {Promise<Object>} - Aggregated metrics
+ * @returns {Promise<Object>} - Aggregated metrics, summed over one row per page_url
  */
 searchConsoleDataSchema.statics.getProjectAggregates = async function(
-  projectId, 
-  startDate, 
+  projectId,
+  startDate,
   endDate
 ) {
-  const matchStage = { project_id: projectId };
+  const matchStage = { project_id: toProjectObjectId(projectId) };
 
   if (startDate || endDate) {
     matchStage['date_range.start_date'] = {};
@@ -338,6 +388,7 @@ searchConsoleDataSchema.statics.getProjectAggregates = async function(
 
   const result = await this.aggregate([
     { $match: matchStage },
+    ...dedupeByPageUrlStages(),
     {
       $group: {
         _id: null,

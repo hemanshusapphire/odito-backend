@@ -332,8 +332,11 @@ export async function getPlaceDetails(placeId) {
     // Extract city, state, country from addressComponents
     const detailComponents = place.addressComponents || [];
     const getDetailComponent = (type) => detailComponents.find(c => c.types?.includes(type));
+    // Prefer 'locality' (city-level). Fall back to 'administrative_area_level_2' (district/city
+    // in countries like India where 'locality' is sometimes absent). Never use sublocality — it
+    // maps to neighborhoods, not cities, and will fail DataForSEO city-name matching.
     const detailCity = getDetailComponent('locality')?.longText
-      || getDetailComponent('sublocality_level_1')?.longText
+      || getDetailComponent('administrative_area_level_2')?.longText
       || null;
     const detailState = getDetailComponent('administrative_area_level_1')?.longText || null;
     const detailCountryComp = getDetailComponent('country');

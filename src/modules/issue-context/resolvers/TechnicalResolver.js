@@ -34,9 +34,9 @@ export class TechnicalResolver extends BaseResolver {
           : (pageData?.canonical || '');
         const matchStatus = _canonicalMatchStatus(pageUrl, canonicalUrl);
         const rows = [{
-          pageUrl: pageUrl || 'Not detected',
-          canonicalUrl: canonicalUrl || 'Not set',
-          matchStatus,
+          'Page URL':     pageUrl || 'Not detected',
+          'Canonical URL': canonicalUrl || 'Not set',
+          'Match Status': matchStatus,
         }];
         return {
           currentState: this._tableState(['Page URL', 'Canonical URL', 'Match Status'], rows),
@@ -103,12 +103,30 @@ export class TechnicalResolver extends BaseResolver {
 
       // ─── Links ────────────────────────────────────────────────────────
       case 'broken_links': {
-        const broken = crawlData?.broken_links || _toArray(detectedFromDoc);
-        const items = broken.map(l =>
+        // Prefer context.broken_links (structured list written by Python worker after fix),
+        // then crawlData.broken_links (legacy crawl graph), then fall back to list display.
+        const contextLinks = onPageIssue?.context?.broken_links;
+        const rawBroken = (contextLinks?.length > 0) ? contextLinks
+          : (crawlData?.broken_links?.length > 0) ? crawlData.broken_links
+          : null;
+
+        if (rawBroken?.length > 0) {
+          const rows = rawBroken.map(l => ({
+            'Broken URL': typeof l === 'object' ? (l.url || l.href || String(l)) : String(l),
+            'Status':     typeof l === 'object' ? String(l.status_code || l.status || '4xx') : '4xx',
+          }));
+          return {
+            currentState: this._tableState(['Broken URL', 'Status'], rows),
+            expectedState: this._expectedState('All internal links return 200 HTTP status'),
+          };
+        }
+
+        // Legacy fallback — pre-fix data has only a count string
+        const legacy = _toArray(detectedFromDoc).map(l =>
           typeof l === 'object' ? `${l.url || l.href || String(l)} (${l.status_code || l.status || '4xx'})` : String(l)
         );
         return {
-          currentState: this._listState(items),
+          currentState: this._listState(legacy),
           expectedState: this._expectedState('All internal links return 200 HTTP status'),
         };
       }
@@ -303,9 +321,9 @@ export class TechnicalResolver extends BaseResolver {
           // Mark as missing if: no value found in og_tags OR Python worker flagged it as missing
           const isMissing = !value || missingFromDoc.some(m => m === tag || m === bareKey);
           return {
-            field: tag,
-            value: value || 'Missing',
-            status: isMissing ? '✗' : '✓',
+            'Field':         tag,
+            'Current Value': value || 'Missing',
+            'Status':        isMissing ? '✗' : '✓',
           };
         });
         return {
@@ -384,7 +402,11 @@ export class TechnicalResolver extends BaseResolver {
       case 'canonical_tags': {
         const pageUrl = pageData?.url || pageData?.page_url || '';
         const canonical = pageData?.canonical || '';
-        const rows = [{ pageUrl: pageUrl || 'Not detected', canonicalUrl: canonical || 'Not set', matchStatus: canonical ? (canonical === pageUrl ? 'Self-referencing ✓' : 'Points elsewhere') : 'Missing ✗' }];
+        const rows = [{
+          'Page URL':     pageUrl || 'Not detected',
+          'Canonical URL': canonical || 'Not set',
+          'Match Status': canonical ? (canonical === pageUrl ? 'Self-referencing ✓' : 'Points elsewhere') : 'Missing ✗',
+        }];
         return {
           currentState: canonical
             ? this._tableState(['Page URL', 'Canonical URL', 'Match Status'], rows)

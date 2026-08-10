@@ -83,7 +83,9 @@ class RecommendationNormalizer {
     // ── Phase 3 extended fields (additive — stored alongside existing sections) ─
     if (isContextAware) {
       if (rawAIOutput.recommendedVersion) {
-        sections.recommendedVersion = this._sanitizeText(rawAIOutput.recommendedVersion, CONTENT_LIMITS.IMPLEMENTATION_EXAMPLE);
+        // FULL_CONTENT, not IMPLEMENTATION_EXAMPLE (a code/HTML snippet cap
+        // that's far too small for a full rewritten paragraph/page).
+        sections.recommendedVersion = this._sanitizeText(rawAIOutput.recommendedVersion, CONTENT_LIMITS.FULL_CONTENT);
       }
     }
 
@@ -375,8 +377,11 @@ class RecommendationNormalizer {
    */
   _normalizeBeforeAfter(rawAIOutput) {
     const ba      = rawAIOutput.beforeAfter || {};
+    // before = the CURRENT (already-short) content — 500 is a reasonable cap.
+    // after  = the actual rewritten content — needs FULL_CONTENT, not 500,
+    // for the same reason as recommendedVersion/afterState.rawText above.
     const before  = this._sanitizeText(String(ba.before  || ''), 500);
-    const after   = this._sanitizeText(String(ba.after   || rawAIOutput.recommendedVersion || ''), 500);
+    const after   = this._sanitizeText(String(ba.after   || rawAIOutput.recommendedVersion || ''), CONTENT_LIMITS.FULL_CONTENT);
     return {
       before,
       after,

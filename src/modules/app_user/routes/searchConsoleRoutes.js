@@ -1,8 +1,14 @@
 import express from 'express';
-import { 
+import {
   syncSearchConsoleData,
   getSearchConsoleSyncStatus,
-  getSearchConsoleData
+  getSearchConsoleData,
+  getSearchConsoleSitesList,
+  selectSearchConsoleSite,
+  getSearchConsoleTrends,
+  getSearchConsoleBreakdown,
+  getSearchConsoleSitemapsList,
+  inspectSearchConsoleUrlHandler
 } from '../controller/searchConsoleController.js';
 import auth from '../../user/middleware/auth.js';
 
@@ -76,9 +82,122 @@ router.get('/:projectId/search-console/status',
  *   date_range: { start, end }
  * }
  */
-router.get('/:projectId/search-console/data', 
-  auth, 
+router.get('/:projectId/search-console/data',
+  auth,
   getSearchConsoleData
+);
+
+/**
+ * GET /projects/:projectId/search-console/sites
+ *
+ * List accessible Search Console sites
+ *
+ * Response: {
+ *   success: true,
+ *   data: [{ siteUrl: "https://example.com/" | "sc-domain:example.com", permissionLevel }]
+ * }
+ */
+router.get('/:projectId/search-console/sites',
+  auth,
+  getSearchConsoleSitesList
+);
+
+/**
+ * POST /projects/:projectId/search-console/select-site
+ *
+ * Select and store a Search Console site for a project
+ *
+ * Request: { siteUrl: "https://example.com/" }
+ * Response: { success: true, searchConsoleSiteUrl: "https://example.com/" }
+ */
+router.post('/:projectId/search-console/select-site',
+  auth,
+  selectSearchConsoleSite
+);
+
+/**
+ * GET /projects/:projectId/search-console/trends
+ *
+ * Get the daily Search Console performance series (date dimension) for the
+ * Search Performance Trends chart.
+ *
+ * Query Parameters:
+ * - range: '7' | '30' | '90' | '365' (default '30')
+ *
+ * Response: {
+ *   success: true,
+ *   data: {
+ *     series: [{ date: "YYYY-MM-DD", clicks, impressions, ctr, position }],
+ *     range: "30"
+ *   }
+ * }
+ */
+router.get('/:projectId/search-console/trends',
+  auth,
+  getSearchConsoleTrends
+);
+
+/**
+ * GET /projects/:projectId/search-console/breakdown
+ *
+ * Get a stored dimension breakdown (query/country/device/searchAppearance),
+ * synced alongside the page-level data on every /sync call.
+ *
+ * Query Parameters:
+ * - dimension: 'query' | 'country' | 'device' | 'searchAppearance' (required)
+ * - limit: max rows to return (default varies per dimension, capped at 100)
+ *
+ * Response: {
+ *   success: true,
+ *   data: {
+ *     dimension: "query",
+ *     rows: [{ dimension_value, clicks, impressions, ctr, position }],
+ *     date_range: { start: "ISO_DATE", end: "ISO_DATE" } | null
+ *   }
+ * }
+ */
+router.get('/:projectId/search-console/breakdown',
+  auth,
+  getSearchConsoleBreakdown
+);
+
+/**
+ * GET /projects/:projectId/search-console/sitemaps
+ *
+ * List submitted sitemaps for the project's selected property (Sitemaps
+ * API), live-fetched (not synced/stored).
+ *
+ * Response: {
+ *   success: true,
+ *   data: [{ path, last_submitted, last_downloaded, is_pending,
+ *            is_sitemaps_index, type, warnings, errors, contents }]
+ * }
+ */
+router.get('/:projectId/search-console/sitemaps',
+  auth,
+  getSearchConsoleSitemapsList
+);
+
+/**
+ * POST /projects/:projectId/search-console/inspect-url
+ *
+ * Inspect a single URL's indexing status (URL Inspection API). Live,
+ * on-demand - not synced/stored.
+ *
+ * Request: { url: "https://example.com/some-page" }
+ * Response: {
+ *   success: true,
+ *   data: {
+ *     inspection_url, verdict, coverage_state, robots_txt_state,
+ *     indexing_state, page_fetch_state, last_crawl_time, google_canonical,
+ *     user_canonical, sitemap, referring_urls, crawled_as,
+ *     rich_results_verdict, inspection_result_link
+ *   }
+ * }
+ */
+router.post('/:projectId/search-console/inspect-url',
+  auth,
+  inspectSearchConsoleUrlHandler
 );
 
 export default router;

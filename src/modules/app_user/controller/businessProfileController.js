@@ -2,13 +2,28 @@ import { ResponseUtil } from '../../../utils/ResponseUtil.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 import GoogleConnection from '../model/GoogleConnection.js';
 import BusinessProfileData from '../model/BusinessProfileData.js';
+import BusinessProfileMetadata from '../model/BusinessProfileMetadata.js';
+import BusinessProfileReview from '../model/BusinessProfileReview.js';
+import BusinessProfileMedia from '../model/BusinessProfileMedia.js';
 import SeoProject from '../model/SeoProject.js';
-import { 
+import {
   getProjectBusinessProfileData,
   getBusinessProfileAccounts,
   getBusinessProfileLocations,
-  validateBusinessProfileAccess
+  validateBusinessProfileAccess,
+  getBusinessProfileLocationDetails,
+  getBusinessProfileDailyMetricsTimeSeries,
+  geocodeAddress
 } from '../../../services/businessProfileService.js';
+import {
+  checkReviewsCapability,
+  fetchBusinessMetadata,
+  fetchAllReviews
+} from '../../../services/businessProfileReviewService.js';
+import {
+  checkMediaCapability,
+  fetchAllMedia
+} from '../../../services/businessProfileMediaService.js';
 
 /**
  * Business Profile Sync Controller
@@ -91,11 +106,11 @@ export const syncBusinessProfileData = async (req, res) => {
 
     try {
       performanceData = await getProjectBusinessProfileData(
-        googleConnection, 
+        googleConnection,
         googleConnection.business_account_id,
         googleConnection.business_location_id
       );
-      
+
       if (!performanceData || !performanceData.data || performanceData.data.length === 0) {
         LoggerUtil.info('No Business Profile data available', { projectId });
         return res.status(200).json(ResponseUtil.success({
@@ -105,19 +120,15 @@ export const syncBusinessProfileData = async (req, res) => {
         }, 'No Business Profile data available for this location'));
       }
 
-      // Calculate date range from data (last 30 days for GBP)
-      const endDate = new Date();
-      const startDate = new Date();
-      startDate.setDate(endDate.getDate() - 30);
-      
-      dateRange = {
-        start: startDate.toISOString().split('T')[0],
-        end: endDate.toISOString().split('T')[0]
-      };
+      // Use the exact date range the service actually queried Google for,
+      // rather than recomputing a disconnected "last 30 days" window here -
+      // previously these could silently drift apart.
+      dateRange = performanceData.dateRange;
 
       LoggerUtil.info('Business Profile data fetched', {
         dataPoints: performanceData.data?.length || 0,
-        dateRange
+        dateRange,
+        reviewsAccessRestricted: performanceData.reviewsAccessRestricted
       });
 
     } catch (apiError) {
@@ -169,20 +180,38 @@ export const syncBusinessProfileData = async (req, res) => {
 
     } catch (metadataError) {
       LoggerUtil.error('Failed to update sync metadata', metadataError);
-      
+
       LoggerUtil.warn('Continuing despite metadata update failure');
     }
+
+    // Step 7: Business metadata + reviews sync ("Sync Now" runs all three:
+    // performance [above], metadata, and reviews). Best-effort - a failure
+    // here must not fail the performance sync that already succeeded;
+    // runReviewsAndMetadataSync records its own errors on
+    // BusinessProfileMetadata rather than throwing.
+    LoggerUtil.debug('Step 7: Syncing business metadata + reviews...');
+    const reviewsSyncResult = await runReviewsAndMetadataSync(
+      googleConnection,
+      userId,
+      projectId,
+      googleConnection.business_account_id,
+      googleConnection.business_location_id
+    );
 
     LoggerUtil.info('Sync completed successfully', {
       projectId,
       dataPoints: dbResult.total,
-      dateRange
+      dateRange,
+      reviewsCapability: reviewsSyncResult.reviewsCapability
     });
 
     return res.status(200).json(ResponseUtil.success({
       dataPoints: dbResult.total,
       dateRange: dateRange,
-      lastSyncAt: new Date().toISOString()
+      lastSyncAt: new Date().toISOString(),
+      reviewsAccessRestricted: !!performanceData.reviewsAccessRestricted,
+      reviewsCapability: reviewsSyncResult.reviewsCapability,
+      reviewCount: reviewsSyncResult.reviewCount
     }, 'Business Profile data synced successfully'));
 
   } catch (error) {
@@ -218,13 +247,25 @@ export const getBusinessProfileSyncStatus = async (req, res) => {
 
     // Check Google connection
     const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
-    
+
     if (!googleConnection) {
+      // Distinguish "never connected" from "connected once, now expired/revoked"
+      // so the frontend can prompt "Reconnect" instead of a bare "Connect".
+      const staleConnection = await GoogleConnection.findOne({
+        user_id: userId,
+        project_id: projectId,
+        purpose: 'google_visibility'
+      });
+
       return res.json(ResponseUtil.success({
         connected: false,
         serviceEnabled: false,
-        lastSyncAt: null,
-        message: 'Google account not connected'
+        connectionStatus: staleConnection ? staleConnection.status : 'not_connected',
+        googleEmail: staleConnection ? staleConnection.google_email : null,
+        lastSyncAt: staleConnection ? staleConnection.last_sync_at : null,
+        message: staleConnection
+          ? `Google connection is ${staleConnection.status}. Please reconnect.`
+          : 'Google account not connected'
       }));
     }
 
@@ -254,6 +295,7 @@ export const getBusinessProfileSyncStatus = async (req, res) => {
     const statusResponse = {
       success: true,
       connected: true,
+      connectionStatus: 'active',
       serviceEnabled: isServiceEnabled,
       businessAccountId: googleConnection.business_account_id || null,
       businessLocationId: googleConnection.business_location_id || null,
@@ -288,7 +330,7 @@ export const getBusinessProfileData = async (req, res) => {
   const {
     page = 1,
     limit = 50,
-    sort = 'views',
+    sort = 'views_search',
     order = 'desc',
     start_date,
     end_date
@@ -324,8 +366,10 @@ export const getBusinessProfileData = async (req, res) => {
     const limitNum = parseInt(limit, 10);
     const skip = (pageNum - 1) * limitNum;
 
-    // Validate sort field
-    const validSortFields = ['views', 'searches', 'actions', 'calls', 'websiteClicks', 'directionRequests'];
+    // Validate sort field against the actual BusinessProfileData schema
+    // fields (the previous list - views/searches/actions/calls/websiteClicks/
+    // directionRequests - doesn't correspond to any field the schema defines).
+    const validSortFields = ['views_search', 'views_maps', 'actions_website', 'actions_calls', 'actions_directions', 'reviews_count', 'average_rating'];
     if (!validSortFields.includes(sort)) {
       return res.status(400).json(ResponseUtil.error(`Invalid sort field. Must be one of: ${validSortFields.join(', ')}`, 400));
     }
@@ -373,26 +417,32 @@ export const getBusinessProfileData = async (req, res) => {
 
     const response = {
       success: true,
-      data: performanceData.map(row => ({  // FIX: Normalize field names for frontend
-        metricDate: row.metric_date,
-        views: row.views,
-        searches: row.searches,
-        actions: row.actions,
-        calls: row.calls,
-        websiteClicks: row.website_clicks,
-        directionRequests: row.direction_requests,
+      data: performanceData.map(row => ({
+        // Field names below match the real BusinessProfileData schema
+        // (date_range.start_date, views_search, etc.) - the previous mapping
+        // read row.metric_date/row.views/row.website_clicks/etc., none of
+        // which exist on the schema, so every mapped value was undefined.
+        dateRangeStart: row.date_range?.start_date,
+        dateRangeEnd: row.date_range?.end_date,
+        viewsSearch: row.views_search,
+        viewsMaps: row.views_maps,
+        actionsWebsite: row.actions_website,
+        actionsCalls: row.actions_calls,
+        actionsDirections: row.actions_directions,
+        reviewsCount: row.reviews_count,
+        averageRating: row.average_rating,
         fetchedAt: row.fetched_at
       })),
       pagination: {
         page: pageNum,
         limit: limitNum,
         total: aggregates.page_count || 0,
-        pages: Math.max(1, Math.ceil((aggregates.page_count || 0) / limitNum))  // FIX: Never return 0
+        pages: Math.max(1, Math.ceil((aggregates.page_count || 0) / limitNum))
       },
       summary: {
         totalViews: aggregates.totalViews || 0,
-        totalSearches: aggregates.totalSearches || 0,
         totalActions: aggregates.totalActions || 0,
+        averageRating: Math.round((aggregates.avgRating || 0) * 10) / 10,
         lastFetched: aggregates.lastFetched
       },
       dateRange: {
@@ -407,7 +457,14 @@ export const getBusinessProfileData = async (req, res) => {
       totalPages: response.pagination.pages
     });
 
-    return res.json(ResponseUtil.success(response.data, 'Data retrieved successfully', response.pagination));
+    // Send the full response shape (rows + summary + dateRange), not just the
+    // row array - the summary/dateRange fields were previously built above
+    // but never actually reached the HTTP response.
+    return res.json(ResponseUtil.success(
+      { rows: response.data, summary: response.summary, dateRange: response.dateRange },
+      'Data retrieved successfully',
+      response.pagination
+    ));
 
   } catch (error) {
     LoggerUtil.error('Error fetching Business Profile data', error, { projectId });
@@ -602,11 +659,578 @@ export const selectBusinessProfile = async (req, res) => {
   }
 };
 
+/**
+ * Shared metadata + extended details + reviews + media sync, used by both
+ * the standalone POST /business-profile/sync-reviews endpoint and by
+ * "Sync Now" (syncBusinessProfileData), which runs it alongside the
+ * performance sync. (Name kept as-is despite the expanded scope, to avoid
+ * touching every call site for a rename.)
+ *
+ * Always fetches metadata + extended details (both work regardless of
+ * reviews/media capability - proven live via the Business Information API
+ * v1, a different host from the gated legacy v4 endpoints below). Reviews
+ * and media are only fetched when their respective capability check
+ * confirms access; otherwise the capability status/reason is persisted so
+ * the frontend can render "Unavailable" with the exact reason instead of a
+ * fabricated 0/empty state, without needing to re-probe Google on every page
+ * load.
+ *
+ * Never throws - sync failures are recorded on BusinessProfileMetadata
+ * (sync_error) and returned in the result, matching the existing
+ * "continue despite non-fatal failure" pattern used by syncBusinessProfileData's
+ * own metadata-update step.
+ */
+async function runReviewsAndMetadataSync(googleConnection, userId, projectId, accountId, locationId) {
+  const result = { metadataSynced: false, detailsSynced: false, reviewsCapability: null, reviewCount: 0, mediaCapability: null, mediaCount: 0, error: null };
+
+  try {
+    const metadata = await fetchBusinessMetadata(googleConnection, locationId);
+    await BusinessProfileMetadata.upsertForProject(projectId, userId, {
+      business_account_id: accountId,
+      business_location_id: locationId,
+      ...metadata,
+      metadata_last_synced_at: new Date(),
+      sync_error: null
+    });
+    result.metadataSynced = true;
+  } catch (metadataError) {
+    LoggerUtil.error('Business Profile metadata sync failed', metadataError, { projectId });
+    await BusinessProfileMetadata.upsertForProject(projectId, userId, {
+      business_account_id: accountId,
+      business_location_id: locationId,
+      sync_error: metadataError.message
+    });
+    result.error = metadataError.message;
+    // Metadata failing doesn't necessarily mean reviews will too (different
+    // API/host) - continue to the capability check rather than bailing out.
+  }
+
+  // Extended profile details (description, categories, hours, coordinates,
+  // service area, open/verification status) - same host/access as metadata
+  // above, fetched separately since it's a distinct read (EXTENDED_LOCATION_READ_MASK)
+  // rather than folded into fetchBusinessMetadata's smaller field set.
+  try {
+    const details = await getBusinessProfileLocationDetails(googleConnection, locationId);
+
+    // Geocoding fallback: Google's own latlng is documented as
+    // user-provided, not guaranteed, and is confirmed (live-tested) absent
+    // for real listings. Only geocode when Google gave us no coordinates
+    // AND we don't already have a cached geocoded pair - never re-geocode
+    // on every sync, and never overrides real Google coordinates if Google
+    // starts returning them later (the field is read-preferred below).
+    let geocodedFields = {};
+    if (details.latitude == null && details.address) {
+      const existing = await BusinessProfileMetadata.findOne(
+        { project_id: projectId },
+        'geocoded_latitude geocoded_longitude'
+      );
+      if (existing?.geocoded_latitude != null && existing?.geocoded_longitude != null) {
+        LoggerUtil.debug('Geocoded coordinates already cached, skipping re-geocode', { projectId });
+      } else {
+        const geocoded = await geocodeAddress(details.address);
+        if (geocoded) {
+          geocodedFields = {
+            geocoded_latitude: geocoded.latitude,
+            geocoded_longitude: geocoded.longitude,
+            geocoded_at: new Date()
+          };
+          LoggerUtil.info('Geocoded fallback coordinates resolved', { projectId, ...geocoded });
+        } else {
+          LoggerUtil.warn('Geocoding fallback failed to resolve coordinates', { projectId, address: details.address });
+        }
+      }
+    }
+
+    await BusinessProfileMetadata.upsertForProject(projectId, userId, {
+      business_account_id: accountId,
+      business_location_id: locationId,
+      description: details.description,
+      secondary_categories: details.secondaryCategories,
+      business_status: details.businessStatus,
+      has_voice_of_merchant: details.hasVoiceOfMerchant,
+      latitude: details.latitude,
+      longitude: details.longitude,
+      maps_uri: details.mapsUri,
+      new_review_uri: details.newReviewUri,
+      place_id: details.placeId,
+      service_area: details.serviceArea,
+      regular_hours: details.regularHours,
+      special_hours: details.specialHours,
+      details_last_synced_at: new Date(),
+      ...geocodedFields
+    });
+    result.detailsSynced = true;
+  } catch (detailsError) {
+    LoggerUtil.error('Business Profile extended details sync failed', detailsError, { projectId });
+    // Non-fatal - metadata/reviews/media are independent of this fetch.
+  }
+
+  const capability = await checkReviewsCapability(googleConnection, accountId, locationId);
+  result.reviewsCapability = capability.status;
+
+  if (capability.status !== 'available') {
+    LoggerUtil.info('Reviews sync skipped - capability unavailable', { projectId, status: capability.status, reason: capability.reason });
+    await BusinessProfileMetadata.upsertForProject(projectId, userId, {
+      business_account_id: accountId,
+      business_location_id: locationId,
+      reviews_capability: capability,
+      average_rating: null,
+      total_review_count: null
+    });
+  } else {
+    try {
+      const { reviews, averageRating, totalReviewCount } = await fetchAllReviews(googleConnection, accountId, locationId);
+      const syncedAt = new Date();
+
+      await BusinessProfileReview.bulkUpsertReviews(reviews, userId, projectId, accountId, locationId, syncedAt);
+      const deletedCount = await BusinessProfileReview.markStaleAsDeleted(projectId, syncedAt);
+
+      await BusinessProfileMetadata.upsertForProject(projectId, userId, {
+        business_account_id: accountId,
+        business_location_id: locationId,
+        reviews_capability: capability,
+        average_rating: averageRating,
+        total_review_count: totalReviewCount,
+        reviews_last_synced_at: syncedAt,
+        sync_error: null
+      });
+
+      result.reviewCount = reviews.length;
+      LoggerUtil.info('Reviews synced', { projectId, reviewCount: reviews.length, deletedCount, averageRating, totalReviewCount });
+    } catch (reviewsError) {
+      LoggerUtil.error('Reviews sync failed', reviewsError, { projectId });
+      await BusinessProfileMetadata.upsertForProject(projectId, userId, {
+        business_account_id: accountId,
+        business_location_id: locationId,
+        sync_error: reviewsError.message
+      });
+      result.error = reviewsError.message;
+    }
+  }
+
+  // Media (photos/videos) - same legacy v4 host and capability-gate pattern
+  // as reviews above, checked/synced independently so a reviews-only
+  // restriction doesn't block photos (or vice versa).
+  const mediaCapability = await checkMediaCapability(googleConnection, accountId, locationId);
+  result.mediaCapability = mediaCapability.status;
+
+  if (mediaCapability.status === 'available') {
+    try {
+      const { media } = await fetchAllMedia(googleConnection, accountId, locationId);
+      const mediaSyncedAt = new Date();
+
+      await BusinessProfileMedia.bulkUpsertMedia(media, userId, projectId, accountId, locationId, mediaSyncedAt);
+      const deletedMediaCount = await BusinessProfileMedia.markStaleAsDeleted(projectId, mediaSyncedAt);
+
+      result.mediaCount = media.length;
+      LoggerUtil.info('Media synced', { projectId, mediaCount: media.length, deletedMediaCount });
+    } catch (mediaError) {
+      LoggerUtil.error('Media sync failed', mediaError, { projectId });
+      result.error = result.error || mediaError.message;
+    }
+  } else {
+    LoggerUtil.info('Media sync skipped - capability unavailable', { projectId, status: mediaCapability.status, reason: mediaCapability.reason });
+  }
+
+  return result;
+}
+
+/**
+ * GET /projects/:projectId/business-profile/rating
+ *
+ * Returns the average rating / review count summary, or an explicit
+ * "unavailable" capability status with a human-readable reason - never a
+ * misleading 0 when the underlying data was never fetched.
+ */
+export const getBusinessProfileRatingController = async (req, res) => {
+  const { projectId } = req.params;
+  const userId = req.user._id;
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    if (project.user_id.toString() !== userId.toString()) {
+      return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
+    }
+
+    const metadata = await BusinessProfileMetadata.findOne({ project_id: projectId });
+
+    if (!metadata || metadata.reviews_capability?.status !== 'available') {
+      return res.json(ResponseUtil.success({
+        available: false,
+        status: metadata?.reviews_capability?.status || 'unknown',
+        reason: metadata?.reviews_capability?.reason || 'Not yet synced.',
+        averageRating: null,
+        totalReviewCount: null
+      }));
+    }
+
+    return res.json(ResponseUtil.success({
+      available: true,
+      status: 'available',
+      reason: null,
+      averageRating: metadata.average_rating,
+      totalReviewCount: metadata.total_review_count,
+      lastSyncedAt: metadata.reviews_last_synced_at
+    }));
+
+  } catch (error) {
+    LoggerUtil.error('Error fetching Business Profile rating', error, { projectId });
+    return res.status(500).json(ResponseUtil.error('Failed to fetch rating', 500));
+  }
+};
+
+/**
+ * GET /projects/:projectId/business-profile/reviews
+ *
+ * Paginated, searchable list of synced reviews (served from MongoDB, not a
+ * live Google call - keeps the Reviews Drawer fast and avoids unnecessary
+ * Google API usage on every drawer open).
+ *
+ * Query params: page (default 1), limit (default 20, max 100), search
+ */
+export const getBusinessProfileReviewsController = async (req, res) => {
+  const { projectId } = req.params;
+  const userId = req.user._id;
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+  const search = typeof req.query.search === 'string' ? req.query.search.slice(0, 200) : '';
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    if (project.user_id.toString() !== userId.toString()) {
+      return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
+    }
+
+    const metadata = await BusinessProfileMetadata.findOne({ project_id: projectId });
+    if (!metadata || metadata.reviews_capability?.status !== 'available') {
+      return res.json(ResponseUtil.success({
+        available: false,
+        status: metadata?.reviews_capability?.status || 'unknown',
+        reason: metadata?.reviews_capability?.reason || 'Not yet synced.',
+        reviews: [],
+        pagination: { page, limit, total: 0, pages: 0 }
+      }));
+    }
+
+    const result = await BusinessProfileReview.getPaginated(projectId, { page, limit, search });
+
+    return res.json(ResponseUtil.success({
+      available: true,
+      status: 'available',
+      reason: null,
+      ...result
+    }));
+
+  } catch (error) {
+    LoggerUtil.error('Error fetching Business Profile reviews', error, { projectId });
+    return res.status(500).json(ResponseUtil.error('Failed to fetch reviews', 500));
+  }
+};
+
+/**
+ * POST /projects/:projectId/business-profile/sync-reviews
+ *
+ * Standalone metadata + reviews sync (independent of the performance sync
+ * in syncBusinessProfileData, so the frontend can re-check reviews
+ * capability / refresh reviews without re-pulling performance metrics).
+ */
+export const syncBusinessProfileReviewsController = async (req, res) => {
+  const { projectId } = req.params;
+  const userId = req.user._id;
+
+  LoggerUtil.info('Business Profile reviews sync starting', { projectId, userId: userId.toString() });
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    if (project.user_id.toString() !== userId.toString()) {
+      return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
+    }
+
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    if (!googleConnection) {
+      return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
+    }
+    if (!googleConnection.business_account_id || !googleConnection.business_location_id) {
+      return res.status(400).json(ResponseUtil.error('Business Profile account/location not selected', 400));
+    }
+
+    const result = await runReviewsAndMetadataSync(
+      googleConnection,
+      userId,
+      projectId,
+      googleConnection.business_account_id,
+      googleConnection.business_location_id
+    );
+
+    return res.json(ResponseUtil.success(result, 'Reviews sync completed'));
+
+  } catch (error) {
+    LoggerUtil.error('Unexpected error during reviews sync', error, { projectId, userId });
+    return res.status(500).json(ResponseUtil.error('An unexpected error occurred during reviews sync', 500));
+  }
+};
+
+/**
+ * GET /projects/:projectId/business-profile/profile
+ *
+ * Extended business profile fields (description, categories, hours,
+ * coordinates, service area, open/verification status) served from MongoDB
+ * - populated by runReviewsAndMetadataSync() on every "Sync Now" /
+ * sync-reviews call, same read-from-Mongo pattern as /rating and /reviews.
+ */
+export const getBusinessProfileDetailsController = async (req, res) => {
+  const { projectId } = req.params;
+  const userId = req.user._id;
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    if (project.user_id.toString() !== userId.toString()) {
+      return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
+    }
+
+    const metadata = await BusinessProfileMetadata.findOne({ project_id: projectId }).lean();
+
+    if (!metadata) {
+      return res.json(ResponseUtil.success({ available: false, reason: 'Not yet synced.' }));
+    }
+
+    // Prefer Google's own coordinates; fall back to the geocoded pair only
+    // when Google didn't return latlng for this listing (see
+    // businessProfileService.geocodeAddress() - a real, confirmed gap in
+    // Google's data, not a bug in this read). coordinatesSource lets the
+    // frontend/support tooling tell which one is in play if it matters.
+    const hasGoogleCoords = metadata.latitude != null && metadata.longitude != null;
+    const hasGeocodedCoords = metadata.geocoded_latitude != null && metadata.geocoded_longitude != null;
+    const latitude = hasGoogleCoords ? metadata.latitude : (hasGeocodedCoords ? metadata.geocoded_latitude : null);
+    const longitude = hasGoogleCoords ? metadata.longitude : (hasGeocodedCoords ? metadata.geocoded_longitude : null);
+    const coordinatesSource = hasGoogleCoords ? 'google' : (hasGeocodedCoords ? 'geocoded' : null);
+
+    return res.json(ResponseUtil.success({
+      available: true,
+      businessName: metadata.business_name,
+      description: metadata.description,
+      primaryCategory: metadata.category,
+      secondaryCategories: metadata.secondary_categories || [],
+      businessStatus: metadata.business_status,
+      hasVoiceOfMerchant: metadata.has_voice_of_merchant,
+      website: metadata.website,
+      phone: metadata.phone,
+      address: metadata.address,
+      latitude,
+      longitude,
+      coordinatesSource,
+      mapsUri: metadata.maps_uri,
+      newReviewUri: metadata.new_review_uri,
+      placeId: metadata.place_id,
+      serviceArea: metadata.service_area,
+      regularHours: metadata.regular_hours,
+      specialHours: metadata.special_hours,
+      averageRating: metadata.average_rating,
+      totalReviewCount: metadata.total_review_count,
+      syncTimestamps: {
+        details: metadata.details_last_synced_at,
+        metadata: metadata.metadata_last_synced_at,
+        reviews: metadata.reviews_last_synced_at
+      }
+    }));
+
+  } catch (error) {
+    LoggerUtil.error('Error fetching Business Profile details', error, { projectId });
+    return res.status(500).json(ResponseUtil.error('Failed to fetch business profile details', 500));
+  }
+};
+
+const VALID_TREND_RANGES = { '7': 7, '30': 30, '90': 90, '365': 365 };
+
+/**
+ * GET /projects/:projectId/business-profile/trends?range=7|30|90|365
+ *
+ * True day-by-day performance series (Performance API
+ * fetchMultiDailyMetricsTimeSeries, live - not the persisted single-snapshot
+ * BusinessProfileData row /data reads). Also returns range totals, computed
+ * by summing the same series, so the KPI cards and the trend chart share one
+ * request instead of two.
+ */
+export const getBusinessProfileTrendsController = async (req, res) => {
+  const { projectId } = req.params;
+  const userId = req.user._id;
+  const range = req.query.range || '30';
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    if (project.user_id.toString() !== userId.toString()) {
+      return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
+    }
+
+    if (!VALID_TREND_RANGES[range]) {
+      return res.status(400).json(ResponseUtil.error(`Invalid range. Must be one of: ${Object.keys(VALID_TREND_RANGES).join(', ')}`, 400));
+    }
+
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    if (!googleConnection || !googleConnection.business_location_id) {
+      return res.status(400).json(ResponseUtil.error('Business Profile not connected for this project', 400));
+    }
+
+    const days = VALID_TREND_RANGES[range];
+    const endDate = new Date();
+    const startDate = new Date(endDate.getTime() - days * 24 * 60 * 60 * 1000);
+
+    const series = await getBusinessProfileDailyMetricsTimeSeries(
+      googleConnection,
+      googleConnection.business_location_id,
+      startDate,
+      endDate
+    );
+
+    const totals = series.reduce((acc, row) => {
+      acc.search += row.search;
+      acc.maps += row.maps;
+      acc.clicks += row.clicks;
+      acc.calls += row.calls;
+      acc.directions += row.directions;
+      acc.bookings += row.bookings;
+      return acc;
+    }, { search: 0, maps: 0, clicks: 0, calls: 0, directions: 0, bookings: 0 });
+
+    return res.json(ResponseUtil.success({ range, series, totals }));
+
+  } catch (error) {
+    LoggerUtil.error('Error fetching Business Profile trends', error, { projectId });
+
+    if (error.response?.status === 429) {
+      return res.status(429).json(ResponseUtil.error('Google Business Profile rate limit exceeded. Please wait and retry.', 429, { retryAfter: 60 }));
+    }
+    return res.status(500).json(ResponseUtil.error('Failed to fetch performance trends', 500));
+  }
+};
+
+/**
+ * GET /projects/:projectId/business-profile/media
+ *
+ * Paginated, optionally category-filtered media (photos/videos) list -
+ * served from MongoDB, same pattern as /reviews. Returns an explicit
+ * "unavailable" capability status rather than an empty gallery when Google
+ * restricts media access for this application.
+ *
+ * Query params: page (default 1), limit (default 24, max 100), category
+ */
+export const getBusinessProfileMediaController = async (req, res) => {
+  const { projectId } = req.params;
+  const userId = req.user._id;
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 24));
+  const category = typeof req.query.category === 'string' ? req.query.category.slice(0, 50) : '';
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    if (project.user_id.toString() !== userId.toString()) {
+      return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
+    }
+
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    if (!googleConnection || !googleConnection.business_account_id || !googleConnection.business_location_id) {
+      return res.json(ResponseUtil.success({
+        available: false,
+        status: 'unknown',
+        reason: 'Not yet synced.',
+        media: [],
+        pagination: { page, limit, total: 0, pages: 0 }
+      }));
+    }
+
+    const capability = await checkMediaCapability(googleConnection, googleConnection.business_account_id, googleConnection.business_location_id);
+    if (capability.status !== 'available') {
+      return res.json(ResponseUtil.success({
+        available: false,
+        status: capability.status,
+        reason: capability.reason,
+        media: [],
+        pagination: { page, limit, total: 0, pages: 0 }
+      }));
+    }
+
+    const result = await BusinessProfileMedia.getPaginated(projectId, { page, limit, category });
+
+    return res.json(ResponseUtil.success({
+      available: true,
+      status: 'available',
+      reason: null,
+      ...result
+    }));
+
+  } catch (error) {
+    LoggerUtil.error('Error fetching Business Profile media', error, { projectId });
+    return res.status(500).json(ResponseUtil.error('Failed to fetch media', 500));
+  }
+};
+
+/**
+ * POST /projects/:projectId/business-profile/sync-media
+ *
+ * Standalone media sync (independent of the performance/reviews sync, same
+ * relationship syncBusinessProfileReviewsController has to syncBusinessProfileData).
+ * Reuses the shared runReviewsAndMetadataSync() orchestrator rather than
+ * duplicating the media fetch/upsert logic - the response is filtered down
+ * to the media-relevant fields.
+ */
+export const syncBusinessProfileMediaController = async (req, res) => {
+  const { projectId } = req.params;
+  const userId = req.user._id;
+
+  LoggerUtil.info('Business Profile media sync starting', { projectId, userId: userId.toString() });
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    if (project.user_id.toString() !== userId.toString()) {
+      return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
+    }
+
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    if (!googleConnection) {
+      return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
+    }
+    if (!googleConnection.business_account_id || !googleConnection.business_location_id) {
+      return res.status(400).json(ResponseUtil.error('Business Profile account/location not selected', 400));
+    }
+
+    const result = await runReviewsAndMetadataSync(
+      googleConnection,
+      userId,
+      projectId,
+      googleConnection.business_account_id,
+      googleConnection.business_location_id
+    );
+
+    return res.json(ResponseUtil.success({
+      mediaCapability: result.mediaCapability,
+      mediaCount: result.mediaCount
+    }, 'Media sync completed'));
+
+  } catch (error) {
+    LoggerUtil.error('Unexpected error during media sync', error, { projectId, userId });
+    return res.status(500).json(ResponseUtil.error('An unexpected error occurred during media sync', 500));
+  }
+};
+
 export default {
   syncBusinessProfileData,
   getBusinessProfileSyncStatus,
   getBusinessProfileData,
+  getBusinessProfileRatingController,
+  getBusinessProfileReviewsController,
+  syncBusinessProfileReviewsController,
   getBusinessProfileAccountsController,
   getBusinessProfileLocationsController,
-  selectBusinessProfile
+  selectBusinessProfile,
+  getBusinessProfileDetailsController,
+  getBusinessProfileTrendsController,
+  getBusinessProfileMediaController,
+  syncBusinessProfileMediaController
 };

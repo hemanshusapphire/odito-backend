@@ -8,7 +8,8 @@ import mongoose from 'mongoose';
  *
  * Lifecycle:
  *   TASK_CREATED → IMPLEMENTED → VERIFIED_FIXED
- *                               → REOPENED → IMPLEMENTED (cycle)
+ *                               → REOPENED → VERIFIED_FIXED (re-verified directly)
+ *                                          → IMPLEMENTED   (user re-implements first)
  *
  * One task per (projectId + issueKey + pageUrl).
  */
@@ -123,7 +124,7 @@ const VALID_TRANSITIONS = {
   task_created:   ['implemented'],
   implemented:    ['verified_fixed', 'reopened'],
   verified_fixed: [],                              // Terminal
-  reopened:       ['implemented'],                  // User can re-implement
+  reopened:       ['implemented', 'verified_fixed'], // Re-implement, or re-verify directly
 };
 
 /**

@@ -252,6 +252,45 @@ export class SchemaResolver extends BaseResolver {
         };
       }
 
+      case 'invalid_schema_type': {
+        const ctx = onPageIssue?.context || {};
+        const invalidType  = ctx.invalid_type  || String(detectedFromDoc || 'Unknown');
+        const pageType     = ctx.page_type     || 'unknown';
+        const suggested    = ctx.suggested     || 'WebPage';
+        const detectedTypes = ctx.detected_types || [invalidType];
+        return {
+          currentState: this._tableState(
+            ['Schema Found', 'Page Type', 'Status'],
+            [{
+              'Schema Found': invalidType,
+              'Page Type':    _titleCase(pageType),
+              'Status':       `${invalidType} is not valid on ${_titleCase(pageType)} pages`,
+            }]
+          ),
+          expectedState: this._expectedState(
+            `Remove ${invalidType} schema and replace with appropriate type for ${_titleCase(pageType)} pages (e.g., ${suggested})`
+          ),
+        };
+      }
+
+      case 'schema_type_conflict': {
+        const ctx = onPageIssue?.context || {};
+        const conflictingTypes = ctx.conflicting_types || [];
+        const family    = ctx.family    || 'content';
+        const pageType  = ctx.page_type || 'unknown';
+        const rows = (conflictingTypes.length > 0 ? conflictingTypes : [String(detectedFromDoc || 'Unknown')]).map((t, i) => ({
+          'Schema Type':    t,
+          'Family':         _titleCase(family),
+          'Action':         i === 0 ? 'Keep (most specific)' : 'Remove',
+        }));
+        return {
+          currentState: this._tableState(['Schema Type', 'Family', 'Action'], rows),
+          expectedState: this._expectedState(
+            `Use only one ${family} schema type per page — keep the most specific, remove the rest`
+          ),
+        };
+      }
+
       case 'product_schema': {
         const productSchema = _findSchemaByType(structuredData, ['Product']);
         if (productSchema) {
@@ -332,6 +371,11 @@ function _toStringArray(val) {
   if (!val) return [];
   if (Array.isArray(val)) return val.map(String);
   return [String(val)];
+}
+
+function _titleCase(str) {
+  if (!str) return 'Unknown';
+  return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 }
 
 export default new SchemaResolver();

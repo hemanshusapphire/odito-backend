@@ -11,9 +11,18 @@ import { JobService } from '../service/jobService.js';
 import projectStatusService from '../service/projectStatusService.js';
 import chainingEngine from '../chainingEngine.js';
 import { AIGeneratedVideoService } from '../../video/services/aiGeneratedVideo.service.js';
-import { sendEmail } from '../../../services/emailService.js';
+import { sendMail } from '../../mail/services/mailService.js';
+import { MAIL_TYPES } from '../../mail/constants/emailTypes.js';
 import { generateRealPDF } from '../../../services/pdfGeneratorService.js';
+import { getEnvVar } from '../../../config/env.js';
 import User from '../../user/model/User.js';
+import SeoProject from '../../app_user/model/SeoProject.js';
+import Job from '../model/Job.js';
+
+// Same CORS_ORIGIN-as-frontend-URL idiom used in subscriptionWebhookService.js's
+// MANAGE_SUBSCRIPTION_URL — a hard-required env var, safe to read at module
+// load time. Works unchanged in dev/staging/prod since it's never hardcoded.
+const FRONTEND_URL = getEnvVar('CORS_ORIGIN');
 
 const jobService = new JobService();
 
@@ -30,17 +39,56 @@ export const completeJobSafely = async (req, res) => {
 
   // Immediate validation and response
   try {
-    const job = await jobService.getJobById(jobId);
-    if (!job) {
-      console.log(`[ERROR:${requestId}] Job not found | jobId=${jobId}`);
-      return res.status(404).json({
-        success: false,
-        message: 'Job not found',
-        requestId
-      });
-    }
+    // Atomic transition: the database, not a prior read, decides which
+    // request (if any concurrent duplicates exist) gets to complete this
+    // job. Previously this was getJobById() followed by a separate
+    // updateJobStatus() call — a read-then-write TOCTOU race where two
+    // near-simultaneous completion deliveries for the same job could both
+    // observe "not yet completed" before either write committed, and both
+    // would go on to schedule handleJobCompletion() / chainingEngine.process()
+    // a second time. The filter below (`status: {$ne:'completed'}`) makes
+    // the transition itself the single point of truth: only the request
+    // whose findOneAndUpdate actually matches a document ever proceeds past
+    // this point, no matter how many arrive concurrently.
+    const mergedResultData = { ...(stats || {}), ...(result_data || {}) };
+    const updatedJob = await Job.findOneAndUpdate(
+      { _id: jobId, status: { $ne: 'completed' } },
+      {
+        $set: {
+          status: 'completed',
+          result_data: mergedResultData,
+          completed_at: new Date()
+        },
+        // Data-integrity cleanup only, not the concurrency fix above: a job
+        // that was previously marked failed (e.g. a premature dispatch
+        // timeout) and later recovers here would otherwise keep stale
+        // failed_at/error/error_message fields forever alongside
+        // status:'completed'. Isolated to this one atomic write — no extra
+        // query, no change to the transition logic itself.
+        $unset: {
+          failed_at: "",
+          error: "",
+          error_message: ""
+        }
+      },
+      { new: true }
+    );
 
-    if (job.status === 'completed') {
+    if (!updatedJob) {
+      // Either the job doesn't exist, or it was already completed (by this
+      // same request racing a concurrent duplicate, or a genuinely earlier
+      // call). This read is only used to pick the response wording — it no
+      // longer gates any state transition or chaining decision, so it
+      // cannot reintroduce the race the atomic update above just closed.
+      const existing = await jobService.getJobById(jobId);
+      if (!existing) {
+        console.log(`[ERROR:${requestId}] Job not found | jobId=${jobId}`);
+        return res.status(404).json({
+          success: false,
+          message: 'Job not found',
+          requestId
+        });
+      }
       console.log(`[INFO:${requestId}] Job already completed | jobId=${jobId}`);
       return res.json({
         success: true,
@@ -49,12 +97,12 @@ export const completeJobSafely = async (req, res) => {
       });
     }
 
-    // Update job status to completed immediately
-    const mergedResultData = { ...(stats || {}), ...(result_data || {}) };
-    const updatedJob = await jobService.updateJobStatus(jobId, 'completed', {
-      result_data: mergedResultData,
-      completed_at: new Date()
-    });
+    // Preserve the same side effect jobService.updateJobStatus() would have
+    // performed (project-level job-count aggregation), since this path now
+    // bypasses that helper for the atomic $set above.
+    if (updatedJob.project_id) {
+      await jobService.updateProjectJobStats(updatedJob.project_id);
+    }
 
     console.log(`[SUCCESS:${requestId}] Job status updated | jobId=${jobId} | jobType=${updatedJob.jobType}`);
 
@@ -140,7 +188,7 @@ async function handleJobCompletion(updatedJob, stats, requestId) {
 }
 
 /**
- * Send report email for final job types (SEO_SCORING, AI_VISIBILITY_SCORING)
+ * Send report email for final job types (SEO_SCORING)
  * @param {Object} job - Completed job object
  * @param {string} requestId - Request tracking ID
  */
@@ -177,10 +225,35 @@ async function sendReportEmailForFinalJob(job, requestId) {
       pdfUrl = `https://your-domain.com/api/reports/${job.project_id}/pdf?jobId=${job._id}`;
       console.log(`[PDF:${requestId}] Using fallback URL: ${pdfUrl}`);
     }
-    
+
+    // pages_crawled/pages_analyzed/total_issues are already computed and
+    // stored on the project by the time SEO_SCORING (the pipeline's final
+    // job) completes — written earlier by PAGE_SCRAPING/PAGE_ANALYSIS
+    // completion (see projectStatusService.js). Read, never recomputed.
+    const project = await SeoProject.findById(job.project_id).select('project_name main_url pages_crawled pages_analyzed total_issues').lean();
+
+    // Primary CTA opens the interactive frontend dashboard, not the PDF —
+    // ?project=<id> is read by ProjectContext.jsx on load to select this
+    // project (deep-link support added alongside this change). If the
+    // project can't be found, fall back to the bare dashboard URL, which
+    // already auto-selects a project on its own — never a broken link.
+    const dashboardUrl = project
+      ? `${FRONTEND_URL}/dashboard?project=${project._id}`
+      : `${FRONTEND_URL}/dashboard`;
+
     // Send email with error handling
-    const emailSent = await sendEmail(user.email, pdfUrl, user.firstName);
-    
+    const emailSent = await sendMail(MAIL_TYPES.AUDIT_COMPLETED, user.email, {
+      firstName: user.firstName,
+      projectName: project?.project_name || null,
+      websiteUrl: project?.main_url || null,
+      auditStatus: 'Completed',
+      pagesCrawled: project?.pages_crawled ?? null,
+      pagesAnalyzed: project?.pages_analyzed ?? null,
+      issuesFound: project?.total_issues ?? null,
+      auditDate: job.completed_at || new Date(),
+      dashboardUrl,
+    });
+
     if (emailSent) {
       console.log(`[EMAIL:${requestId}] ✅ Report email sent successfully | email=${user.email} | jobType=${job.jobType}`);
     } else {

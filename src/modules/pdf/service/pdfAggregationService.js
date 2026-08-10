@@ -453,7 +453,7 @@ export class PDFAggregationService {
       // Overall issue statistics
       db.collection('seo_page_issues')
         .aggregate([
-          { $match: { projectId } },
+          { $match: { projectId, status: 'open' } },
           {
             $group: {
               _id: null,
@@ -485,7 +485,7 @@ export class PDFAggregationService {
       // Issues by type/category
       db.collection('seo_page_issues')
         .aggregate([
-          { $match: { projectId } },
+          { $match: { projectId, status: 'open' } },
           {
             $group: {
               _id: '$issue_type',
@@ -626,7 +626,7 @@ export class PDFAggregationService {
     try {
       const issueCounts = await db.collection('seo_page_issues')
         .aggregate([
-          { $match: { projectId } },
+          { $match: { projectId, status: 'open' } },
           {
             $group: {
               _id: null,

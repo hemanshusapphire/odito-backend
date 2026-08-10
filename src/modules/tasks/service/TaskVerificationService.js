@@ -4,21 +4,27 @@ import Task from '../model/Task.js';
 /**
  * TaskVerificationService
  *
- * Runs after every successful recrawl (post SEO_SCORING / AI_VISIBILITY_SCORING).
- * Compares implemented tasks against the latest crawl results to determine
- * whether the issue was actually fixed on the website.
+ * Runs exactly once per verification batch (chainingEngine gates the call
+ * behind allTerminalsResolved — see P3-002/Part 3) — a full project recrawl
+ * and a single-page URL Verification run both end in the same completion
+ * hook, so both trigger task re-verification identically. Compares
+ * implemented/reopened tasks against the latest OPEN issues (seo_page_issues
+ * is now a reconciled current-issue snapshot, P3-002) to determine whether
+ * the issue is actually fixed on the website.
  *
  * Lifecycle:
- *   IMPLEMENTED → recrawl → issue gone?  → VERIFIED_FIXED
+ *   IMPLEMENTED → recheck → issue gone?  → VERIFIED_FIXED
  *                         → issue exists? → REOPENED
+ *   REOPENED    → recheck → issue gone?  → VERIFIED_FIXED
+ *                         → issue exists? → REOPENED (unchanged)
  */
 class TaskVerificationService {
 
   /**
-   * Main entry point — verify all implemented tasks for a project.
+   * Main entry point — verify all implemented/reopened tasks for a project.
    * Called by ChainingEngine after final scoring completes.
    *
-   * @param {string|ObjectId} projectId - The project that was recrawled
+   * @param {string|ObjectId} projectId - The project that was recrawled/re-verified
    * @param {string}          requestId - Trace ID for logging
    */
   async verifyImplementedTasks(projectId, requestId = 'VERIFY') {
@@ -28,18 +34,20 @@ class TaskVerificationService {
 
     console.log(`[VERIFY:${requestId}] Starting task verification | projectId=${pid}`);
 
-    // 1. Find all tasks in IMPLEMENTED status for this project
-    const implementedTasks = await Task.find({
+    // 1. Find all tasks in IMPLEMENTED or REOPENED status for this project —
+    // both represent "already implemented at least once" and are eligible
+    // for re-verification against fresh crawl/verification data.
+    const tasksToVerify = await Task.find({
       projectId: pid,
-      status: 'implemented',
+      status: { $in: ['implemented', 'reopened'] },
     });
 
-    if (implementedTasks.length === 0) {
-      console.log(`[VERIFY:${requestId}] No implemented tasks to verify | projectId=${pid}`);
+    if (tasksToVerify.length === 0) {
+      console.log(`[VERIFY:${requestId}] No implemented/reopened tasks to verify | projectId=${pid}`);
       return { verified: 0, reopened: 0, skipped: 0 };
     }
 
-    console.log(`[VERIFY:${requestId}] Found ${implementedTasks.length} implemented tasks to verify`);
+    console.log(`[VERIFY:${requestId}] Found ${tasksToVerify.length} implemented/reopened tasks to verify`);
 
     // 2. Load the latest crawl results for comparison
     const db = mongoose.connection.db;
@@ -52,7 +60,7 @@ class TaskVerificationService {
     let reopened = 0;
     let skipped = 0;
 
-    for (const task of implementedTasks) {
+    for (const task of tasksToVerify) {
       try {
         const issueKey = this._buildIssueKey(task.issueKey, task.pageUrl);
         const issueStillExists = currentIssues.has(issueKey);
@@ -100,11 +108,17 @@ class TaskVerificationService {
   }
 
   /**
-   * Load all current issues from the latest crawl data.
+   * Load all currently OPEN issues from the latest crawl/verification data.
    * Returns a Set of "issueKey::pageUrl" strings for fast lookup.
    *
    * Checks both on-page issues (seo_page_issues) and AI visibility issues
    * (seo_ai_visibility_issues) to cover all issue sources.
+   *
+   * P3-002: filtered to status:'open' — seo_page_issues is now a reconciled
+   * current-issue snapshot (PAGE_ANALYSIS transitions resolved issues away
+   * from 'open' after every re-analysis), so an issue that's actually been
+   * fixed no longer appears here regardless of how long ago it was first
+   * detected.
    */
   async _loadCurrentIssues(db, projectId) {
     const issueSet = new Set();
@@ -112,7 +126,7 @@ class TaskVerificationService {
     // On-page issues (stored per page with issue_code field)
     try {
       const onPageIssues = await db.collection('seo_page_issues').find(
-        { projectId },
+        { projectId, status: 'open' },
         { projection: { issue_code: 1, page_url: 1, url: 1 } }
       ).toArray();
 

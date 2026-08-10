@@ -159,7 +159,7 @@ async function debugAuditFlow(projectId) {
       overall: Math.round(rawScores?.seoHealth || rawScores?.overall || 0),
       performance: Math.round(rawScores?.performance || 0),
       seo: Math.round(rawScores?.seoHealth || 0),
-      aiVisibility: Math.round(rawScores?.aiVisibility || 0)
+      aiHub: Math.round(rawScores?.overall || 0)
     };
     
     console.log("📊 EXTRACTED scores:", scores);
@@ -202,7 +202,7 @@ async function debugAuditFlow(projectId) {
     
     const validationResults = {
       issueDistributionValid: issueDistribution.critical > 0 || issueDistribution.total > 0,
-      scoresValid: scores.overall > 0 || scores.aiVisibility > 0,
+      scoresValid: scores.overall > 0 || scores.aiHub > 0,
       projectValid: projectName !== "N/A",
       dataLossDetected: false,
       failurePoint: null
@@ -214,7 +214,7 @@ async function debugAuditFlow(projectId) {
       validationResults.failurePoint = "issueDistribution mapping";
     }
 
-    if (scores.overall === 0 && scores.aiVisibility === 0 && scores.performance === 0) {
+    if (scores.overall === 0 && scores.aiHub === 0 && scores.performance === 0) {
       console.error("❌ ERROR: SCORES DATA LOST!");
       validationResults.dataLossDetected = true;
       validationResults.failurePoint = "scores mapping";
@@ -250,7 +250,7 @@ async function debugAuditFlow(projectId) {
         },
         scores: {
           overall: scores.overall,
-          aiVisibility: scores.aiVisibility,
+          aiHub: scores.aiHub,
           valid: validationResults.scoresValid
         },
         project: {

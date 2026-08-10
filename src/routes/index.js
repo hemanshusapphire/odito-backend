@@ -9,9 +9,8 @@ import workerRoutes from '../modules/jobs/routes/workerRoutes.js';
 import searchConsoleRoutes from '../modules/app_user/routes/searchConsoleRoutes.js';
 import analyticsRoutes from '../modules/app_user/routes/analyticsRoutes.js';
 import businessProfileRoutes from '../modules/app_user/routes/businessProfileRoutes.js';
-import webhookRoutes from '../modules/payments/routes/webhookRoutes.js';
-import paymentRoutes from '../modules/payments/routes/paymentRoutes.js';
-import aiVisibilityRoutes from '../modules/app_user/routes/aiVisibilityRoutes.js';
+import googleAdsRoutes from '../modules/app_user/routes/googleAdsRoutes.js';
+import brandAssetRoutes from '../modules/app_user/routes/brandAssetRoutes.js';
 import exportRoutes from '../modules/export/exportRoutes.js';
 import keywordResearchRoutes from '../modules/keyword_research/routes/keywordResearchRoutes.js';
 import pdfRoutes from '../modules/pdf/routes/pdfRoutes.js';
@@ -27,9 +26,17 @@ import issueContextRoutes from '../modules/issue-context/routes/issueContextRout
 import fixLogRoutes from '../modules/fix-logs/routes/fixLogRoutes.js';
 import taskRoutes from '../modules/tasks/routes/taskRoutes.js';
 import auditHistoryRoutes from '../modules/audit_history/routes/auditHistoryRoutes.js';
-import aiVisibilityHubRoutes from './hub/aiVisibilityHubRoutes.js';
-import aeoHubRoutes from './hub/aeoHubRoutes.js';
-import geoHubRoutes from './hub/geoHubRoutes.js';
+import verificationHistoryRoutes from '../modules/verification/routes/verificationHistoryRoutes.js';
+import pagespeedRoutes from '../modules/pagespeed/routes/pagespeedRoutes.js';
+import aiHubRoutes from '../modules/ai_hub/routes/aiHubRoutes.js';
+import aeoHubRoutes from '../modules/ai_hub/routes/aeoHubRoutes.js';
+import geoHubRoutes from '../modules/ai_hub/routes/geoHubRoutes.js';
+import aiPagesRoutes from '../modules/ai_hub/routes/aiPagesRoutes.js';
+import homepageAuditPdfRoutes from '../modules/homepageAuditPdf/routes/homepageAuditPdfRoutes.js';
+import subscriptionRoutes from '../modules/subscription/routes/subscriptionRoutes.js';
+import pagePurchaseRoutes from '../modules/page_purchase/routes/pagePurchaseRoutes.js';
+import creditPurchaseRoutes from '../modules/credit_purchase/routes/creditPurchaseRoutes.js';
+import systemAdminRoutes from '../modules/system_admin/routes/systemAdminRoutes.js';
 const router = express.Router();
 
 router.use('/auth', authRoutes);
@@ -42,22 +49,22 @@ router.use('/app_user', businessRoutes);
 router.use('/seo', scrapingRoutes);
 // SEO onboarding routes (keyword generation + ranking check)
 router.use('/seo', seoOnboardingRoutes);
+// URL Verification history (read-only)
+router.use('/seo', verificationHistoryRoutes);
 // Search Console routes (matches frontend API calls)
 router.use('/projects', searchConsoleRoutes);
 // Analytics routes (matches frontend API calls)
 router.use('/projects', analyticsRoutes);
 // Business Profile routes (matches frontend API calls)
 router.use('/projects', businessProfileRoutes);
+// Google Ads routes (matches frontend API calls)
+router.use('/projects', googleAdsRoutes);
+// Brand Asset Resolver routes (platform-wide logo/favicon resolution)
+router.use('/projects', brandAssetRoutes);
 // Job status update routes (for Python worker callbacks)
 router.use('/jobs', jobRoutes);
 // Worker job claiming routes
 router.use('/workers', workerRoutes);
-// Payment webhook routes
-router.use('/webhooks', webhookRoutes);
-// Payment API routes
-router.use('/payments', paymentRoutes);
-// AI Visibility routes
-router.use('/ai-visibility', aiVisibilityRoutes);
 // Export routes
 router.use('/export', exportRoutes);
 // Keywords Research routes
@@ -88,9 +95,28 @@ router.use('/fix-logs', fixLogRoutes);
 router.use('/tasks', taskRoutes);
 // Audit history and comparison routes
 router.use('/projects', auditHistoryRoutes);
-// Hub routes — 4-Hub Architecture (additive; legacy /ai-visibility routes remain live)
-router.use('/hub/ai-visibility', aiVisibilityHubRoutes);
-router.use('/hub/aeo', aeoHubRoutes);
-router.use('/hub/geo', geoHubRoutes);
+// PageSpeed standalone rescan routes
+router.use('/pagespeed', pagespeedRoutes);
+// AISO Hub V2 routes
+router.use('/aiso-hub', aiHubRoutes);
+// AEO Hub V2 routes
+router.use('/aeo-hub', aeoHubRoutes);
+// GEO Hub V2 routes
+router.use('/geo-hub', geoHubRoutes);
+// AI Pages (URL-level AI issue detail) routes
+router.use('/ai-pages', aiPagesRoutes);
+// Homepage Audit PDF data layer (dev/debug/renderer-consumption only — no
+// PDF generation route yet)
+router.use('/homepage-audit-pdf', homepageAuditPdfRoutes);
+// Subscription foundation: GET /subscription (auth), GET /plans (public)
+router.use('/', subscriptionRoutes);
+// One-time "Buy More Pages" purchases (mode: 'payment' — never a
+// subscription change; see modules/page_purchase/)
+router.use('/', pagePurchaseRoutes);
+// One-time "Buy Credits" purchases (mode: 'payment' — never a
+// subscription change; see modules/credit_purchase/)
+router.use('/', creditPurchaseRoutes);
+// System Admin console (roleId === 1 only; see modules/system_admin/)
+router.use('/', systemAdminRoutes);
 
 export default router;

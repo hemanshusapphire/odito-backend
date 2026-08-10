@@ -31,7 +31,7 @@ export class IssueCountsService {
       const result = await db.collection('seo_page_issues')
         .aggregate([
           {
-            $match: { projectId: projectIdObj }
+            $match: { projectId: projectIdObj, status: 'open' }
           },
           // Stage 1 — deduplicate by (issue_code, page_url)
           {

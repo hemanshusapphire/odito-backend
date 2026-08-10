@@ -21,8 +21,6 @@ export const claimJob = async (req, res) => {
 
     const { job_type } = req.body;
 
-    console.log(`🔍 Worker requesting job type: ${job_type}`);
-
     if (!job_type) {
       return res.status(400).json({
         success: false,
@@ -34,7 +32,6 @@ export const claimJob = async (req, res) => {
     const job = await jobService.claimJob(job_type);
 
     if (!job) {
-      console.log(`❌ No ${job_type} jobs available`);
       return res.status(404).json({
         success: false,
         message: 'No jobs available'

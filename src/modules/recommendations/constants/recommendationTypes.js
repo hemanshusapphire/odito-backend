@@ -114,4 +114,10 @@ export const CONTENT_LIMITS = {
   EXPECTED_IMPACT_ITEM: 200,
   EXPECTED_IMPACT_MAX_ITEMS: 6,
   ESTIMATED_FIX_TIME: 50,
+  // The actual rewritten page content for content_rewrite recommendations
+  // (recommendedVersion, contentRewrite.after/optimized, afterState.rawText)
+  // — distinct from IMPLEMENTATION_EXAMPLE (a code/HTML snippet demo, which
+  // is legitimately short). A full paragraph rewrite easily runs
+  // 1500-4000+ characters; this must not be capped anywhere near that.
+  FULL_CONTENT: 8000,
 };

@@ -41,6 +41,26 @@ const homepageAuditSchema = new mongoose.Schema({
     },
     _id: false,
     default: undefined
+  },
+
+  // PDF generation status — stored inline, mirrors video pattern.
+  // Status lifecycle: pending → generating → ready | failed
+  // filePath is absolute on the backend filesystem (/reports/homepage-audit-*.pdf).
+  // checksum (md5 hex) allows cache-busting without re-reading the file.
+  pdf: {
+    type: {
+      status: {
+        type: String,
+        enum: ['pending', 'generating', 'ready', 'failed'],
+      },
+      filePath: { type: String },
+      fileName: { type: String },
+      generatedAt: { type: Date },
+      fileSizeBytes: { type: Number },
+      checksum: { type: String },
+    },
+    _id: false,
+    default: undefined,
   }
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }

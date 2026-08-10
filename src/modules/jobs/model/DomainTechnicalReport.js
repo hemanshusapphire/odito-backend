@@ -88,6 +88,26 @@ const domainTechnicalReportSchema = new mongoose.Schema({
     confidence: { type: Number, default: null },   // 0-100
     source:     { type: String, default: null },   // "html" | "generator" | "header"
   },
+  // URL reachability stats from the URL_QUALIFICATION worker — powers the
+  // AISO Coverage card's Site-Wide Reachability Ratio rule (AISO-CV9).
+  // Patched in after the initial report is created (see jobRoutes.js), so
+  // these default to 0 on older reports that predate this field.
+  discoveredUrls: {
+    type: Number,
+    default: 0
+  },
+  qualifiedUrls: {
+    type: Number,
+    default: 0
+  },
+  lowPriorityUrls: {
+    type: Number,
+    default: 0
+  },
+  rejectedUrls: {
+    type: Number,
+    default: 0
+  },
   createdAt: {
     type: Date,
     default: Date.now

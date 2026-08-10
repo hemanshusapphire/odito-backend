@@ -6,7 +6,6 @@ import { ProjectPerformanceService } from '../service/projectPerformance.service
 import { ProjectSummaryService } from '../service/projectSummary.service.js';
 import { TechnicalChecksService } from '../service/technicalChecks.service.js';
 import { ProjectIssuesService } from '../service/projectIssues.service.js';
-import { GoogleVisibilityService } from '../service/googleVisibility.service.js';
 import { AIVisibilityService } from '../service/aiVisibility.service.js';
 import { PreAuditService } from '../service/preAudit.service.js';
 
@@ -153,52 +152,6 @@ export const getProjectIssues = async (req, res) => {
     LoggerUtil.error('Error getting project issues', error, { projectId: req.params.id });
     return res.status(error.statusCode || 500).json(
       error.response || ResponseUtil.error('Failed to get project issues', error.statusCode || 500)
-    );
-  }
-};
-
-// Disconnect Google Visibility
-// REFACTORED: Now uses service layer - Phase 2 Refactoring
-// Original logic moved to GoogleVisibilityService.disconnectGoogleVisibility()
-export const disconnectGoogleVisibility = async (req, res) => {
-  try {
-    const result = await GoogleVisibilityService.disconnectGoogleVisibility(req.project);
-    return res.json(ResponseUtil.success(result.data, 'Google visibility disconnected successfully'));
-  } catch (error) {
-    LoggerUtil.error('Error disconnecting Google visibility', error, { projectId: req.params.id });
-    return res.status(error.statusCode || 500).json(
-      error.response || ResponseUtil.error('Failed to disconnect Google visibility', error.statusCode || 500)
-    );
-  }
-};
-
-// Get Google Visibility status
-// REFACTORED: Now uses service layer - Phase 2 Refactoring
-// Original logic moved to GoogleVisibilityService.getGoogleVisibilityStatus()
-export const getGoogleVisibilityStatus = async (req, res) => {
-  try {
-    const result = await GoogleVisibilityService.getGoogleVisibilityStatus(req.project);
-    return res.json(ResponseUtil.success(result.data, 'Google visibility status retrieved successfully'));
-  } catch (error) {
-    LoggerUtil.error('Error getting Google visibility status', error, { projectId: req.params.id });
-    return res.status(error.statusCode || 500).json(
-      error.response || ResponseUtil.error('Failed to get Google visibility status', error.statusCode || 500)
-    );
-  }
-};
-
-// Connect Google Visibility
-// REFACTORED: Now uses service layer - Phase 2 Refactoring
-// Original logic moved to GoogleVisibilityService.connectGoogleVisibility()
-export const connectGoogleVisibility = async (req, res) => {
-  try {
-    const { propertyUrl } = req.body;
-    const result = await GoogleVisibilityService.connectGoogleVisibility(req.project, propertyUrl);
-    return res.json(ResponseUtil.success(result.data, 'Google visibility connected successfully'));
-  } catch (error) {
-    LoggerUtil.error('Error connecting Google visibility', error, { projectId: req.params.id });
-    return res.status(error.statusCode || 500).json(
-      error.response || ResponseUtil.error('Failed to connect Google visibility', error.statusCode || 500)
     );
   }
 };

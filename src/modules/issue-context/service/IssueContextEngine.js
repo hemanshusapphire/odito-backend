@@ -8,6 +8,7 @@ import AIVisibilityExtractor from '../extractors/AIVisibilityExtractor.js';
 import HeadlessExtractor from '../extractors/HeadlessExtractor.js';
 import CrawlGraphExtractor from '../extractors/CrawlGraphExtractor.js';
 import TechnicalReportExtractor from '../extractors/TechnicalReportExtractor.js';
+import V2IssueExtractor from '../extractors/V2IssueExtractor.js';
 
 // Resolvers
 import ContentResolver from '../resolvers/ContentResolver.js';
@@ -16,6 +17,7 @@ import SchemaResolver from '../resolvers/SchemaResolver.js';
 import AccessibilityResolver from '../resolvers/AccessibilityResolver.js';
 import TechnicalResolver from '../resolvers/TechnicalResolver.js';
 import EntityResolver from '../resolvers/EntityResolver.js';
+import V2IssueResolver from '../resolvers/V2IssueResolver.js';
 
 const EXTRACTOR_MAP = {
   [DATA_SOURCE.PAGE_DATA]:    PageDataExtractor,
@@ -55,6 +57,11 @@ class IssueContextEngine {
    */
   async resolve(projectId, issueId, pageUrl) {
     const startMs = Date.now();
+
+    // V2 fast path: AISO-*, AEO-*, GEO-* bypass the legacy ResolverRegistry entirely.
+    if (_isV2HubIssue(issueId)) {
+      return this._resolveV2(projectId, issueId, pageUrl, startMs);
+    }
 
     const entry = getRegistryEntry(issueId);
 
@@ -221,6 +228,85 @@ class IssueContextEngine {
     };
   }
 
+  // ─── V2 resolution path ────────────────────────────────────────────────────
+
+  /**
+   * Resolve context for a V2 hub issue (AISO-*, AEO-*, GEO-*).
+   *
+   * Queries ai_issues + ai_pages directly — no ResolverRegistry lookup.
+   */
+  async _resolveV2(projectId, issueId, pageUrl, startMs) {
+    let issueDoc, pageDoc;
+
+    try {
+      ({ issueDoc, pageDoc } = await V2IssueExtractor.extract(projectId, issueId, pageUrl));
+    } catch (err) {
+      console.warn(`[ISSUE_CONTEXT] V2 extractor failed for ${issueId}:`, err.message);
+      issueDoc = null;
+      pageDoc  = null;
+    }
+
+    const { currentState, expectedState } = V2IssueResolver.resolve(issueDoc, issueId);
+    const pageContext = this._buildV2PageContext(pageUrl, pageDoc);
+
+    // Derive hub from the rule ID prefix (AISO → aiso, AEO → aeo, GEO → geo).
+    const hub      = issueId.split('-')[0].toLowerCase();
+    const category = issueDoc?.card     || hub;
+    const severity = issueDoc?.severity || '';
+
+    const context = {
+      identity: {
+        issueId,
+        issueType:  'ai_visibility',
+        category,
+        severity,
+        // Keep pipeline as 'ai_visibility' so CurrentStateRenderer shows the
+        // correct '✦ AI Visibility' badge without needing a frontend change.
+        // The specific hub (aiso/aeo/geo) is derivable from issueId itself.
+        pipeline:   'ai_visibility',
+        hub,
+      },
+      currentState,
+      expectedState,
+      pageContext,
+      metadata: {
+        projectId,
+        resolvedAt:    new Date().toISOString(),
+        resolutionMs:  Date.now() - startMs,
+        dataSources:   ['ai_issues', 'ai_pages'],
+        readinessScore: 0,
+        missingSignals: [],
+        warnings:       [],
+      },
+      recommendationReady: false,
+    };
+
+    const validation = IssueContextValidator.validate(context);
+    context.metadata.readinessScore  = validation.readinessScore;
+    context.metadata.missingSignals  = validation.missingSignals;
+    context.metadata.warnings        = validation.warnings;
+    context.recommendationReady      = validation.recommendationReady;
+
+    console.log(
+      `[ISSUE_CONTEXT] V2 resolved ${issueId} | page=${pageUrl} | ` +
+      `readiness=${validation.readinessScore} | ${Date.now() - startMs}ms`
+    );
+
+    return context;
+  }
+
+  _buildV2PageContext(pageUrl, pageDoc) {
+    return {
+      pageUrl,
+      pageType:     pageDoc?.page_type_properties?.detected_type || 'Unknown',
+      framework:    pageDoc?.technical?.framework  || 'unknown',
+      cms:          pageDoc?.technical?.cms        || null,
+      canonicalUrl: pageDoc?.technical?.canonical_url || null,
+    };
+  }
+
+  // ─── Unknown / fallback ────────────────────────────────────────────────────
+
   _unknownContext(projectId, issueId, pageUrl, startMs) {
     return {
       identity: { issueId, issueType: 'unknown', category: '', severity: '', pipeline: 'unknown' },
@@ -247,6 +333,14 @@ class IssueContextEngine {
       recommendationReady: false,
     };
   }
+}
+
+/**
+ * Returns true for V2 hub rule IDs: AISO-*, AEO-*, GEO-*.
+ * These bypass the legacy ResolverRegistry and use the V2 path.
+ */
+function _isV2HubIssue(issueId) {
+  return /^(AISO|AEO|GEO)-/i.test(issueId);
 }
 
 export default new IssueContextEngine();

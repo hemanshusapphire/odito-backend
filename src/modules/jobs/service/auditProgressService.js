@@ -162,6 +162,30 @@ class AuditProgressService {
   }
 
   /**
+   * Emit "awaiting URL selection" event — fired when URL_QUALIFICATION
+   * completes for a project that requires user review of discovered URLs.
+   * Emitted to the project room (job IDs change across stages, matching
+   * emitCompleted's convention). Enhancement only, not authoritative — the
+   * frontend's polling of crawl_status is the correctness guarantee; this
+   * just lets a listener react instantly instead of waiting for the next
+   * poll tick.
+   * @param {string} projectId - SeoProject _id
+   * @param {Object} data - { projectId, sourceJobId, totalQualified }
+   */
+  emitAwaitingSelection(projectId, data) {
+    const io = global.io;
+    if (!io) return;
+
+    io.to(`project-${projectId}`).emit('audit:awaitingSelection', {
+      projectId,
+      ...data,
+      timestamp: new Date()
+    });
+
+    console.log(`[EVENT] Awaiting URL selection | projectId=${projectId} | totalQualified=${data?.totalQualified}`);
+  }
+
+  /**
    * Emit audit stage change event
    * @param {string} oldJobId - Previous job ID
    * @param {Object} stageData - Stage transition data
@@ -180,6 +204,356 @@ class AuditProgressService {
     });
 
     console.log(`[EVENT] Stage changed | oldJobId=${oldJobId} | from=${stageData.from} | to=${stageData.to} | newJobId=${stageData.newJobId}`);
+  }
+
+  /**
+   * P3-006: URL Verification realtime events. Reuses this same emitter,
+   * global.io, and the existing project-{projectId} room (the same choice
+   * emitCompleted already made, for the same reason: a verification run's
+   * job id changes across stages, so the project room is the one stable
+   * target for the whole run's lifetime) — no new room architecture.
+   *
+   * Payload is additive/consistent across all four events: runId,
+   * verificationRunId, projectId, pageUrl, status, progress, currentStage,
+   * currentJob, timestamp.
+   */
+  emitVerificationStarted({ runId, verificationRunId, projectId, pageUrl, currentJob = null }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ verification:started dropped — Socket.IO not available | runId=${runId} | projectId=${projectId} | pageUrl=${pageUrl}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('verification:started', {
+      runId,
+      verificationRunId,
+      projectId,
+      pageUrl,
+      status: 'started',
+      progress: 0,
+      currentStage: 'Queued',
+      currentJob,
+      timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Verification started | runId=${runId} | projectId=${projectId} | pageUrl=${pageUrl}`);
+  }
+
+  emitVerificationProgress({ runId, verificationRunId, projectId, pageUrl, progress, currentStage, currentJob = null }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ verification:progress dropped — Socket.IO not available | runId=${runId} | projectId=${projectId} | pageUrl=${pageUrl} | stage=${currentStage}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('verification:progress', {
+      runId,
+      verificationRunId,
+      projectId,
+      pageUrl,
+      status: 'processing',
+      progress,
+      currentStage,
+      currentJob,
+      timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Verification progress | runId=${runId} | stage=${currentStage} | progress=${progress}`);
+  }
+
+  emitVerificationCompleted({ runId, verificationRunId, projectId, pageUrl, currentJob = null }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ verification:completed dropped — Socket.IO not available | runId=${runId} | projectId=${projectId} | pageUrl=${pageUrl}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('verification:completed', {
+      runId,
+      verificationRunId,
+      projectId,
+      pageUrl,
+      status: 'completed',
+      progress: 100,
+      currentStage: 'Completed',
+      currentJob,
+      timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Verification completed | runId=${runId} | projectId=${projectId}`);
+  }
+
+  emitVerificationFailed({ runId, verificationRunId, projectId, pageUrl, currentStage = 'Failed', currentJob = null, errorMessage = null }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ verification:failed dropped — Socket.IO not available | runId=${runId} | projectId=${projectId} | pageUrl=${pageUrl}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('verification:failed', {
+      runId,
+      verificationRunId,
+      projectId,
+      pageUrl,
+      status: 'failed',
+      progress: null,
+      currentStage,
+      currentJob,
+      errorMessage,
+      timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Verification failed | runId=${runId} | projectId=${projectId} | reason="${errorMessage}"`);
+  }
+
+  /**
+   * F4-016: emitted exactly once per Verification Batch, only after the
+   * final project-level job (PROJECT_TASK_VERIFICATION) resolves and
+   * chainingEngine._finalizeVerificationBatch wins the AGGREGATING ->
+   * {COMPLETED|PARTIAL|FAILED} transition. Deliberately the ONLY new batch
+   * websocket event — batch-started/batch-progress were explicitly not
+   * added; the frontend already reconstructs per-URL progress from the
+   * existing verification:started/progress/completed/failed events emitted
+   * for each PageVerificationRun in the batch.
+   */
+  emitVerificationBatchCompleted({ batchId, projectId, status, totalUrls, completedUrls, failedUrls }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ verification:batch-completed dropped — Socket.IO not available | batchId=${batchId} | projectId=${projectId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('verification:batch-completed', {
+      batchId,
+      projectId,
+      status,
+      totalUrls,
+      completedUrls,
+      failedUrls,
+      timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Verification batch completed | batchId=${batchId} | projectId=${projectId} | status=${status} | completed=${completedUrls}/${totalUrls}`);
+  }
+
+  /**
+   * Phase 6.3: Google Ads campaign sync progress. Same emitter, same
+   * global.io, same project-{projectId} room convention as every event
+   * above - no new websocket architecture. A sync job's id doesn't change
+   * mid-run (unlike the audit pipeline's stage-to-stage job handoff), but
+   * the project room is used anyway for consistency with every other
+   * long-running-job event in this file, and because it's the room the
+   * frontend is already subscribed to for this project.
+   */
+  emitGoogleAdsSyncStarted({ jobId, projectId, customerId, syncType }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_sync:started dropped — Socket.IO not available | jobId=${jobId} | projectId=${projectId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_sync:started', {
+      jobId,
+      projectId,
+      customerId,
+      syncType,
+      status: 'started',
+      stage: 'started',
+      progress: 0,
+      timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads sync started | jobId=${jobId} | projectId=${projectId} | syncType=${syncType}`);
+  }
+
+  /**
+   * @param {string} stage - one of 'fetching_campaigns' | 'fetching_metrics' |
+   *   'updating_database' | 'generating_aggregates'
+   */
+  emitGoogleAdsSyncProgress({ jobId, projectId, customerId, stage, progress }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_sync:progress dropped — Socket.IO not available | jobId=${jobId} | projectId=${projectId} | stage=${stage}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_sync:progress', {
+      jobId,
+      projectId,
+      customerId,
+      status: 'processing',
+      stage,
+      progress,
+      timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads sync progress | jobId=${jobId} | stage=${stage} | progress=${progress}`);
+  }
+
+  emitGoogleAdsSyncCompleted({ jobId, projectId, customerId, stats }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_sync:completed dropped — Socket.IO not available | jobId=${jobId} | projectId=${projectId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_sync:completed', {
+      jobId,
+      projectId,
+      customerId,
+      status: 'completed',
+      stage: 'completed',
+      progress: 100,
+      stats,
+      timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads sync completed | jobId=${jobId} | projectId=${projectId}`);
+  }
+
+  emitGoogleAdsSyncFailed({ jobId, projectId, customerId, errorMessage }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_sync:failed dropped — Socket.IO not available | jobId=${jobId} | projectId=${projectId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_sync:failed', {
+      jobId,
+      projectId,
+      customerId,
+      status: 'failed',
+      stage: 'failed',
+      progress: null,
+      errorMessage,
+      timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads sync failed | jobId=${jobId} | projectId=${projectId} | reason="${errorMessage}"`);
+  }
+
+  /**
+   * Phase 6.4: Keyword performance sync progress. Same shape as the
+   * google_ads_sync:* events above, its own event namespace because
+   * GOOGLE_ADS_KEYWORD_SYNC is its own job (own jobId, own lifecycle),
+   * separately triggerable from the campaign sync.
+   */
+  emitGoogleAdsKeywordSyncStarted({ jobId, projectId, customerId }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_keyword_sync:started dropped — Socket.IO not available | jobId=${jobId} | projectId=${projectId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_keyword_sync:started', {
+      jobId, projectId, customerId, status: 'started', stage: 'started', progress: 0, timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads keyword sync started | jobId=${jobId} | projectId=${projectId}`);
+  }
+
+  /** @param {string} stage - 'fetching_keywords' | 'updating_database' */
+  emitGoogleAdsKeywordSyncProgress({ jobId, projectId, customerId, stage, progress }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_keyword_sync:progress dropped — Socket.IO not available | jobId=${jobId} | stage=${stage}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_keyword_sync:progress', {
+      jobId, projectId, customerId, status: 'processing', stage, progress, timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads keyword sync progress | jobId=${jobId} | stage=${stage} | progress=${progress}`);
+  }
+
+  emitGoogleAdsKeywordSyncCompleted({ jobId, projectId, customerId, stats }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_keyword_sync:completed dropped — Socket.IO not available | jobId=${jobId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_keyword_sync:completed', {
+      jobId, projectId, customerId, status: 'completed', stage: 'completed', progress: 100, stats, timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads keyword sync completed | jobId=${jobId} | projectId=${projectId}`);
+  }
+
+  emitGoogleAdsKeywordSyncFailed({ jobId, projectId, customerId, errorMessage }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_keyword_sync:failed dropped — Socket.IO not available | jobId=${jobId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_keyword_sync:failed', {
+      jobId, projectId, customerId, status: 'failed', stage: 'failed', progress: null, errorMessage, timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads keyword sync failed | jobId=${jobId} | reason="${errorMessage}"`);
+  }
+
+  /**
+   * Phase 6.4: Recommendation sync progress. Same shape, own event
+   * namespace, own job (GOOGLE_ADS_RECOMMENDATION_SYNC).
+   */
+  emitGoogleAdsRecommendationSyncStarted({ jobId, projectId, customerId }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_recommendation_sync:started dropped — Socket.IO not available | jobId=${jobId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_recommendation_sync:started', {
+      jobId, projectId, customerId, status: 'started', stage: 'started', progress: 0, timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads recommendation sync started | jobId=${jobId} | projectId=${projectId}`);
+  }
+
+  /** @param {string} stage - 'fetching_recommendations' | 'updating_database' */
+  emitGoogleAdsRecommendationSyncProgress({ jobId, projectId, customerId, stage, progress }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_recommendation_sync:progress dropped — Socket.IO not available | jobId=${jobId} | stage=${stage}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_recommendation_sync:progress', {
+      jobId, projectId, customerId, status: 'processing', stage, progress, timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads recommendation sync progress | jobId=${jobId} | stage=${stage} | progress=${progress}`);
+  }
+
+  emitGoogleAdsRecommendationSyncCompleted({ jobId, projectId, customerId, stats }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_recommendation_sync:completed dropped — Socket.IO not available | jobId=${jobId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_recommendation_sync:completed', {
+      jobId, projectId, customerId, status: 'completed', stage: 'completed', progress: 100, stats, timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads recommendation sync completed | jobId=${jobId} | projectId=${projectId}`);
+  }
+
+  emitGoogleAdsRecommendationSyncFailed({ jobId, projectId, customerId, errorMessage }) {
+    const io = global.io;
+    if (!io) {
+      console.warn(`⚠️ google_ads_recommendation_sync:failed dropped — Socket.IO not available | jobId=${jobId}`);
+      return;
+    }
+
+    io.to(`project-${projectId}`).emit('google_ads_recommendation_sync:failed', {
+      jobId, projectId, customerId, status: 'failed', stage: 'failed', progress: null, errorMessage, timestamp: new Date(),
+    });
+
+    console.log(`[EVENT] Google Ads recommendation sync failed | jobId=${jobId} | reason="${errorMessage}"`);
   }
 
   /**

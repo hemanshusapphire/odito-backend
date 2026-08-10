@@ -96,6 +96,29 @@ const seoProjectSchema = new mongoose.Schema({
     default: 'manual'
   },
 
+  // 🗑️ Soft delete (Project Trash & Restore, Phase 1)
+  is_deleted: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+
+  deleted_at: {
+    type: Date,
+    default: null
+  },
+
+  scheduled_purge_at: {
+    type: Date,
+    default: null
+  },
+
+  deleted_by: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+
   last_scraped_at: {
     type: Date,
     default: null
@@ -183,8 +206,61 @@ const seoProjectSchema = new mongoose.Schema({
 
   crawl_status: {
     type: String,
-    enum: ['draft', 'pending', 'running', 'discovered', 'crawled', 'completed', 'failed', 'cancelled'],
+    enum: [
+      'draft', 'pending', 'running', 'discovered',
+      // awaiting_url_selection: URL_QUALIFICATION has completed and the
+      // pipeline is parked, waiting for the user to review/approve which
+      // discovered URLs get scraped (see UrlSelection model). No
+      // PAGE_SCRAPING/HEADLESS_ACCESSIBILITY JobGroup exists yet for this
+      // run while a project sits in this state.
+      'awaiting_url_selection',
+      'crawled', 'completed', 'failed', 'cancelled'
+    ],
     default: 'pending'
+  },
+
+  // require_url_selection: feature flag gating the URL Selection workflow.
+  // When true (default), URL_QUALIFICATION completing parks the pipeline in
+  // 'awaiting_url_selection' instead of auto-creating PAGE_SCRAPING/
+  // HEADLESS_ACCESSIBILITY JobGroups. Flipping this to false is the primary
+  // rollback lever for the feature — no code change needed to revert to
+  // fully-automatic URL selection.
+  require_url_selection: {
+    type: Boolean,
+    default: true
+  },
+
+  // url_selection_limit: optional per-project cap enforced by
+  // POST /url-selection. There is no platform-wide default — null (the
+  // default for every project) means unlimited; a number here is an
+  // explicit, intentional override for this one project only.
+  url_selection_limit: {
+    type: Number,
+    default: null
+  },
+
+  // Host canonicalization: the redirect-resolved host of the seed URL as
+  // determined by LINK_DISCOVERY for the most recent audit run (e.g.
+  // "www.example.com" or "example.com" — whichever the site's own redirect
+  // chain resolves to). Used as the single source of truth so www/non-www
+  // (or other host-alias) duplicates never enter seo_internal_links.
+  canonical_host: {
+    type: String,
+    default: null
+  },
+
+  canonical_url: {
+    type: String,
+    default: null
+  },
+
+  // current_run_id: the run_id of the audit execution currently in progress
+  // (or most recently started) for this project — minted by
+  // startProjectAudit()/startVerification(). Lets any query scope to "the
+  // current run" instead of "this project across all historical runs".
+  current_run_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    default: null
   },
 
   last_crawl_summary: {
@@ -330,6 +406,22 @@ const seoProjectSchema = new mongoose.Schema({
     },
     confidence: { type: Number, default: 0, min: 0, max: 100 },
     extracted_at: { type: Date, default: null }
+  },
+
+  // 🎨 Brand Asset Resolution cache (see services/brandAssetService.js).
+  // Website logo/favicon are resolved via a lightweight on-demand fetch of
+  // main_url (cheerio, same pattern as businessDiscoveryService.js) and
+  // cached here so the resolver doesn't re-fetch the site on every request -
+  // resolveProjectBrandAssets() reads this first and only re-fetches once
+  // resolved_at is older than its TTL (or a caller forces a refresh).
+  // Google Business Profile logo (Priority 1) is NOT cached here - it's
+  // read live from BusinessProfileMedia, which already has its own sync/cache.
+  brand_assets: {
+    website_logo_url: { type: String, default: null },
+    website_logo_source: { type: String, default: null }, // 'schema:logo' | 'og:image'
+    favicon_url: { type: String, default: null },
+    favicon_source: { type: String, default: null }, // 'link:apple-touch-icon' | 'link:icon' | 'link:shortcut-icon' | 'favicon.ico'
+    resolved_at: { type: Date, default: null }
   }
 
 }, {
@@ -352,6 +444,9 @@ seoProjectSchema.index({ scrape_frequency: 1 });
 
 // Index for crawl status and timing (NEW)
 seoProjectSchema.index({ crawl_status: 1 });
+
+// Index for trash queries (Project Trash & Restore, Phase 1)
+seoProjectSchema.index({ user_id: 1, is_deleted: 1 });
 seoProjectSchema.index({ audit_started_at: -1 });
 seoProjectSchema.index({ last_analysis_at: -1 });
 seoProjectSchema.index({ crawl_duration: -1 });
@@ -437,13 +532,33 @@ seoProjectSchema.statics.getProjectsByFrequency = function(frequency) {
     .populate('user_id', 'name email');
 };
 
+// Persists the resolved website logo/favicon (Priority 2/3 of the Brand
+// Asset Resolver). Additive fields only - see brand_assets above.
+seoProjectSchema.statics.updateBrandAssets = async function(projectId, fields) {
+  return this.findByIdAndUpdate(
+    projectId,
+    { $set: { brand_assets: { ...fields, resolved_at: new Date() } } },
+    { new: true }
+  );
+};
+
 // Static method to get projects needing scraping
 seoProjectSchema.statics.getProjectsNeedingScrape = function() {
   const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-  
+
   return this.find({
     status: 'active',
-    scrape_frequency: { $ne: 'manual' },
+    // Trashed projects (Project Trash & Restore, Phase 1) must never be
+    // picked up by the scheduler — missing the field (pre-trash documents)
+    // correctly falls on the "not deleted" side of $ne: true.
+    is_deleted: { $ne: true },
+    // $ne: 'manual' alone does NOT exclude legacy documents that predate this
+    // field (missing entirely) — Mongo's $ne matches missing fields too, even
+    // though the schema's `default: 'manual'` implies they should be treated
+    // as manual. $nin: [null, 'manual'] excludes missing-field AND
+    // explicit-null docs the same way it excludes 'manual' (verified: a
+    // missing field also matches an explicit `null` query in MongoDB).
+    scrape_frequency: { $nin: [null, 'manual'] },
     $or: [
       { last_scraped_at: { $lt: oneWeekAgo } },
       { last_scraped_at: null }

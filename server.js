@@ -79,8 +79,13 @@ import Job from './src/modules/jobs/model/Job.js';
 import jwt from 'jsonwebtoken';
 
 import SeoProject from './src/modules/app_user/model/SeoProject.js';
-
-import retryScheduler from './src/modules/payments/scheduler/retryScheduler.js';
+import { startWeeklyRecrawlScheduler } from './src/modules/jobs/service/weeklyRecrawlScheduler.js';
+import { startDeletedProjectPurgeScheduler } from './src/modules/jobs/service/deletedProjectPurgeScheduler.js';
+import { startStaleLockScheduler } from './src/modules/jobs/service/staleLockScheduler.js';
+import { startVerificationBatchRecoveryScheduler } from './src/modules/verification/service/verificationBatchRecoveryScheduler.js';
+import { handleStripeWebhook } from './src/modules/subscription/controller/subscriptionController.js';
+import auth from './src/modules/user/middleware/auth.js';
+import { requireAdmin } from './src/middleware/auth.middleware.js';
 
 
 
@@ -235,6 +240,26 @@ const startServer = async () => {
 
   await connectDB();
 
+  // Weekly Recrawl: daily cron tick that starts audits for projects due for
+  // their scheduled recrawl. Registered once the DB connection is ready.
+  startWeeklyRecrawlScheduler();
+
+  // Project Trash & Restore, Phase 3: daily cron tick that permanently
+  // purges projects whose 7-day trash retention window has elapsed.
+  startDeletedProjectPurgeScheduler();
+
+  // Stale Job Lock Recovery: periodic sweep that resets jobs stuck in
+  // 'processing' (e.g. a crashed worker) back to 'failed', releasing any
+  // per-jobType/target-URL uniqueness lock they were otherwise holding
+  // forever.
+  startStaleLockScheduler();
+
+  // F4-018: Verification Batch recovery — reclaims due PROJECT_TASK_VERIFICATION
+  // retries (Node-self-processed, so nothing else polls it) and resumes any
+  // Verification Batch stuck in AGGREGATING (missing/orphaned aggregation
+  // jobs, an interrupted barrier, etc).
+  startVerificationBatchRecoveryScheduler();
+
 
 
   /**
@@ -275,8 +300,17 @@ const startServer = async () => {
 
    */
 
-  // Production-safe path resolution for odito-backend vs odito_backend structure
-  const publicPath = path.resolve(__dirname, "../odito_backend/public");
+  // Location-independent path resolution for public files (works across renames and moves)
+  let publicPath = path.resolve(__dirname, "public");
+  if (!fs.existsSync(publicPath)) {
+    const parentPath1 = path.resolve(__dirname, "../odito_backend/public");
+    const parentPath2 = path.resolve(__dirname, "../odito-backend/public");
+    if (fs.existsSync(parentPath1)) {
+      publicPath = parentPath1;
+    } else if (fs.existsSync(parentPath2)) {
+      publicPath = parentPath2;
+    }
+  }
 
 
 
@@ -348,9 +382,15 @@ const startServer = async () => {
 
 
 
-  // Raw body parser for Stripe webhooks - MUST be before express.json()
+  // Stripe webhook — MUST be registered before express.json() below with its
+  // own raw-body parser. Stripe signature verification is an HMAC over the
+  // exact raw request bytes; once express.json() has parsed the body into a
+  // JS object, the original bytes are gone and verification can never
+  // succeed. This route is intentionally registered directly on `app`
+  // (not inside src/routes/index.js, which only mounts after express.json())
+  // and requires no auth middleware — Stripe calls it server-to-server.
 
-  app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
+  app.post('/api/subscription/webhook', express.raw({ type: 'application/json' }), handleStripeWebhook);
 
 
 
@@ -366,7 +406,13 @@ const startServer = async () => {
 
 
 
-  app.get('/debug/jobs', async (req, res) => {
+  // Previously completely unauthenticated — dumped every job for every
+  // user/project in the system to any caller. Gated the same way the
+  // existing /api/app_user/projects-needing-scrape ops-visibility endpoint
+  // already is (auth, requireAdmin()) rather than removing it outright,
+  // since it's a genuinely useful ops/debug tool, just one that must not be
+  // public.
+  app.get('/debug/jobs', auth, requireAdmin(), async (req, res) => {
 
     try {
 
@@ -554,14 +600,6 @@ const startServer = async () => {
     };
     console.log(`✓ API available at ${serviceUrls.api}`);
     console.log(`✓ WebSocket server running for real-time updates`);
-
-    console.log(`✓ Stripe webhook retry scheduler started`);
-
-    
-
-    // Start the retry scheduler
-
-    retryScheduler.start();
 
   });
 

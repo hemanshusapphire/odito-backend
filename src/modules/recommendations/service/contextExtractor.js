@@ -164,14 +164,23 @@ class ContextExtractor {
 
   /**
    * Universal extractor — auto-detects issue source.
-   * Tries AI visibility first, falls back to on-page issues.
-   * 
+   *
+   * V2 hub issues (AISO-*, AEO-*, GEO-*) always route to extractForV2Issue(),
+   * which reads ai_issues + ai_pages (never legacy seo_ai_visibility_issues).
+   *
+   * Legacy on-page / ai_visibility issues use their existing paths unchanged.
+   *
    * @param {string} projectId - Project ID
    * @param {string} issueId - Rule ID or issue code
    * @param {string} [source] - Optional hint: 'ai_visibility' | 'on_page'
    * @returns {Promise<Object>} { context, sampleUrls, issueSource }
    */
   async extractForIssue(projectId, issueId, source = null) {
+    // V2 hub issues bypass the legacy seo_ai_visibility_issues collection entirely
+    if (_isV2HubIssue(issueId)) {
+      return this.extractForV2Issue(projectId, issueId);
+    }
+
     if (source === ISSUE_SOURCE.ON_PAGE) {
       return this.extractForIssueCode(projectId, issueId);
     }
@@ -186,6 +195,130 @@ class ContextExtractor {
     }
 
     return this.extractForIssueCode(projectId, issueId);
+  }
+
+  /**
+   * V2 issue extractor — queries ai_issues + ai_pages for V2 hub rules.
+   *
+   * Provides sampleUrls from all pages where this rule currently FAILs, and
+   * builds a context object from the first affected page's ai_pages document.
+   * Uses ai_projects to scope to the latest scan job.
+   *
+   * @param {string} projectId
+   * @param {string} ruleId - e.g. "AEO-055", "AISO-A2", "GEO-G1"
+   * @returns {Promise<{ context, sampleUrls, issueSource }>}
+   */
+  async extractForV2Issue(projectId, ruleId) {
+    const db  = mongoose.connection.db;
+    const pid = new ObjectId(projectId);
+
+    // Resolve the latest completed job so we only surface current issues
+    const latestJob = await db.collection('ai_projects')
+      .find({ project_id: pid })
+      .sort({ computed_at: -1 })
+      .limit(1)
+      .next();
+    const jobId = latestJob?.job_id ?? null;
+
+    const issueFilter = jobId
+      ? { project_id: pid, job_id: jobId, rule_id: ruleId }
+      : { project_id: pid, rule_id: ruleId };
+
+    const affectedIssues = await db.collection('ai_issues')
+      .find(issueFilter)
+      .limit(10)
+      .project({ url: 1 })
+      .toArray();
+
+    const sampleUrls = affectedIssues.map(i => i.url).filter(Boolean);
+
+    if (sampleUrls.length === 0) {
+      return {
+        context:     this._defaultContext(),
+        sampleUrls:  [],
+        issueSource: ISSUE_SOURCE.AI_VISIBILITY,
+      };
+    }
+
+    // Build context from the first affected page's V2 page document
+    const pageFilter = jobId
+      ? { project_id: pid, job_id: jobId, url: sampleUrls[0] }
+      : { project_id: pid, url: sampleUrls[0] };
+
+    const pageDoc = await db.collection('ai_pages').findOne(pageFilter, {
+      projection: {
+        'technical.framework':             1,
+        'technical.cms':                   1,
+        'page_type_properties.detected_type': 1,
+        word_count:                        1,
+        structured_data:                   1,
+      },
+    });
+
+    return {
+      context:     this._buildContextFromV2Page(pageDoc),
+      sampleUrls,
+      issueSource: ISSUE_SOURCE.AI_VISIBILITY,
+    };
+  }
+
+  /**
+   * V2 page-level extractor — returns context for a specific URL from ai_pages.
+   *
+   * Called when pageUrl is provided and the issue is a V2 hub issue.
+   * Parallel to the existing extract() which reads from seo_ai_visibility.
+   *
+   * @param {string} projectId
+   * @param {string} pageUrl
+   * @returns {Promise<{ context, pageUrl }>}
+   */
+  async extractForV2Page(projectId, pageUrl) {
+    const db  = mongoose.connection.db;
+    const pid = new ObjectId(projectId);
+
+    const latestJob = await db.collection('ai_projects')
+      .find({ project_id: pid })
+      .sort({ computed_at: -1 })
+      .limit(1)
+      .next();
+    const jobId = latestJob?.job_id ?? null;
+
+    const pageFilter = jobId
+      ? { project_id: pid, job_id: jobId, url: pageUrl }
+      : { project_id: pid, url: pageUrl };
+
+    const pageDoc = await db.collection('ai_pages').findOne(pageFilter, {
+      projection: {
+        'technical.framework':             1,
+        'technical.cms':                   1,
+        'page_type_properties.detected_type': 1,
+        word_count:                        1,
+        structured_data:                   1,
+      },
+    });
+
+    return { context: this._buildContextFromV2Page(pageDoc), pageUrl };
+  }
+
+  /**
+   * Build a context object from a V2 ai_pages document.
+   * Returns a default context when the document is not found.
+   * @private
+   */
+  _buildContextFromV2Page(pageDoc) {
+    if (!pageDoc) return this._defaultContext();
+
+    const schemaTypes = Array.isArray(pageDoc.structured_data)
+      ? pageDoc.structured_data.map(s => s['@type']).filter(Boolean)
+      : [];
+
+    return {
+      pageType:        pageDoc.page_type_properties?.detected_type || 'Unknown',
+      framework:       pageDoc.technical?.framework  || 'unknown',
+      cms:             pageDoc.technical?.cms        || null,
+      detectedSchemas: schemaTypes,
+      wordCount:       pageDoc.word_count            || 0,
+    };
   }
 
   /**
@@ -363,6 +496,15 @@ class ContextExtractor {
       wordCount: 0,
     };
   }
+}
+
+/**
+ * Returns true for V2 hub rule IDs: AISO-*, AEO-*, GEO-*.
+ * Module-level so it can be used both inside extractForIssue() and by callers
+ * that need the same check (e.g. recommendationService.js).
+ */
+function _isV2HubIssue(issueId) {
+  return /^(AISO|AEO|GEO)-/i.test(issueId);
 }
 
 export default new ContextExtractor();

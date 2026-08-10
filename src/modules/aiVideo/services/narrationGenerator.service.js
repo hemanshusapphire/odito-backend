@@ -41,7 +41,7 @@ export class NarrationGeneratorService {
         overall: auditSnapshot.scores?.overall || 0,
         performance: auditSnapshot.scores?.performance || auditSnapshot.scores?.pageSpeed || 0,
         seo: auditSnapshot.scores?.seo || auditSnapshot.scores?.seoHealth || 0,
-        aiVisibility: auditSnapshot.scores?.aiVisibility || 0
+        aiVisibility: auditSnapshot.aiHubSnapshot?.overallScore ?? auditSnapshot.scores?.aiVisibility ?? 0
       },
       topIssues: {
         high: this.formatIssues(auditSnapshot.topIssues?.high || []),
@@ -51,8 +51,8 @@ export class NarrationGeneratorService {
       performanceMetrics: {
         mobileScore: auditSnapshot.performanceMetrics?.mobileScore || 0,
         desktopScore: auditSnapshot.performanceMetrics?.desktopScore || 0,
-        lcp: auditSnapshot.performanceMetrics?.lcp || '5.1',
-        tbt: auditSnapshot.performanceMetrics?.tbt || '1960'
+        lcp: auditSnapshot.performanceMetrics?.metrics?.[0]?.mobile || '5.1',
+        tbt: auditSnapshot.performanceMetrics?.metrics?.[1]?.mobile || '1960'
       },
       issueDistribution: auditSnapshot.issueDistribution || {},
       // Add keyword data for dynamic narration
@@ -130,8 +130,8 @@ export class NarrationGeneratorService {
    * Generate performance metrics explanation
    */
   static generatePerformanceInsights(scores, performanceMetrics) {
-    const mobileScore = scores.performance || performanceMetrics.mobileScore;
-    const desktopScore = scores.performance || performanceMetrics.desktopScore;
+    const mobileScore = performanceMetrics.mobileScore || scores.performance;
+    const desktopScore = performanceMetrics.desktopScore || scores.performance;
     const lcp = performanceMetrics.lcp || '5.1';
     const tbt = performanceMetrics.tbt || '1960';
     
@@ -142,7 +142,13 @@ export class NarrationGeneratorService {
    * Generate AI visibility discussion
    */
   static generateAIVisibility(aiVisibilityScore) {
-    return `Looking toward the horizon, your AI visibility score of ${aiVisibilityScore} positions you for the next evolution of digital discovery. As AI-powered search becomes the primary way people find information online, how your website appears to these intelligent systems will dramatically impact your organic traffic. This goes far beyond traditional SEO—it's about ensuring your content speaks the language of both human users and artificial intelligence. Because AI systems are increasingly becoming the gatekeepers of information, websites that aren't optimized for AI understanding risk becoming invisible to large segments of their potential audience. As a result, improving your AI visibility isn't just about future-proofing; it's about capturing opportunities that your competitors might be missing entirely in this new landscape of AI-driven search and conversational interfaces.`;
+    const level = aiVisibilityScore >= 70 ? 'strong' : aiVisibilityScore >= 40 ? 'developing' : 'critical';
+    const levelDetail = aiVisibilityScore >= 70
+      ? 'AI search agents, answer engines, and generative AI tools can discover, trust, and cite your content reliably'
+      : aiVisibilityScore >= 40
+      ? 'AI systems can partially access your content, but gaps in crawlability, answer structure, and entity trust are limiting your reach'
+      : 'significant barriers are preventing AI systems from discovering, understanding, and citing your content';
+    return `Your AI Visibility score is ${aiVisibilityScore} out of 100 — a ${level} position. Measured across three hubs: AI Search Optimization, which governs how AI crawlers access your content; Answer Engine Optimization, which determines how AI assistants extract and deliver your answers; and Generative Engine Optimization, which controls how much generative AI engines trust and feature your entity. At ${aiVisibilityScore}, ${levelDetail}. Improving this score directly expands your presence across ChatGPT, Gemini, Claude, Perplexity, and Google AI Overviews.`;
   }
 
   /**

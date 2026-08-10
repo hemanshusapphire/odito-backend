@@ -8,7 +8,10 @@ import { ProjectPerformanceService } from '../service/projectPerformance.service
 import { IssueCountsService } from '../service/issueCounts.service.js';
 import { TechnicalChecksService } from '../service/technicalChecks.service.js';
 import mongoose from 'mongoose';
-import User from '../../user/model/User.js';
+import { isAuditInProgress } from '../service/projectAuditService.js';
+import { deleteProjectCascade } from '../service/projectCascadeDeleteService.js';
+import { hasCredits, deductCredits, refundCredits } from '../../../utils/creditService.js';
+import { canConsumeQuota } from '../../subscription/service/subscriptionLifecycle.js';
 
 // Create a new SEO project
 const createSeoProject = async (req, res) => {
@@ -60,6 +63,33 @@ const createSeoProject = async (req, res) => {
       });
     }
 
+    // Subscription lifecycle gate (Phase 15) — a paused/canceled/past_due
+    // subscription cannot create new projects, independent of remaining
+    // credit balance. Checked before the credit check so the error a
+    // past_due user sees points at the actual blocker (their subscription),
+    // not a misleading "insufficient credits".
+    if (!canConsumeQuota(req.user.subscription.status)) {
+      return res.status(403).json({
+        success: false,
+        code: 'SUBSCRIPTION_NOT_ACTIVE',
+        message: `Your subscription is ${req.user.subscription.status}. Resolve this via Billing Portal to create new projects.`
+      });
+    }
+
+    // Cheap fast-fail: req.user is already loaded by the auth middleware, so
+    // this is a read-only check with no extra DB round-trip. Not the
+    // authoritative gate — that's the atomic deductCredits() call below,
+    // right before the project is actually created. This just avoids doing
+    // the duplicate-name query for a request that's obviously going to be
+    // rejected anyway.
+    if (!hasCredits(req.user, 1)) {
+      return res.status(403).json({
+        success: false,
+        code: 'INSUFFICIENT_CREDITS',
+        message: 'No credits remaining. Upgrade your plan to create a new project.'
+      });
+    }
+
     // Check if project name already exists for this user
     const existingProject = await SeoProject.findOne({
       user_id: req.user._id,
@@ -73,16 +103,23 @@ const createSeoProject = async (req, res) => {
       });
     }
 
-    // Reject if user has no credits remaining
-    const userDoc = await User.findById(req.user._id).select('credits').lean();
-    const monthly   = userDoc?.credits?.monthly   || 0;
-    const permanent = userDoc?.credits?.permanent || (typeof userDoc?.credits === 'number' ? userDoc.credits : 0);
-    if (monthly + permanent < 1) {
-      return res.status(403).json({
-        success: false,
-        code: 'INSUFFICIENT_CREDITS',
-        message: 'No credits remaining. Upgrade your plan to create a new project.'
-      });
+    // Authoritative, atomic credit gate — 1 credit = 1 project. Guarded via
+    // $expr inside deductCredits() so two concurrent creation requests can
+    // never both succeed: MongoDB serializes concurrent updates to the same
+    // User document, so only one request can push `used` past `limit`'s
+    // ceiling. The loser gets INSUFFICIENT_CREDITS here, before any project
+    // document is ever built.
+    try {
+      await deductCredits(req.user._id, 1);
+    } catch (creditError) {
+      if (creditError.code === 'INSUFFICIENT_CREDITS') {
+        return res.status(403).json({
+          success: false,
+          code: 'INSUFFICIENT_CREDITS',
+          message: 'No credits remaining. Upgrade your plan to create a new project.'
+        });
+      }
+      throw creditError;
     }
 
     // CRITICAL LOG: Capture keywords before saving to DB
@@ -111,7 +148,18 @@ const createSeoProject = async (req, res) => {
       ...(seo_scope && { seo_scope })
     });
 
-    const savedProject = await seoProject.save();
+    // The credit is already spent at this point. If saving the project
+    // fails for any reason, the credit must never be permanently lost —
+    // refund it, then re-throw so the existing catch block below still
+    // formats the HTTP response exactly as it did before (ValidationError,
+    // duplicate key, or generic 500), with no duplicated error-handling logic.
+    let savedProject;
+    try {
+      savedProject = await seoProject.save();
+    } catch (saveError) {
+      await refundCredits(req.user._id, 1);
+      throw saveError;
+    }
 
     // Link most recent Homepage Audit for this URL (non-blocking)
     try {
@@ -167,8 +215,8 @@ const getAllSeoProjects = async (req, res) => {
     const { page = 1, limit = 10, status, search, industry, scrape_frequency } = req.query;
     const skip = (page - 1) * limit;
 
-    // Build query
-    const query = { user_id: req.user._id };
+    // Build query — excludes trashed projects (Project Trash & Restore, Phase 1)
+    const query = { user_id: req.user._id, is_deleted: { $ne: true } };
 
     // Filter by status if provided
     if (status) {
@@ -285,9 +333,9 @@ const getAllSeoProjects = async (req, res) => {
     // Get total count for pagination
     const totalProjects = await SeoProject.countDocuments(query);
 
-    // Get statistics
+    // Get statistics (also excludes trashed projects, matching the list above)
     const stats = await SeoProject.aggregate([
-      { $match: { user_id: req.user._id } },
+      { $match: { user_id: req.user._id, is_deleted: { $ne: true } } },
       {
         $group: {
           _id: null,
@@ -372,7 +420,8 @@ const getSeoProjectById = async (req, res) => {
 
     const project = await SeoProject.findOne({
       _id: id,
-      user_id: req.user._id
+      user_id: req.user._id,
+      is_deleted: { $ne: true }
     });
 
     if (!project) {
@@ -560,10 +609,12 @@ const deleteSeoProject = async (req, res) => {
       });
     }
 
-    // Find the project and ensure it belongs to the user
+    // Find the project and ensure it belongs to the user. Excludes already-
+    // trashed projects so deleting twice reports 404, not a silent re-trash.
     const project = await SeoProject.findOne({
       _id: id,
-      user_id: req.user._id
+      user_id: req.user._id,
+      is_deleted: { $ne: true }
     });
 
     if (!project) {
@@ -573,18 +624,261 @@ const deleteSeoProject = async (req, res) => {
       });
     }
 
-    // Delete the project
-    await SeoProject.deleteOne({
-      _id: id
-    });
+    // 🔒 AUDIT SAFETY: block soft delete while an audit is running/pending/
+    // processing — reuses the exact same guard startProjectAudit() uses, so
+    // "in progress" means the same thing everywhere in this codebase.
+    if (await isAuditInProgress(id)) {
+      return res.status(409).json({
+        success: false,
+        code: 'AUDIT_IN_PROGRESS',
+        message: 'An audit is currently running for this project. Wait for it to finish, or cancel it, before deleting.'
+      });
+    }
+
+    // Soft delete — move to trash instead of removing any data (Project
+    // Trash & Restore, Phase 1). No collections besides SeoProject itself
+    // are touched; restore just has to flip is_deleted back to false.
+    const now = new Date();
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+    await SeoProject.updateOne(
+      { _id: id },
+      {
+        is_deleted: true,
+        deleted_at: now,
+        scheduled_purge_at: new Date(now.getTime() + SEVEN_DAYS_MS),
+        deleted_by: req.user._id
+      }
+    );
 
     res.status(200).json({
       success: true,
-      message: 'Project deleted successfully'
+      message: 'Project moved to trash'
     });
 
   } catch (error) {
     LoggerUtil.error('Error deleting SEO project', error, { projectId: req.params.id });
+    return res.status(500).json(ResponseUtil.error('Internal server error', 500));
+  }
+};
+
+// ── Project Trash (Phase 1) ──────────────────────────────────────────────
+
+// List trashed projects for the current user
+const getTrashedProjects = async (req, res) => {
+  try {
+    const { page = 1, limit = 10 } = req.query;
+    const skip = (page - 1) * limit;
+
+    const query = { user_id: req.user._id, is_deleted: true };
+
+    const [projects, totalProjects] = await Promise.all([
+      SeoProject.find(query)
+        .select('project_name main_url business_type industry status scrape_frequency deleted_at scheduled_purge_at deleted_by user_id created_at')
+        .populate('deleted_by', 'firstName lastName roleId')
+        .sort({ deleted_at: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      SeoProject.countDocuments(query)
+    ]);
+
+    // Whether the OWNER themselves deleted it (deleted_by === user_id) vs a
+    // System Admin did (see deleteProjectSoft in systemAdminProjectService.js,
+    // which never has ownership of the project it deletes). No new field —
+    // this is derived from the two fields that already exist.
+    const projectsWithPermission = projects.map((project) => {
+      const deletedByOwner = !project.deleted_by || project.deleted_by._id.toString() === project.user_id.toString();
+      const obj = project.toObject();
+      obj.deletedByOwner = deletedByOwner;
+      return obj;
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        projects: projectsWithPermission,
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages: Math.ceil(totalProjects / limit),
+          totalProjects,
+          hasNext: page * limit < totalProjects,
+          hasPrev: page > 1
+        }
+      }
+    });
+  } catch (error) {
+    LoggerUtil.error('Error getting trashed projects', error, { userId: req.user._id });
+    return res.status(500).json(ResponseUtil.error('Failed to get trashed projects', 500));
+  }
+};
+
+// Get a single trashed project by ID
+const getTrashedProjectById = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid project ID'
+      });
+    }
+
+    // Deliberately requires is_deleted: true — this endpoint only exists to
+    // view trashed projects, unlike getSeoProjectById which now excludes them.
+    const project = await SeoProject.findOne({
+      _id: id,
+      user_id: req.user._id,
+      is_deleted: true
+    }).populate('deleted_by', 'firstName lastName roleId');
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Trashed project not found'
+      });
+    }
+
+    const deletedByOwner = !project.deleted_by || project.deleted_by._id.toString() === project.user_id.toString();
+    const obj = project.toObject();
+    obj.deletedByOwner = deletedByOwner;
+
+    res.status(200).json({
+      success: true,
+      data: obj
+    });
+  } catch (error) {
+    LoggerUtil.error('Error getting trashed project', error, { projectId: req.params.id });
+    return res.status(500).json(ResponseUtil.error('Internal server error', 500));
+  }
+};
+
+// Restore a trashed project (Phase 2)
+const restoreProject = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid project ID'
+      });
+    }
+
+    // Looked up WITHOUT scoping by user_id or is_deleted here, on purpose —
+    // that lets us tell apart the three distinct outcomes the API contract
+    // requires (404 vs 403 vs 400) instead of collapsing them all into 404.
+    const project = await SeoProject.findById(id);
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found'
+      });
+    }
+
+    if (project.user_id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
+
+    if (!project.is_deleted) {
+      return res.status(400).json({
+        success: false,
+        message: 'Project is not deleted'
+      });
+    }
+
+    // 🔒 If a System Admin deleted this project (deleted_by !== the owner
+    // themselves — see systemAdminProjectService.js's deleteProjectSoft,
+    // which always sets deleted_by to the admin's own id, never the
+    // project's owner), the owner may not restore it themselves. Enforced
+    // here, not just hidden in the UI — a normal user cannot bypass this by
+    // calling the API directly.
+    if (project.deleted_by && project.deleted_by.toString() !== project.user_id.toString()) {
+      return res.status(403).json({
+        success: false,
+        code: 'ADMIN_DELETED',
+        message: 'This project was deleted by your System Administrator. Please contact them to restore it.'
+      });
+    }
+
+    project.is_deleted = false;
+    project.deleted_at = null;
+    project.scheduled_purge_at = null;
+    project.deleted_by = null;
+    await project.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Project restored successfully',
+      data: project
+    });
+  } catch (error) {
+    LoggerUtil.error('Error restoring SEO project', error, { projectId: req.params.id });
+    return res.status(500).json(ResponseUtil.error('Internal server error', 500));
+  }
+};
+
+// Permanently delete a trashed project (Phase 3, Part 3)
+const permanentlyDeleteProject = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid project ID'
+      });
+    }
+
+    // Same lookup-without-scoping approach as restoreProject, so 404/403/400
+    // stay distinct instead of collapsing into one generic "not found".
+    const project = await SeoProject.findById(id);
+
+    if (!project) {
+      return res.status(404).json({
+        success: false,
+        message: 'Project not found'
+      });
+    }
+
+    if (project.user_id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: 'Unauthorized'
+      });
+    }
+
+    if (!project.is_deleted) {
+      return res.status(400).json({
+        success: false,
+        message: 'Project is not deleted'
+      });
+    }
+
+    // 🔒 Same rule as restoreProject above — if a System Admin deleted this
+    // project, the owner cannot permanently delete it either (that would
+    // remove the admin's own ability to restore it later).
+    if (project.deleted_by && project.deleted_by.toString() !== project.user_id.toString()) {
+      return res.status(403).json({
+        success: false,
+        code: 'ADMIN_DELETED',
+        message: 'This project was deleted by your System Administrator. Please contact them to restore it.'
+      });
+    }
+
+    const result = await deleteProjectCascade(id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Project permanently deleted',
+      data: result
+    });
+  } catch (error) {
+    LoggerUtil.error('Error permanently deleting SEO project', error, { projectId: req.params.id });
     return res.status(500).json(ResponseUtil.error('Internal server error', 500));
   }
 };
@@ -700,15 +994,26 @@ const getProjectOverview = async (req, res) => {
     }
 
     // Execute all queries in parallel for maximum performance
-    const [performanceResult, technicalResult] = await Promise.all([
+    const db = mongoose.connection.db;
+    const pid = new mongoose.Types.ObjectId(projectId);
+
+    const [performanceResult, technicalResult, aiProjectDoc] = await Promise.all([
       ProjectPerformanceService.getProjectPerformance(project),
-      TechnicalChecksService.getTechnicalChecks(project)
+      TechnicalChecksService.getTechnicalChecks(project),
+      db.collection('ai_projects')
+        .find({ project_id: pid })
+        .sort({ computed_at: -1 })
+        .limit(1)
+        .next()
     ]);
 
     const overviewData = {
       project: project.toObject(),
       performance: performanceResult.success ? performanceResult.data : null,
-      technical: technicalResult.success ? technicalResult.data : null
+      technical: technicalResult.success ? technicalResult.data : null,
+      ai_visibility: {
+        score: aiProjectDoc?.overall_score ?? null
+      }
     };
 
     res.status(200).json({
@@ -982,6 +1287,10 @@ export {
   updateSeoProject,
   updateSeoProjectStatus,
   deleteSeoProject,
+  getTrashedProjects,
+  getTrashedProjectById,
+  restoreProject,
+  permanentlyDeleteProject,
   getProjectScrapingSummary,
   getProjectsNeedingScrape,
   getProjectDashboard,

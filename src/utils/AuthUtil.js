@@ -22,8 +22,13 @@ export class AuthUtil {
       throw error;
     }
 
-    const project = await SeoProject.findById(projectId);
-    
+    // Soft-deleted (trashed) projects must behave as if they don't exist for
+    // every route that goes through this shared check — this is the single
+    // choke point ~25 project-scoped routes already run through, so fixing
+    // it here covers all of them (dashboard, overview, issues, technical
+    // checks, etc.) without touching each controller individually.
+    const project = await SeoProject.findOne({ _id: projectId, is_deleted: { $ne: true } });
+
     if (!project) {
       const error = new Error('Project not found');
       error.statusCode = 404;

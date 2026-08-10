@@ -66,8 +66,10 @@ class RecommendationService {
     const startTime = Date.now();
     const isDev = process.env.NODE_ENV !== 'production';
 
-    // Enforce registry lookup check — block unregistered issues from generating recommendations
-    if (!isKnownIssue(issueId)) {
+    // V2 hub issues (AISO-*, AEO-*, GEO-*) bypass the legacy ResolverRegistry.
+    // They are validated by pattern and resolved through IssueContextEngine's V2 path.
+    // All other issue IDs must be explicitly registered to prevent stray requests.
+    if (!isKnownIssue(issueId) && !_isV2HubIssue(issueId)) {
       console.warn(`[RECOMMENDATION] Registry lookup failed for issueId=${issueId} — throwing Unsupported issue type`);
       throw new Error('Unsupported issue type');
     }
@@ -78,11 +80,17 @@ class RecommendationService {
     console.log(`[RECOMMENDATION] pageUrl=${pageUrl || 'none'} | issueSource=${issueSource || 'auto'}`);
 
     // ── Step 1: Extract context ─────────────────────────────────────────────
+    // V2 hub issues use ai_pages for page context and ai_issues for sample URLs.
+    // Legacy on-page / technical-check / ai_visibility issues use the existing path.
     let extraction;
     try {
       if (pageUrl) {
-        const pageContext = await contextExtractor.extract(projectId, pageUrl);
-        const issueExtraction = await contextExtractor.extractForIssue(projectId, issueId, issueSource);
+        const [pageContext, issueExtraction] = await Promise.all([
+          _isV2HubIssue(issueId)
+            ? contextExtractor.extractForV2Page(projectId, pageUrl)
+            : contextExtractor.extract(projectId, pageUrl),
+          contextExtractor.extractForIssue(projectId, issueId, issueSource),
+        ]);
         extraction = {
           context: pageContext.context,
           sampleUrls: issueExtraction.sampleUrls,
@@ -281,10 +289,13 @@ class RecommendationService {
     }
 
     // ── Attempt generation up to 2 times (initial + 1 repair retry) ─────
-    // Retry triggers when the context-aware validator flags satisfiesConstraint=false.
-    // Attempt 2 uses a targeted repair prompt built from the validation warnings.
+    // Retry triggers when the context-aware validator flags satisfiesConstraint=false,
+    // OR when attempt 1 was truncated (hit max_tokens before finishing valid JSON).
+    // Attempt 2 uses either a targeted repair prompt (constraint failure) or the
+    // same prompt with a boosted token budget (truncation) — never both at once.
     let prevRawOutput  = null;   // Claude's first attempt raw output (string)
     let prevWarnings   = [];     // validation warnings from attempt 1
+    let maxTokensOverride = null; // set when attempt 1 was truncated, so attempt 2 gets more room
 
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
@@ -293,12 +304,14 @@ class RecommendationService {
         console.log(`[CLAUDE] rule=${issueId} | promptMode=${promptMode} | attempt=${attempt}`);
 
         // On attempt 2, pass the repair hint so claudeService uses the repair prompt.
-        // Repair hint is only for constraint-validation failures — not timeouts/network errors.
+        // Repair hint is only for constraint-validation failures — not timeouts/network
+        // errors/truncation (a repair prompt is longer than the original, which would
+        // make a truncation failure MORE likely to recur, not less).
         const repairHint = (attempt === 2 && prevWarnings.length > 0 && prevRawOutput)
           ? { previousOutput: prevRawOutput, failureReasons: prevWarnings }
           : null;
 
-        const claudeResult = await claudeService.generate(issueId, context, ruleMetadata, resolvedIssueContext, recommendationContext, repairHint);
+        const claudeResult = await claudeService.generate(issueId, context, ruleMetadata, resolvedIssueContext, recommendationContext, repairHint, maxTokensOverride);
 
         console.log(`[CLAUDE] ✓ Response received | tokens: in=${claudeResult.tokensUsed.input} out=${claudeResult.tokensUsed.output} | time=${claudeResult.generationTimeMs}ms | group=${claudeResult.promptGroup ?? 'legacy'}`);
 
@@ -398,6 +411,17 @@ class RecommendationService {
         );
 
         if (attempt === 2 || !_isRetryableError(error)) return null;
+
+        // Truncation retry needs more room, not just another try at the same
+        // ceiling — 1.5x the budget that just ran out, capped well under
+        // Sonnet's output limit.
+        if (errCode === 'CLAUDE_TRUNCATED') {
+          const previousBudget = error.attemptedMaxTokens || maxTokensOverride;
+          if (previousBudget) {
+            maxTokensOverride = Math.min(Math.round(previousBudget * 1.5), 4096);
+            console.log(`[CLAUDE] Truncated — retrying with boosted budget | rule=${issueId} | ${previousBudget} → ${maxTokensOverride}`);
+          }
+        }
 
         // Wait before retry — duration depends on error type (timeout vs rate limit vs network)
         const delayMs = claudeService.retryDelayFor(error, attempt);
@@ -668,10 +692,22 @@ class RecommendationService {
 }
 
 /**
+ * Returns true for V2 hub rule IDs: AISO-*, AEO-*, GEO-*.
+ * These bypass the legacy ResolverRegistry and use the V2 extraction + context path.
+ * Mirrors the identical check in IssueContextEngine._isV2HubIssue().
+ */
+function _isV2HubIssue(issueId) {
+  return /^(AISO|AEO|GEO)-/i.test(issueId);
+}
+
+/**
  * Returns true for transient failures where a retry is likely to succeed.
  * CLAUDE_INVALID_JSON and CLAUDE_EMPTY_RESPONSE are structural — retrying
  * the same prompt with the same model will almost certainly produce the same
- * bad output, so we skip to fallback immediately.
+ * bad output, so we skip to fallback immediately. CLAUDE_TRUNCATED is
+ * different: it means the response was cut off by max_tokens, not that
+ * Claude produced bad content — retrying with a larger budget (see the
+ * maxTokensOverride logic above) has a real chance of succeeding.
  */
 function _isRetryableError(error) {
   const code = error.claudeErrorCode || error.message;
@@ -679,7 +715,8 @@ function _isRetryableError(error) {
     code === 'CLAUDE_TIMEOUT'       ||
     code === 'CLAUDE_OVERLOADED'    ||
     code === 'CLAUDE_RATE_LIMITED'  ||
-    code === 'CLAUDE_NETWORK_ERROR'
+    code === 'CLAUDE_NETWORK_ERROR' ||
+    code === 'CLAUDE_TRUNCATED'
   );
 }
 

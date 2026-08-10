@@ -18,11 +18,11 @@ export class AccessibilityResolver extends BaseResolver {
       case 'text_contrast': {
         const failures = headlessData?.contrast_failures || _parseArray(detectedFromDoc);
         const rows = failures.map(f => ({
-          element: f.selector || f.element || 'Unknown element',
-          foreground: f.foreground || f.fg || '—',
-          background: f.background || f.bg || '—',
-          ratio: f.ratio || f.contrast_ratio || '—',
-          required: '4.5:1',
+          'Element':      f.selector || f.element || 'Unknown element',
+          'Foreground':   f.foreground || f.fg || '—',
+          'Background':   f.background || f.bg || '—',
+          'Actual Ratio': f.ratio || f.contrast_ratio || '—',
+          'Required':     '4.5:1',
         }));
         return {
           currentState: this._tableState(
@@ -36,9 +36,9 @@ export class AccessibilityResolver extends BaseResolver {
       case 'form_inputs_labels': {
         const inputs = headlessData?.unlabeled_inputs || _parseArray(detectedFromDoc);
         const rows = inputs.map(i => ({
-          element: i.selector || i.element || String(i),
-          type: i.type || 'input',
-          label: 'Missing',
+          'Input Element': i.selector || i.element || String(i),
+          'Type':          i.type || 'input',
+          'Label Status':  'Missing',
         }));
         return {
           currentState: this._tableState(
@@ -70,10 +70,10 @@ export class AccessibilityResolver extends BaseResolver {
       case 'tap_target_size': {
         const small = headlessData?.small_tap_targets || _parseArray(detectedFromDoc);
         const rows = small.map(t => ({
-          element: t.selector || t.element || String(t),
-          width: t.width ? `${t.width}px` : '—',
-          height: t.height ? `${t.height}px` : '—',
-          required: '24×24px',
+          'Element': t.selector || t.element || String(t),
+          'Width':   t.width ? `${t.width}px` : '—',
+          'Height':  t.height ? `${t.height}px` : '—',
+          'Minimum': '24×24px',
         }));
         return {
           currentState: this._tableState(
@@ -87,10 +87,10 @@ export class AccessibilityResolver extends BaseResolver {
       case 'axe_violations': {
         const violations = headlessData?.axe_violations || _parseArray(detectedFromDoc);
         const rows = violations.slice(0, 20).map(v => ({
-          rule: v.id || v.rule || String(v),
-          impact: v.impact || '—',
-          element: _firstNodeSelector(v),
-          wcag: v.tags?.find(t => t.startsWith('wcag')) || '—',
+          'Axe Rule': v.id || v.rule || String(v),
+          'Impact':   v.impact || '—',
+          'Element':  _firstNodeSelector(v),
+          'WCAG':     v.tags?.find(t => t.startsWith('wcag')) || '—',
         }));
         return {
           currentState: this._tableState(

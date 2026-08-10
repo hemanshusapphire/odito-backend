@@ -132,6 +132,11 @@ const REGISTRY = {
   article_schema:             { resolver: RESOLVER.SCHEMA,   dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.CODE,    issueType: 'on_page' },
   faq_schema:                 { resolver: RESOLVER.SCHEMA,   dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.CODE,    issueType: 'on_page' },
   product_schema:             { resolver: RESOLVER.SCHEMA,   dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.CODE,    issueType: 'on_page' },
+  breadcrumblist_schema:      { resolver: RESOLVER.SCHEMA,   dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.CODE,    issueType: 'on_page' },
+  deprecated_schema_types:    { resolver: RESOLVER.SCHEMA,   dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.CODE,    issueType: 'on_page' },
+  duplicate_schema_formats:   { resolver: RESOLVER.SCHEMA,   dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.CODE,    issueType: 'on_page' },
+  invalid_schema_type:        { resolver: RESOLVER.SCHEMA,   dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.TABLE,   issueType: 'on_page' },
+  schema_type_conflict:       { resolver: RESOLVER.SCHEMA,   dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.TABLE,   issueType: 'on_page' },
 
   // ─────────────────────────────────────────────────────────
   // ON-PAGE — ENTITY / EEAT
@@ -198,7 +203,7 @@ const REGISTRY = {
   child_schemas_reference_main_id:{ resolver: RESOLVER.SCHEMA,  dataSources: [DATA_SOURCE.AI_VISIBILITY], displayType: DISPLAY_TYPE.TABLE,  issueType: 'ai_visibility' },
   opening_hours_specification:    { resolver: RESOLVER.SCHEMA,  dataSources: [DATA_SOURCE.AI_VISIBILITY], displayType: DISPLAY_TYPE.ABSENT, issueType: 'ai_visibility' },
   event_schema:                   { resolver: RESOLVER.SCHEMA,  dataSources: [DATA_SOURCE.AI_VISIBILITY], displayType: DISPLAY_TYPE.ABSENT, issueType: 'ai_visibility' },
-  aggregate_rating_schema:        { resolver: RESOLVER.SCHEMA,  dataSources: [DATA_SOURCE.AI_VISIBILITY], displayType: DISPLAY_TYPE.ABSENT, issueType: 'ai_visibility' },
+  aggregate_rating_schema:        { resolver: RESOLVER.SCHEMA,  dataSources: [DATA_SOURCE.PAGE_DATA, DATA_SOURCE.AI_VISIBILITY], displayType: DISPLAY_TYPE.ABSENT, issueType: 'on_page' },
   service_product_schema_with_offers:{ resolver: RESOLVER.SCHEMA, dataSources: [DATA_SOURCE.AI_VISIBILITY], displayType: DISPLAY_TYPE.CODE,  issueType: 'ai_visibility' },
 
   // AI VISIBILITY — VOICE INTENT

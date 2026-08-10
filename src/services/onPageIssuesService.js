@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import {
   ISSUE_METADATA,
+  CANONICAL_ISSUE_TITLES,
   DEFAULT_DIFFICULTY,
   AI_CONFIDENCE_FALLBACK,
 } from '../config/issueMetadata.js';
@@ -29,11 +30,12 @@ export async function getOnPageIssues(projectId) {
   const rawIssues = await db
     .collection('seo_page_issues')
     .aggregate([
-      { 
-        $match: { 
+      {
+        $match: {
           projectId: projectIdObj,
-          category: { $ne: 'Accessibility' }
-        } 
+          category: { $ne: 'Accessibility' },
+          status: 'open'
+        }
       },
 
       // Stage 1 — deduplicate by (issue_code, page_url)
@@ -127,6 +129,7 @@ export async function getOnPageIssues(projectId) {
 
     const enrichedIssue = {
       issue_code: issue.issue_code,
+      title: CANONICAL_ISSUE_TITLES[issue.issue_code] || _deriveTitle(issue.issue_message),
       issue_message: issue.issue_message,
       severity: issue.severity,
       category: issue.category,
@@ -152,6 +155,19 @@ export async function getOnPageIssues(projectId) {
 }
 
 /**
+ * Derive a clean display title from a raw issue_message.
+ * Strips the evidence suffix written by per-element rules:
+ *   "Image missing alt text: https://..."  →  "Image missing alt text"
+ * Capitalises the first letter for consistent casing.
+ */
+function _deriveTitle(msg) {
+  if (!msg || typeof msg !== 'string') return 'Unknown Issue';
+  const colonIdx = msg.indexOf(': ');
+  const base = colonIdx > 0 ? msg.slice(0, colonIdx) : msg;
+  return base.charAt(0).toUpperCase() + base.slice(1);
+}
+
+/**
  * Get ALL affected URLs for a specific issue code
  */
 export async function getIssueUrls(projectId, issueCode) {
@@ -161,7 +177,7 @@ export async function getIssueUrls(projectId, issueCode) {
   const urls = await db
     .collection('seo_page_issues')
     .aggregate([
-      { $match: { projectId: projectIdObj, issue_code: issueCode } },
+      { $match: { projectId: projectIdObj, issue_code: issueCode, status: 'open' } },
       {
         $group: {
           _id: '$page_url',

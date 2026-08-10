@@ -95,10 +95,7 @@ export class ExecutiveMapper {
       const performanceMetrics = await this.getPerformanceMetrics(projectId);
       console.log("PERFORMANCE FINAL:", performanceMetrics);
       
-      // Step 9: Generate AI analysis text safely
-      const aiAnalysis = this.generateAIAnalysis(scores, issues, aggregatedData?.project);
-      
-      // Step 10: Build final response with exact required structure
+      // Step 9: Build final response with exact required structure
       const executiveSummary = {
         scores,
         issues,
@@ -106,7 +103,6 @@ export class ExecutiveMapper {
         topIssues,
         technicalHighlights,
         performanceMetrics,
-        aiAnalysis,
         metadata: {
           totalIssues: counts.totalIssues,
           pagesAnalyzed: 0, // Not needed for new approach
@@ -265,7 +261,6 @@ export class ExecutiveMapper {
         topIssues: { high: [], medium: [], low: [] },
         technicalHighlights: { checks: [] },
         performanceMetrics: { mobileScore: 0, desktopScore: 0 },
-        aiAnalysis: `Executive summary temporarily unavailable. Reason: ${errorReason}`,
         metadata: {
           totalIssues: 0,
           pagesAnalyzed: 0,
@@ -331,48 +326,6 @@ export class ExecutiveMapper {
         )
       }
     };
-  }
-
-  /**
-   * Generate AI analysis summary
-   */
-  static generateAIAnalysis(scores, issues, aiMetrics) {
-    const overallGrade = GradeUtils.getGrade(scores.overall);
-    const aiGrade = GradeUtils.getGrade(scores.aiVisibility);
-    
-    let analysis = `Overall site health is ${overallGrade.status.toLowerCase()} with a score of ${scores.overall}/100. `;
-    
-    // AI Visibility analysis
-    if (scores.aiVisibility < 50) {
-      analysis += `AI visibility is significantly below average at ${scores.aiVisibility}/100 (${aiGrade.status}). `;
-      analysis += `Key gaps include structured schema implementation and entity coverage. `;
-    } else if (scores.aiVisibility < 70) {
-      analysis += `AI visibility shows room for improvement at ${scores.aiVisibility}/100. `;
-      analysis += `Enhancing schema markup and entity optimization would elevate AI search performance. `;
-    } else {
-      analysis += `AI visibility is strong at ${scores.aiVisibility}/100, positioning well for AI-driven search. `;
-    }
-    
-    // Issue analysis
-    const totalIssues = issues.total || 0;
-    if (totalIssues > 20) {
-      analysis += `${totalIssues} issues detected require systematic optimization approach. `;
-    } else if (totalIssues > 5) {
-      analysis += `${totalIssues} issues identified can be resolved through targeted improvements. `;
-    } else {
-      analysis += `Site shows strong technical foundation with minimal issues. `;
-    }
-    
-    // Performance analysis
-    if (scores.performance < 60) {
-      analysis += `Performance optimization should be prioritized to enhance user experience and rankings.`;
-    } else if (scores.performance < 80) {
-      analysis += `Performance is good but further optimizations could provide competitive advantage.`;
-    } else {
-      analysis += `Performance metrics indicate excellent user experience foundation.`;
-    }
-    
-    return analysis;
   }
 
   /**

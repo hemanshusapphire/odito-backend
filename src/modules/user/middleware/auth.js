@@ -23,6 +23,15 @@ const auth = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
+    // isActive is already checked at login (authService.js). Re-checking it
+    // here too means a suspended account's existing JWT stops working
+    // immediately on its very next request, rather than remaining valid
+    // until it naturally expires (up to 7 days). Every user has isActive:true
+    // by default, so this is a no-op for every account today.
+    if (!user.isActive) {
+      return res.status(403).json({ success: false, message: 'This account has been suspended.' });
+    }
+
     req.user = user;
     next();
   } catch (error) {

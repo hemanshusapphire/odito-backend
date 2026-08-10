@@ -38,7 +38,6 @@ export class AIMapper {
       scores: {
         aiReadiness: scores.aiVisibility,
         geoScore: Math.round(categoryAverages.geo_score ?? scores.aiVisibility),
-        aeoScore: Math.round(categoryAverages.aeo_score ?? scores.aiVisibility),
         aiseoScore: scores.aiVisibility
       },
       concepts: this.getAIConcepts(),
@@ -254,19 +253,12 @@ export class AIMapper {
     const pagesWithSchema = aggregates.pagesWithSchema || 0;
     const schemaPct = Math.round((pagesWithSchema / totalPages) * 100);
 
-    const topicalAuthority = categoryAverages.topical_authority ?? null;
-    const voiceIntent = categoryAverages.voice_intent ?? null;
-    const citationProbability = categoryAverages.citation_probability ?? null;
-
     const totalEntities = ai?.entities?.summary?.totalEntities || 0;
     const kgStatus = totalEntities >= 10 ? 'Established' : totalEntities >= 5 ? 'Partial' : 'Not established';
 
     return [
       ['Structured Data', `${schemaPct}% coverage`, '+15-20%', 'Add JSON-LD to all pages'],
       ['Knowledge Graph', kgStatus, '+8-12%', 'Expand entity coverage'],
-      ['Topical Authority', topicalAuthority !== null ? `${Math.round(topicalAuthority)}/100` : 'N/A', '+4-8%', 'Create entity hub pages'],
-      ['Citation Probability', citationProbability !== null ? `${Math.round(citationProbability)}/100` : 'N/A', '+6-10%', 'Improve authorship signals'],
-      ['Conversational Score', voiceIntent !== null ? `${Math.round(voiceIntent)}/100` : 'N/A', '+3-5%', 'Structure content for voice/AEO']
     ];
   }
 
