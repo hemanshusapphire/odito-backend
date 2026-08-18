@@ -20,7 +20,7 @@ const MESSAGE_MAX_LENGTH = 4900; // headroom under Lead.message's 5000 schema ma
 const MAX_EXTRA_FIELDS_IN_MESSAGE = 20;
 
 const FIELD_CANDIDATES = {
-  email: ['email', 'email_address', 'e_mail', 'your_email'],
+  email: ['email', 'email_address', 'e_mail', 'your_email', 'work_email'],
   phone: ['phone', 'telephone', 'tel', 'mobile', 'mobile_number', 'phone_number', 'phone_no', 'your_phone'],
   company: ['company', 'company_name', 'organization', 'organisation', 'business', 'business_name', 'your_company', 'agency', 'agency_name'],
   message: ['message', 'comments', 'comment', 'description', 'enquiry', 'inquiry', 'your_message'],

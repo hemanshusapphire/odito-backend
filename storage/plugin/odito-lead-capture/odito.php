@@ -182,15 +182,25 @@ function odito_init() {
 
 	Odito_Cf7_Capture::init();
 
-	// Divi Builder is a licensed, closed-source product not present in any
-	// environment this plugin was developed/tested against — init() is
-	// unconditional (matching CF7's own init(), which likewise doesn't
-	// gate on class_exists) but the hook itself
-	// (wp_ajax_et_pb_submit_form) simply never fires on a site that isn't
-	// running Divi, so this is a safe no-op there.
+	// Divi's contact form (confirmed against a real production capture) is
+	// a direct same-page POST, not an AJAX action — there is no discrete
+	// "submission" hook to attach to. Odito_Divi_Capture::init() runs its
+	// check synchronously, right here, rather than registering a callback
+	// for a later event, so it executes as early in this same `init` pass
+	// as odito_init() itself does (see the priority-1 registration below)
+	// — guaranteed to run before Divi's own redirect-on-success logic,
+	// which cannot fire before `init` completes (WordPress's lifecycle is
+	// strictly ordered: init -> wp -> template_redirect -> theme output).
+	// A safe no-op on any request that isn't a genuine Divi submission,
+	// and on any site not running Divi at all.
 	Odito_Divi_Capture::init();
 
 	add_action( 'odito_cron_sync', array( 'Odito_Connection', 'run_scheduled_sync' ) );
 	add_action( 'odito_process_queue', array( 'Odito_Cf7_Capture', 'process_queue' ) );
 }
-add_action( 'init', 'odito_init' );
+// Priority 1 (not the default 10): Odito_Divi_Capture's check runs inline
+// as part of this same call, and must run as early in `init` as possible
+// so nothing Divi does later in the request lifecycle (including on
+// `init` itself, at a later priority) can have already redirected/exited
+// before we've had a chance to observe the submission.
+add_action( 'init', 'odito_init', 1 );
