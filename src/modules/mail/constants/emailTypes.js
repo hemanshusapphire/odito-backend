@@ -25,4 +25,7 @@ export const MAIL_TYPES = {
   // Account deletion (Profile module, Delete Account) — OAuth-only accounts
   // (no password) verify via this OTP instead.
   DELETE_ACCOUNT_OTP: 'delete_account_otp',
+
+  // WordPress Lead Capture (Phase 3C)
+  NEW_WORDPRESS_LEAD: 'new_wordpress_lead',
 };

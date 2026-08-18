@@ -16,6 +16,72 @@ import mongoose from 'mongoose';
 
 const TASK_STATUSES = ['task_created', 'implemented', 'verified_fixed', 'reopened'];
 const TASK_ORIGINS  = ['ai_fix', 'diy_guide', 'auditiq', 'manual'];
+const SNAPSHOT_SOURCES = ['structured_snapshot', 'diagnostic_string', 'unavailable'];
+
+/**
+ * One remediation attempt for this issue instance.
+ *
+ * Appended (never mutated) each time the task is implemented, and again
+ * whenever a verification pass resolves — so a reopen-and-refix cycle keeps
+ * both attempts, instead of overwriting the earlier one's before/fix/after.
+ */
+const fixAttemptSchema = new mongoose.Schema(
+  {
+    attemptNumber: { type: Number, required: true },
+    // 'reverify_only': a later verification pass found the task still
+    // reopened with no re-implementation in between — gets its own entry
+    // instead of silently rewriting the prior attempt's verification result.
+    attemptKind: { type: String, enum: ['fix_attempt', 'reverify_only'], default: 'fix_attempt' },
+    // Mongoose's enum validator checks `null` against the enum list too (it
+    // only skips `undefined`) — every nullable enum field below must list
+    // `null` explicitly or a fresh attempt (method/result unset until
+    // verification runs) fails validation on save.
+    origin: { type: String, enum: [...TASK_ORIGINS, null], default: null },
+    status: {
+      type: String,
+      enum: ['pending_verification', 'verified_fixed', 'reopened'],
+      default: 'pending_verification',
+    },
+
+    before: {
+      capturedAt: { type: Date, default: null },
+      source: { type: String, enum: SNAPSHOT_SOURCES, default: 'unavailable' },
+      dataPath: { type: String, default: null },
+      value: { type: mongoose.Schema.Types.Mixed, default: null },
+    },
+
+    fixApplied: {
+      capturedAt: { type: Date, default: null },
+      recommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null },
+      recommendationVersion: { type: Number, default: null },
+      // Frozen copy of the Recommendation content used — Recommendation docs
+      // are upserted/overwritten and TTL-expired, so a live reference alone
+      // would let an old attempt's displayed fix silently change or vanish.
+      snapshot: { type: mongoose.Schema.Types.Mixed, default: null },
+      expectedAfterValue: { type: mongoose.Schema.Types.Mixed, default: null },
+    },
+
+    implementedAt: { type: Date, default: null },
+
+    verification: {
+      verifiedAt: { type: Date, default: null },
+      // ai_visibility_issue_lifecycle (Phase 5): distinct from
+      // presence_fallback — this IS the authoritative signal for
+      // AI-visibility-sourced tasks (real ai_issues presence/absence from
+      // the active V2 pipeline), not a fallback used because a better
+      // signal was unavailable.
+      method: { type: String, enum: ['value_diff', 'presence_fallback', 'ai_visibility_issue_lifecycle', null], default: null },
+      result: { type: String, enum: ['verified_fixed', 'reopened', null], default: null },
+      matched: { type: Boolean, default: null },
+      after: {
+        source: { type: String, enum: SNAPSHOT_SOURCES, default: 'unavailable' },
+        value: { type: mongoose.Schema.Types.Mixed, default: null },
+      },
+      triggerJobId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    },
+  },
+  { _id: false, timestamps: false }
+);
 
 const taskSchema = new mongoose.Schema(
   {
@@ -97,10 +163,34 @@ const taskSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    // ── Fix History ─────────────────────────────────────────────────────
+    // Absent on tasks created before this field existed — always read via
+    // `task.fixHistory || []` (Mongoose defaults don't apply to .lean() reads
+    // of pre-existing documents), never assumed present.
+    fixHistory: {
+      type: [fixAttemptSchema],
+      default: [],
+    },
   },
   {
     timestamps: { createdAt: 'createdAt', updatedAt: 'updatedAt' },
     collection: 'tasks',
+    // Two verification passes (e.g. a full-audit run and a URL-verification
+    // run racing, or a retried job overlapping a first attempt) can load the
+    // same Task concurrently. Mongoose's default versioning only guards
+    // against *array* modifications it judges ambiguous — it does NOT
+    // version-check plain nested-path updates (e.g. mutating an existing
+    // fixHistory[i].verification.* field in place), so two concurrent
+    // `.save()` calls on that path silently last-write-wins with NO error,
+    // permanently losing one verification result. Empirically confirmed via
+    // a live-Mongo probe before this fix: both saves succeeded silently,
+    // second write clobbered the first. `optimisticConcurrency: true` forces
+    // Mongoose to include `{_id, __v}` in the update filter on EVERY save
+    // regardless of what changed, so the loser now throws a `VersionError`
+    // instead of silently overwriting — already handled by the existing
+    // try/catch in TaskVerificationService (counted as `skipped`, logged).
+    optimisticConcurrency: true,
   }
 );
 
@@ -168,7 +258,7 @@ taskSchema.statics.getSummary = async function (projectId) {
 
 // ── Export ─────────────────────────────────────────────────────────────────────
 
-export { TASK_STATUSES, TASK_ORIGINS, VALID_TRANSITIONS };
+export { TASK_STATUSES, TASK_ORIGINS, VALID_TRANSITIONS, SNAPSHOT_SOURCES };
 
 const Task = mongoose.model('Task', taskSchema);
 export default Task;

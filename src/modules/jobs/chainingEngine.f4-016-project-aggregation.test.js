@@ -319,6 +319,48 @@ describe('F4-016/F4-018: PROJECT_TASK_VERIFICATION retry is persisted-only (no i
     assert.equal(batch.status, BATCH_STATUS.COMPLETED, 'batch must still finalize after the retried success');
   });
 
+  // Phase 3 hardening regression: without setting claimed_at, a Node crash
+  // between verifyImplementedTasks running and the job being marked
+  // 'completed' left it stuck at 'processing' forever, invisible to every
+  // recovery sweep (cleanupStaleLocks needs claimed_at; the orphaned-pending
+  // sweep only matches 'pending', which this job already left). Confirmed by
+  // code trace, not hypothetical — see chainingEngine.js's
+  // _runProjectTaskVerificationJob comment for the full mechanism.
+  test('sets claimed_at when starting, so a stuck "processing" job is now visible to jobService.cleanupStaleLocks', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const projectId = new mongoose.Types.ObjectId();
+    const batchId = await makeAggregatingBatch(projectId, ['completed']);
+
+    // Simulate a crash after verifyImplementedTasks runs but before the job
+    // is marked completed — never resolve, so _runProjectTaskVerificationJob
+    // never reaches its own 'completed' write.
+    taskVerificationService.verifyImplementedTasks = () => new Promise(() => {});
+
+    const job = await Job.create({
+      jobType: JOB_TYPES.PROJECT_TASK_VERIFICATION,
+      project_id: projectId,
+      input_data: { batchId },
+      max_attempts: 2,
+    });
+
+    // Fire and forget — deliberately not awaited, since the promise above
+    // never resolves. Give it a tick to reach the 'processing' write.
+    chainingEngine._runProjectTaskVerificationJob(job, 'req-claimed-at').catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const stuckJob = await Job.findById(job._id);
+    assert.equal(stuckJob.status, 'processing');
+    assert.ok(stuckJob.claimed_at instanceof Date, 'claimed_at must be set so cleanupStaleLocks can eventually reclaim this job');
+
+    // Prove the existing sweep now actually matches it once stale.
+    const staleMatch = await Job.findOne({
+      _id: job._id,
+      status: 'processing',
+      claimed_at: { $lt: new Date(Date.now() + 1000) },
+    });
+    assert.ok(staleMatch, 'jobService.cleanupStaleLocks\' exact query shape must match this stuck job');
+  });
+
   test('exhausts retries (max_attempts=1) -> job permanently failed, but batch still finalizes from per-URL counts', async (t) => {
     if (!mongoAvailable) return t.skip('local MongoDB not reachable');
     const projectId = new mongoose.Types.ObjectId();

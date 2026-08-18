@@ -33,7 +33,6 @@ export class PDFAggregationService {
       const [
         projectData,
         aiVisibilityData,
-        aiIssuesData,
         aiPageScoresData,
         aiEntitiesData,
         domainTechnicalData,
@@ -46,35 +45,32 @@ export class PDFAggregationService {
       ] = await Promise.all([
         // 1. Basic project information
         this.fetchProjectData(db, projectIdObj),
-        
+
         // 2. AI visibility data
         this.fetchAIVisibilityData(db, projectIdObj),
-        
-        // 3. AI visibility issues
-        this.fetchAIIssuesData(db, projectIdObj),
-        
-        // 4. AI page scores
+
+        // 3. AI page scores
         this.fetchAIPageScoresData(db, projectIdObj),
-        
+
         // 5. AI entities
         this.fetchAIEntitiesData(db, projectIdObj),
-        
+
         // 6. Domain technical report
         this.fetchDomainTechnicalData(db, projectIdObj),
-        
+
         // 7. Page issues
         this.fetchPageIssuesData(db, projectIdObj),
-        
+
         // 8. Onpage issues (NEW - for executive summary)
         this.fetchOnpageIssuesData(db, projectIdObj),
-        
+
         // 9. Page data
         this.fetchPageData(db, projectIdObj),
-        
+
         // 10. Link data (external links disabled)
         this.fetchInternalLinksData(db, projectIdObj),
         this.fetchSocialLinksData(db, projectIdObj),
-        
+
         // 11. Performance data (for Core Web Vitals)
         this.fetchPerformanceData(db, projectIdObj)
       ]);
@@ -83,7 +79,6 @@ export class PDFAggregationService {
         project: projectData,
         ai: {
           visibility: aiVisibilityData,
-          issues: aiIssuesData,
           pageScores: aiPageScoresData,
           entities: aiEntitiesData
         },
@@ -120,7 +115,6 @@ export class PDFAggregationService {
         project: { project_name: "Unknown", main_url: "N/A" },
         ai: {
           visibility: { summary: null, pageData: [] },
-          issues: { bySeverity: null, byCategory: null, byRule: null },
           pageScores: { scoreStats: null },
           entities: { entityStats: null, entityTypes: null, relationshipStats: null }
         },
@@ -224,107 +218,6 @@ export class PDFAggregationService {
       status: summary?.aiStatus || 'pending',
       completedAt: summary?.completedAt,
       aggregates: pageData[0] || {}
-    };
-  }
-
-  /**
-   * Fetch AI visibility issues with aggregations
-   */
-  static async fetchAIIssuesData(db, projectId) {
-    const [severityBreakdown, categoryBreakdown, ruleBreakdown] = await Promise.all([
-      // Issues by severity
-      db.collection('seo_ai_visibility_issues')
-        .aggregate([
-          { $match: { projectId } },
-          {
-            $group: {
-              _id: '$severity',
-              count: { $sum: 1 },
-              uniquePages: { $addToSet: '$page_url' }
-            }
-          },
-          {
-            $project: {
-              severity: '$_id',
-              count: 1,
-              pagesAffected: { $size: '$uniquePages' },
-              _id: 0
-            }
-          }
-        ]).toArray(),
-      
-      // Issues by category
-      db.collection('seo_ai_visibility_issues')
-        .aggregate([
-          { $match: { projectId } },
-          {
-            $group: {
-              _id: '$category',
-              totalIssues: { $sum: 1 },
-              uniquePages: { $addToSet: '$page_url' },
-              avgSeverity: { $avg: {
-                $cond: {
-                  if: { $eq: ['$severity', 'high'] },
-                  then: 3,
-                  else: {
-                    $cond: {
-                      if: { $eq: ['$severity', 'medium'] },
-                      then: 2,
-                      else: 1
-                    }
-                  }
-                }
-              }}
-            }
-          },
-          {
-            $project: {
-              category: '$_id',
-              totalIssues: 1,
-              pagesAffected: { $size: '$uniquePages' },
-              avgSeverity: { $round: ['$avgSeverity', 2] },
-              _id: 0
-            }
-          }
-        ]).toArray(),
-      
-      // Issues by rule (top 20)
-      db.collection('seo_ai_visibility_issues')
-        .aggregate([
-          { $match: { projectId } },
-          {
-            $group: {
-              _id: '$rule_id',
-              ruleId: { $first: '$rule_id' },
-              category: { $first: '$category' },
-              severity: { $first: '$severity' },
-              message: { $first: '$message' },
-              pagesAffected: { $addToSet: '$page_url' },
-              avgScore: { $avg: '$rule_score' },
-              count: { $sum: 1 }
-            }
-          },
-          {
-            $project: {
-              ruleId: 1,
-              category: 1,
-              severity: 1,
-              message: 1,
-              pagesAffected: { $size: '$pagesAffected' },
-              avgScore: { $round: ['$avgScore', 2] },
-              count: 1,
-              _id: 0
-            }
-          },
-          { $sort: { pagesAffected: -1 } },
-          { $limit: 20 }
-        ]).toArray()
-    ]);
-
-    return {
-      bySeverity: severityBreakdown,
-      byCategory: categoryBreakdown,
-      byRule: ruleBreakdown
     };
   }
 

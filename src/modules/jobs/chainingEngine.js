@@ -296,7 +296,7 @@ class ChainingEngine {
                   // receives verification:completed and refetches.
                   try {
                     const verifyResult = await taskVerificationService.verifyImplementedTasks(
-                      updatedJob.project_id, requestId
+                      updatedJob.project_id, requestId, updatedJob._id
                     );
                     console.log(`[CHAINING:${requestId}] Task verification complete | verified=${verifyResult.verified} | reopened=${verifyResult.reopened}`);
                   } catch (verifyError) {
@@ -373,7 +373,7 @@ class ChainingEngine {
                   // terminal jobs resolve at nearly the same instant.
                   try {
                     const verifyResult = await taskVerificationService.verifyImplementedTasks(
-                      updatedJob.project_id, requestId
+                      updatedJob.project_id, requestId, updatedJob._id
                     );
                     console.log(`[CHAINING:${requestId}] Task verification complete | verified=${verifyResult.verified} | reopened=${verifyResult.reopened}`);
                   } catch (verifyError) {
@@ -1531,12 +1531,23 @@ class ChainingEngine {
    */
   async _runProjectTaskVerificationJob(job, requestId) {
     try {
+      // claimed_at is what cleanupStaleLocks' existing 'processing' sweep
+      // keys on (Job.find({status:'processing', claimed_at:{$lt:staleTime}})
+      // — jobService.js). Without it, a Node crash between this line and the
+      // 'completed' write below leaves the job stuck at 'processing' forever
+      // with no recovery sweep able to see it (recoverOrphanedUrlVerification
+      // Jobs only matches 'pending'; this job already left that state).
+      // Confirmed via code trace during Phase 3 hardening — not a
+      // hypothetical. Setting it here is enough to bring this job type under
+      // the SAME existing recovery mechanism every other 'processing' job
+      // already relies on, no new sweep needed.
       await jobService.updateJobStatus(job._id, 'processing', {
         started_at: new Date(),
-        last_attempted_at: new Date()
+        last_attempted_at: new Date(),
+        claimed_at: new Date(),
       });
 
-      const verifyResult = await taskVerificationService.verifyImplementedTasks(job.project_id, requestId);
+      const verifyResult = await taskVerificationService.verifyImplementedTasks(job.project_id, requestId, job._id);
 
       const completedJob = await jobService.updateJobStatus(job._id, 'completed', {
         result_data: { verified: verifyResult.verified, reopened: verifyResult.reopened }

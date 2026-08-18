@@ -37,6 +37,9 @@ import subscriptionRoutes from '../modules/subscription/routes/subscriptionRoute
 import pagePurchaseRoutes from '../modules/page_purchase/routes/pagePurchaseRoutes.js';
 import creditPurchaseRoutes from '../modules/credit_purchase/routes/creditPurchaseRoutes.js';
 import systemAdminRoutes from '../modules/system_admin/routes/systemAdminRoutes.js';
+import leadRoutes from '../modules/lead/routes/leadRoutes.js';
+import wordPressRoutes from '../modules/external_integration/routes/wordPressRoutes.js';
+import wordPressPluginRoutes from '../modules/external_integration/routes/wordPressPluginRoutes.js';
 const router = express.Router();
 
 router.use('/auth', authRoutes);
@@ -118,5 +121,21 @@ router.use('/', pagePurchaseRoutes);
 router.use('/', creditPurchaseRoutes);
 // System Admin console (roleId === 1 only; see modules/system_admin/)
 router.use('/', systemAdminRoutes);
+// Lead backend foundation (Phase 1 — authenticated CRUD only, no public
+// capture endpoint yet; see modules/lead/)
+router.use('/leads', leadRoutes);
+// WordPress plugin pairing/heartbeat/form-sync (Phase 3A — structure and
+// form discovery only, no submission capture yet). MUST be registered
+// before the '/wordpress' mount below: wordPressRoutes applies a blanket
+// `router.use(auth)` (JWT) to its entire prefix, which would otherwise
+// swallow every /wordpress/plugin/* request — including /pair, which is
+// deliberately NOT JWT-gated (the pairing token itself is the credential)
+// — before Express ever got a chance to fall through to this more specific
+// router. Express matches mounted prefixes in registration order, so the
+// more specific '/wordpress/plugin' must win first.
+router.use('/wordpress/plugin', wordPressPluginRoutes);
+// WordPress connection layer (Phase 2 — connect/verify/status/disconnect
+// only, no lead capture yet; see modules/external_integration/)
+router.use('/wordpress', wordPressRoutes);
 
 export default router;

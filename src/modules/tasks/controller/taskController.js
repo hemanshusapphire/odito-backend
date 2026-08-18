@@ -1,5 +1,7 @@
 import mongoose from 'mongoose';
 import Task from '../model/Task.js';
+import taskHistoryService from '../service/TaskHistoryService.js';
+import { assertTaskOwnership } from './taskAuthz.js';
 
 function toObjectId(id) {
   try { return new mongoose.Types.ObjectId(id); } catch { return null; }
@@ -40,7 +42,7 @@ export async function createTask(req, res) {
     // Idempotency — return existing task if already created
     const existing = await Task.findOne({ projectId: pid, issueKey, pageUrl });
     if (existing) {
-      console.log('[TASK] Already exists — returning existing task', existing._id);
+      console.log(`[TASK] Already exists — returning existing task | taskId=${existing._id} | projectId=${pid}`);
       return res.status(200).json({ success: true, data: existing, alreadyExists: true });
     }
 
@@ -59,7 +61,16 @@ export async function createTask(req, res) {
     };
 
     if (taskData.status === 'implemented') {
-      taskData.implementedAt = now;
+      const attempt = await taskHistoryService.buildFixAttempt({
+        projectId: pid,
+        issueKey,
+        pageUrl,
+        origin: taskData.origin,
+        recommendationId: taskData.recommendationId,
+        attemptNumber: 1,
+      });
+      taskData.fixHistory = [attempt];
+      taskData.implementedAt = attempt.implementedAt;
     } else if (taskData.status === 'verified_fixed') {
       taskData.verifiedAt = now;
     } else if (taskData.status === 'reopened') {
@@ -68,7 +79,7 @@ export async function createTask(req, res) {
 
     const task = await Task.create(taskData);
 
-    console.log('[TASK] Created', task._id.toString(), '| issueKey:', issueKey, '| pageUrl:', pageUrl, '| status:', task.status);
+    console.log(`[TASK] Created | taskId=${task._id} | projectId=${pid} | issueKey=${issueKey} | pageUrl=${pageUrl} | status=${task.status}`);
 
     emitTaskEvent(pid.toString(), 'task:created', {
       taskId: task._id,
@@ -88,7 +99,7 @@ export async function createTask(req, res) {
       });
       return res.status(200).json({ success: true, data: existing, alreadyExists: true });
     }
-    console.error('[TASK] createTask error:', error.message, error.stack);
+    console.error(`[TASK] createTask error | projectId=${req.body?.projectId} | issueKey=${req.body?.issueKey} | pageUrl=${req.body?.pageUrl}: ${error.message}`, error.stack);
     return res.status(500).json({ success: false, message: 'Failed to create task' });
   }
 }
@@ -105,7 +116,7 @@ export async function createTask(req, res) {
 export async function updateTaskStatus(req, res) {
   try {
     const { taskId } = req.params;
-    const { status } = req.body;
+    const { status, recommendationId } = req.body;
 
     if (!taskId || !status) {
       return res.status(400).json({
@@ -118,6 +129,7 @@ export async function updateTaskStatus(req, res) {
     if (!task) {
       return res.status(404).json({ success: false, message: 'Task not found' });
     }
+    if (!(await assertTaskOwnership(req, res, task))) return;
 
     // Validate transition
     if (!Task.isValidTransition(task.status, status)) {
@@ -133,9 +145,30 @@ export async function updateTaskStatus(req, res) {
     const now = new Date();
 
     switch (status) {
-      case 'implemented':
-        task.implementedAt = now;
+      case 'implemented': {
+        // recommendationId may be supplied fresh on a re-implement pass
+        // (reopened → implemented); otherwise fall back to the one the
+        // task was created with.
+        const recId = recommendationId
+          ? (mongoose.isValidObjectId(recommendationId) ? recommendationId : null)
+          : task.recommendationId;
+        if (recommendationId && recId) {
+          task.recommendationId = recId;
+        }
+
+        const attempt = await taskHistoryService.buildFixAttempt({
+          projectId: task.projectId,
+          issueKey: task.issueKey,
+          pageUrl: task.pageUrl,
+          origin: task.origin,
+          recommendationId: recId,
+          attemptNumber: (task.fixHistory?.length || 0) + 1,
+        });
+        task.fixHistory = task.fixHistory || [];
+        task.fixHistory.push(attempt);
+        task.implementedAt = attempt.implementedAt;
         break;
+      }
       case 'verified_fixed':
         task.verifiedAt = now;
         break;
@@ -146,7 +179,7 @@ export async function updateTaskStatus(req, res) {
 
     await task.save();
 
-    console.log('[TASK] Status updated', task._id.toString(), '→', status);
+    console.log(`[TASK] Status updated | taskId=${task._id} | projectId=${task.projectId} | status=${status}`);
 
     // WebSocket event
     const eventMap = {
@@ -163,7 +196,7 @@ export async function updateTaskStatus(req, res) {
 
     return res.status(200).json({ success: true, data: task });
   } catch (error) {
-    console.error('[TASK] updateTaskStatus error:', error.message, error.stack);
+    console.error(`[TASK] updateTaskStatus error | taskId=${req.params?.taskId} | targetStatus=${req.body?.status}: ${error.message}`, error.stack);
     return res.status(500).json({ success: false, message: 'Failed to update task status' });
   }
 }
@@ -217,7 +250,7 @@ export async function getTasks(req, res) {
       },
     });
   } catch (error) {
-    console.error('[TASK] getTasks error:', error.message);
+    console.error(`[TASK] getTasks error | projectId=${req.query?.projectId}: ${error.message}`);
     return res.status(500).json({ success: false, message: 'Failed to fetch tasks' });
   }
 }
@@ -226,20 +259,135 @@ export async function getTasks(req, res) {
  * GET /tasks/:taskId
  *
  * Get a single task by ID.
+ *
+ * Phase 4 optimization: the full fixHistory array used to be fetched via
+ * .findById().lean() just to read attemptCount/latestAttempt off it in Node
+ * — for a task with a long history (routine re-verification passes can
+ * accumulate reverify_only entries over a project's lifetime, see
+ * TaskVerificationService), that transferred the entire array over the wire
+ * to compute 4 small values and immediately discard the rest. This
+ * aggregation computes them server-side and excludes the raw array from the
+ * response instead — $addFields runs BEFORE $project excludes fixHistory
+ * (order matters: the exclusion must come last, or the computed fields
+ * would have nothing to read), and using exclusion-style projection (only
+ * fixHistory:0) rather than listing every other field keeps this
+ * automatically correct if the Task schema gains new top-level fields later.
  */
 export async function getTaskById(req, res) {
   try {
     const { taskId } = req.params;
-    const task = await Task.findById(taskId).lean();
+    const tid = toObjectId(taskId);
+    if (!tid) {
+      return res.status(400).json({ success: false, message: 'Invalid taskId' });
+    }
+
+    const results = await Task.aggregate([
+      { $match: { _id: tid } },
+      { $addFields: {
+          attemptCount: { $size: { $ifNull: ['$fixHistory', []] } },
+          // Double $ifNull: the inner one handles a genuinely missing
+          // fixHistory field (legacy task); the outer one is required
+          // because $arrayElemAt on an out-of-bounds index (empty array,
+          // or index -1 on a 0-length array) "does not return a result" per
+          // MongoDB's own docs — that's an absent field, not an explicit
+          // null, and an absent field is dropped by JSON serialization
+          // instead of coming through as latestAttempt:null.
+          latestAttempt: { $ifNull: [{ $arrayElemAt: [{ $ifNull: ['$fixHistory', []] }, -1] }, null] },
+          hasOlderAttempts: { $gt: [{ $size: { $ifNull: ['$fixHistory', []] } }, 1] },
+          historyAvailable: { $gt: [{ $size: { $ifNull: ['$fixHistory', []] } }, 0] },
+      } },
+      { $project: { fixHistory: 0 } },
+    ]);
+    const task = results[0];
 
     if (!task) {
       return res.status(404).json({ success: false, message: 'Task not found' });
     }
+    if (!(await assertTaskOwnership(req, res, task))) return;
 
     return res.status(200).json({ success: true, data: task });
   } catch (error) {
-    console.error('[TASK] getTaskById error:', error.message);
+    console.error(`[TASK] getTaskById error | taskId=${req.params?.taskId}: ${error.message}`);
     return res.status(500).json({ success: false, message: 'Failed to fetch task' });
+  }
+}
+
+/**
+ * GET /tasks/:taskId/history?limit=&before=
+ *
+ * Older fixHistory attempts, newest-first, paginated — kept off the main
+ * detail endpoint so the common case (current status + latest attempt) stays
+ * a light payload. `before` is an attemptNumber cursor: return attempts with
+ * attemptNumber < before.
+ *
+ * Phase 4 optimization: this mirrors the exact JS logic it replaces
+ * (fixHistory.slice(0,-1).reverse().filter(before-cursor).slice(0,limit))
+ * as a MongoDB aggregation, so only the requested page (+ a count) crosses
+ * the wire instead of the entire array regardless of how many attempts
+ * exist. attemptNumber is always sequential 1..N matching array position
+ * (see TaskHistoryService/TaskVerificationService — every push sets it to
+ * fixHistory.length+1), so slicing by array position and filtering by
+ * attemptNumber stay equivalent to the original implementation.
+ */
+export async function getTaskHistory(req, res) {
+  try {
+    const { taskId } = req.params;
+    const tid = toObjectId(taskId);
+    if (!tid) {
+      return res.status(400).json({ success: false, message: 'Invalid taskId' });
+    }
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+    const before = req.query.before ? parseInt(req.query.before) : null;
+
+    const olderFilterCond = before != null
+      ? { $lt: ['$$a.attemptNumber', before] }
+      : true;
+
+    const results = await Task.aggregate([
+      { $match: { _id: tid } },
+      { $project: { projectId: 1, history: { $ifNull: ['$fixHistory', []] } } },
+      { $project: {
+          projectId: 1,
+          // All but the last element (the latest attempt, already served by
+          // GET /tasks/:taskId). $slice's 3-arg form REJECTS a count of 0
+          // ("Third argument to $slice must be positive") — an empty/
+          // 1-length array can't just clamp the count to 0, it must skip
+          // $slice entirely and yield [] directly.
+          older: {
+            $cond: [
+              { $lte: [{ $size: '$history' }, 1] },
+              [],
+              { $slice: ['$history', 0, { $subtract: [{ $size: '$history' }, 1] }] },
+            ],
+          },
+      } },
+      { $project: {
+          projectId: 1,
+          filtered: { $filter: { input: '$older', as: 'a', cond: olderFilterCond } },
+      } },
+      { $project: {
+          projectId: 1,
+          totalFiltered: { $size: '$filtered' },
+          page: { $slice: [{ $reverseArray: '$filtered' }, limit] },
+      } },
+    ]);
+    const result = results[0];
+
+    if (!result) {
+      return res.status(404).json({ success: false, message: 'Task not found' });
+    }
+    if (!(await assertTaskOwnership(req, res, result))) return;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        attempts: result.page,
+        hasMore: result.totalFiltered > limit,
+      },
+    });
+  } catch (error) {
+    console.error(`[TASK] getTaskHistory error | taskId=${req.params?.taskId}: ${error.message}`);
+    return res.status(500).json({ success: false, message: 'Failed to fetch task history' });
   }
 }
 
@@ -260,7 +408,7 @@ export async function getTaskSummary(req, res) {
 
     return res.status(200).json({ success: true, data: summary });
   } catch (error) {
-    console.error('[TASK] getTaskSummary error:', error.message);
+    console.error(`[TASK] getTaskSummary error | projectId=${req.query?.projectId}: ${error.message}`);
     return res.status(500).json({ success: false, message: 'Failed to fetch task summary' });
   }
 }
@@ -322,7 +470,7 @@ export async function getActiveTaskUrls(req, res) {
       },
     });
   } catch (error) {
-    console.error('[TASK] getActiveTaskUrls error:', error.message);
+    console.error(`[TASK] getActiveTaskUrls error | projectId=${req.query?.projectId} | issueKey=${req.query?.issueKey}: ${error.message}`);
     return res.status(500).json({ success: false, message: 'Failed to fetch active task URLs' });
   }
 }
@@ -348,6 +496,7 @@ export async function deleteTask(req, res) {
     if (!task || task.isDeleted) {
       return res.status(404).json({ success: false, message: 'Task not found' });
     }
+    if (!(await assertTaskOwnership(req, res, task))) return;
 
     // Permission: reject verified_fixed — these are audit records
     if (task.status === 'verified_fixed') {
@@ -372,7 +521,7 @@ export async function deleteTask(req, res) {
 
     return res.status(200).json({ success: true, data: { taskId: task._id } });
   } catch (error) {
-    console.error('[TASK] deleteTask error:', error.message, error.stack);
+    console.error(`[TASK] deleteTask error | taskId=${req.params?.taskId}: ${error.message}`, error.stack);
     return res.status(500).json({ success: false, message: 'Failed to delete task' });
   }
 }

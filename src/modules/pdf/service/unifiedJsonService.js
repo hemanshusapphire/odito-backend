@@ -796,7 +796,7 @@ export class UnifiedJsonService {
     const sources = [];
     
     if (aggregatedData.project) sources.push('seoprojects');
-    if (aggregatedData.ai) sources.push('seo_ai_visibility', 'seo_ai_visibility_issues', 'ai_visibility_entities');
+    if (aggregatedData.ai) sources.push('seo_ai_visibility', 'ai_visibility_entities');
     if (aggregatedData.technical) sources.push('domain_technical_reports');
     if (aggregatedData.pages) sources.push('seo_page_data', 'seo_page_issues');
     if (aggregatedData.links) sources.push('seo_internal_links', 'seo_social_links');  // External links disabled

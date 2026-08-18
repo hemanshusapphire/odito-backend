@@ -249,58 +249,6 @@ export const getPageScore = async (req, res) => {
   }
 };
 
-// Get AI Visibility Page Issues
-// REFACTORED: Now uses service layer - Phase 2 Refactoring
-// Original logic moved to AIVisibilityService.getAIVisibilityPageIssues()
-export const getAIVisibilityPageIssues = async (req, res) => {
-  try {
-    const { page_url } = req.query;
-    
-    // Validate required parameters
-    if (!page_url) {
-      return res.status(400).json(ResponseUtil.validationError('page_url parameter is required'));
-    }
-    
-    if (!req.project) {
-      return res.status(403).json(ResponseUtil.error('Project access validation failed', 403));
-    }
-    
-    console.log('🔍 AI Visibility Page Issues Controller:', {
-      projectId: req.project._id,
-      page_url: page_url,
-      projectValid: !!req.project
-    });
-    
-    const result = await AIVisibilityService.getAIVisibilityPageIssues(req.project, page_url);
-    return res.json(ResponseUtil.success(result.data, 'AI visibility page issues retrieved successfully'));
-  } catch (error) {
-    LoggerUtil.error('Error getting AI visibility page issues', error, { 
-      projectId: req.params?.id, 
-      page_url: req.query?.page_url,
-      errorMessage: error.message 
-    });
-    
-    // Handle specific error cases
-    let statusCode = 500;
-    let message = 'Failed to get AI visibility page issues';
-    
-    if (error.message.includes('Project is required')) {
-      statusCode = 403;
-      message = 'Project access required';
-    } else if (error.message.includes('Page URL is required')) {
-      statusCode = 400;
-      message = 'Page URL is required';
-    } else if (error.message.includes('Database error')) {
-      statusCode = 500;
-      message = 'Database query failed';
-    }
-    
-    return res.status(statusCode).json(
-      error.response || ResponseUtil.error(message, statusCode)
-    );
-  }
-};
-
 // Get issue URLs
 // REFACTORED: Now uses service layer - Phase 2 Refactoring  
 // Original logic moved to getIssueUrlsService()

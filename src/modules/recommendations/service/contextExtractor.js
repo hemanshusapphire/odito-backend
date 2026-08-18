@@ -60,54 +60,30 @@ class ContextExtractor {
 
   /**
    * Extract context for an AI visibility rule across all affected pages.
-   * Source: seo_ai_visibility_issues (keyed by rule_id)
-   * 
-   * @param {string} projectId - Project ID
-   * @param {string} ruleId - Rule ID to get affected pages for
+   *
+   * Phase 4: used to source sampleUrls from seo_ai_visibility_issues
+   * (keyed by rule_id) — that collection is confirmed dead (zero writers
+   * anywhere in the codebase; see project_ai_visibility_cleanup memory).
+   * This path is only reachable today for legacy pre-V2 rule_ids (nothing
+   * currently live sends one), and the query could only ever return zero
+   * rows, so sampleUrls is now empty directly instead of via a wasted
+   * query — the function's behavior (early-return with a default context)
+   * is unchanged.
+   *
+   * @param {string} projectId - Project ID (unused now — kept for call-site signature compatibility)
+   * @param {string} ruleId - Rule ID (unused now — kept for call-site signature compatibility)
    * @returns {Promise<Object>} { context, sampleUrls, issueSource }
    */
   async extractForRule(projectId, ruleId) {
-    const db = mongoose.connection.db;
-    const projectObjectId = new ObjectId(projectId);
-
-    // Get sample affected pages from AI visibility issues
-    const affectedPages = await db.collection('seo_ai_visibility_issues')
-      .find({ projectId: projectObjectId, rule_id: ruleId })
-      .limit(10)
-      .project({ page_url: 1 })
-      .toArray();
-
-    const sampleUrls = affectedPages.map(p => p.page_url);
-
-    if (sampleUrls.length === 0) {
-      return {
-        context: this._defaultContext(),
-        sampleUrls: [],
-        issueSource: ISSUE_SOURCE.AI_VISIBILITY,
-      };
-    }
-
-    // Get page data for first affected page (representative)
-    const [aiVisData, pageSummary, pageData] = await Promise.all([
-      db.collection('seo_ai_visibility').findOne({
-        projectId: projectObjectId,
-        page_url: sampleUrls[0],
-      }),
-      db.collection('seo_page_summary').findOne({
-        projectId: projectObjectId,
-        page_url: sampleUrls[0],
-      }),
-      db.collection('seo_page_data').findOne({
-        projectId: projectObjectId,
-        page_url: sampleUrls[0],
-      }),
-    ]);
-
-    // Detect dominant page type across affected pages
-    const dominantPageType = await this._getDominantPageType(db, projectObjectId, sampleUrls);
-
-    const context = this._buildContext(aiVisData, pageSummary, pageData, dominantPageType);
-    return { context, sampleUrls, issueSource: ISSUE_SOURCE.AI_VISIBILITY };
+    // With sampleUrls always empty (see docblock above), every branch that
+    // depended on a non-empty result is now permanently unreachable —
+    // removed rather than left as dead code behind an if that can never be
+    // false.
+    return {
+      context: this._defaultContext(),
+      sampleUrls: [],
+      issueSource: ISSUE_SOURCE.AI_VISIBILITY,
+    };
   }
 
   /**

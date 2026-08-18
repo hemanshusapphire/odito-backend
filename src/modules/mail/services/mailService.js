@@ -15,6 +15,7 @@ import { InvoiceAvailable } from '../templates/billing/InvoiceAvailable.js';
 import { CreditsPurchased } from '../templates/billing/CreditsPurchased.js';
 import { AdditionalPagesPurchased } from '../templates/billing/AdditionalPagesPurchased.js';
 import { AuditCompleted } from '../templates/audit/AuditCompleted.js';
+import { NewWordPressLead } from '../templates/leads/NewWordPressLead.js';
 import { CustomPlanRequestReceived } from '../templates/sales/CustomPlanRequestReceived.js';
 import { CustomPlanRequestAdminNotification } from '../templates/sales/CustomPlanRequestAdminNotification.js';
 import { MAIL_TYPES } from '../constants/emailTypes.js';
@@ -54,6 +55,9 @@ const TEMPLATE_REGISTRY = {
 
   // Audit (Phase 3)
   [MAIL_TYPES.AUDIT_COMPLETED]: { subject: 'Your website audit is complete — Odito', Component: AuditCompleted },
+
+  // WordPress Lead Capture (Phase 3C)
+  [MAIL_TYPES.NEW_WORDPRESS_LEAD]: { subject: 'New lead received from your website — Odito', Component: NewWordPressLead },
 
   // Custom Plan requests (Upgrade unification, Phase 4)
   [MAIL_TYPES.CUSTOM_PLAN_REQUEST_RECEIVED]: { subject: 'We received your custom plan request — Odito', Component: CustomPlanRequestReceived },
