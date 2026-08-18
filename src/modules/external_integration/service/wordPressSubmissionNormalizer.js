@@ -21,8 +21,8 @@ const MAX_EXTRA_FIELDS_IN_MESSAGE = 20;
 
 const FIELD_CANDIDATES = {
   email: ['email', 'email_address', 'e_mail', 'your_email'],
-  phone: ['phone', 'telephone', 'tel', 'mobile', 'mobile_number', 'phone_number', 'your_phone'],
-  company: ['company', 'company_name', 'organization', 'organisation', 'business', 'business_name', 'your_company'],
+  phone: ['phone', 'telephone', 'tel', 'mobile', 'mobile_number', 'phone_number', 'phone_no', 'your_phone'],
+  company: ['company', 'company_name', 'organization', 'organisation', 'business', 'business_name', 'your_company', 'agency', 'agency_name'],
   message: ['message', 'comments', 'comment', 'description', 'enquiry', 'inquiry', 'your_message'],
   name: ['name', 'full_name', 'fullname', 'your_name'],
 };

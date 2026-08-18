@@ -171,7 +171,9 @@ function odito_init() {
 	require_once ODITO_PLUGIN_DIR . 'includes/class-odito-connection.php';
 	require_once ODITO_PLUGIN_DIR . 'includes/class-odito-forms.php';
 	require_once ODITO_PLUGIN_DIR . 'includes/class-odito-queue.php';
+	require_once ODITO_PLUGIN_DIR . 'includes/class-odito-submission-dispatcher.php';
 	require_once ODITO_PLUGIN_DIR . 'includes/class-odito-cf7-capture.php';
+	require_once ODITO_PLUGIN_DIR . 'includes/class-odito-divi-capture.php';
 
 	if ( is_admin() ) {
 		require_once ODITO_PLUGIN_DIR . 'includes/class-odito-admin.php';
@@ -179,6 +181,14 @@ function odito_init() {
 	}
 
 	Odito_Cf7_Capture::init();
+
+	// Divi Builder is a licensed, closed-source product not present in any
+	// environment this plugin was developed/tested against — init() is
+	// unconditional (matching CF7's own init(), which likewise doesn't
+	// gate on class_exists) but the hook itself
+	// (wp_ajax_et_pb_submit_form) simply never fires on a site that isn't
+	// running Divi, so this is a safe no-op there.
+	Odito_Divi_Capture::init();
 
 	add_action( 'odito_cron_sync', array( 'Odito_Connection', 'run_scheduled_sync' ) );
 	add_action( 'odito_process_queue', array( 'Odito_Cf7_Capture', 'process_queue' ) );

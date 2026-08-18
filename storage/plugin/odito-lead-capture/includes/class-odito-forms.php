@@ -128,60 +128,85 @@ class Odito_Forms {
 		$forms = array();
 
 		foreach ( self::get_scannable_posts() as $post_id ) {
-			$content = get_post_field( 'post_content', $post_id );
-			if ( false === strpos( $content, 'et_pb_contact_form' ) ) {
-				continue;
-			}
+			$forms = array_merge( $forms, self::find_divi_forms_in_post( $post_id ) );
+		}
 
-			$matches = array();
-			preg_match_all(
-				'/\[et_pb_contact_form\b([^\]]*)\](.*?)\[\/et_pb_contact_form\]/s',
-				$content,
-				$matches,
-				PREG_SET_ORDER
-			);
+		return $forms;
+	}
 
-			foreach ( $matches as $index => $match ) {
-				$container_atts = shortcode_parse_atts( $match[1] );
-				$inner_content  = $match[2];
+	/**
+	 * Parses the Divi contact-form shortcodes in ONE post's content and
+	 * returns the same form-descriptor shape detect_divi() has always
+	 * produced (externalId `divi-<post_id>-<index>`, `name`, `type` per
+	 * field), plus an additive `raw_field_id` on each field (Divi's own
+	 * `field_id` shortcode attribute, kept separately from the human-facing
+	 * `name` even when `field_title` is what actually became `name`).
+	 *
+	 * Extracted out of detect_divi() (pure refactor, same regex/parsing,
+	 * same output for the sync path) so Divi submission capture can resolve
+	 * "which synced form did this submission come from" using the exact
+	 * same parsing Odito already syncs — not a second, separately-maintained
+	 * form-identification system.
+	 */
+	public static function find_divi_forms_in_post( $post_id ) {
+		$content = get_post_field( 'post_content', $post_id );
+		if ( empty( $content ) || false === strpos( $content, 'et_pb_contact_form' ) ) {
+			return array();
+		}
 
-				$field_matches = array();
-				preg_match_all( '/\[et_pb_contact_field\b([^\]]*)\]/', $inner_content, $field_matches );
+		$forms = array();
 
-				$fields = array();
-				foreach ( $field_matches[1] as $field_atts_str ) {
-					$field_atts = shortcode_parse_atts( $field_atts_str );
+		$matches = array();
+		preg_match_all(
+			'/\[et_pb_contact_form\b([^\]]*)\](.*?)\[\/et_pb_contact_form\]/s',
+			$content,
+			$matches,
+			PREG_SET_ORDER
+		);
 
-					$field_name = '';
-					if ( is_array( $field_atts ) ) {
-						if ( ! empty( $field_atts['field_title'] ) ) {
-							$field_name = $field_atts['field_title'];
-						} elseif ( ! empty( $field_atts['field_id'] ) ) {
-							$field_name = $field_atts['field_id'];
-						}
+		foreach ( $matches as $index => $match ) {
+			$container_atts = shortcode_parse_atts( $match[1] );
+			$inner_content  = $match[2];
+
+			$field_matches = array();
+			preg_match_all( '/\[et_pb_contact_field\b([^\]]*)\]/', $inner_content, $field_matches );
+
+			$fields = array();
+			foreach ( $field_matches[1] as $field_atts_str ) {
+				$field_atts = shortcode_parse_atts( $field_atts_str );
+
+				$raw_field_id = is_array( $field_atts ) && ! empty( $field_atts['field_id'] ) ? $field_atts['field_id'] : '';
+
+				$field_name = '';
+				if ( is_array( $field_atts ) ) {
+					if ( ! empty( $field_atts['field_title'] ) ) {
+						$field_name = $field_atts['field_title'];
+					} elseif ( ! empty( $field_atts['field_id'] ) ) {
+						$field_name = $field_atts['field_id'];
 					}
-
-					if ( empty( $field_name ) || self::is_sensitive_field( $field_name ) ) {
-						continue;
-					}
-
-					$field_type = is_array( $field_atts ) && ! empty( $field_atts['field_type'] ) ? $field_atts['field_type'] : 'input';
-					$fields[]   = array(
-						'name' => $field_name,
-						'type' => self::normalize_divi_field_type( $field_type ),
-					);
 				}
 
-				$title = is_array( $container_atts ) && ! empty( $container_atts['title'] ) ? $container_atts['title'] : get_the_title( $post_id );
+				if ( empty( $field_name ) || self::is_sensitive_field( $field_name ) ) {
+					continue;
+				}
 
-				$forms[] = array(
-					'externalId' => 'divi-' . $post_id . '-' . $index,
-					'provider'   => 'divi',
-					'name'       => $title ? $title : ( 'Divi Contact Form #' . $post_id . '-' . $index ),
-					'pageUrl'    => get_permalink( $post_id ),
-					'fields'     => $fields,
+				$field_type = is_array( $field_atts ) && ! empty( $field_atts['field_type'] ) ? $field_atts['field_type'] : 'input';
+				$fields[]   = array(
+					'name'         => $field_name,
+					'type'         => self::normalize_divi_field_type( $field_type ),
+					'raw_field_id' => $raw_field_id,
 				);
 			}
+
+			$title = is_array( $container_atts ) && ! empty( $container_atts['title'] ) ? $container_atts['title'] : get_the_title( $post_id );
+
+			$forms[] = array(
+				'externalId' => 'divi-' . $post_id . '-' . $index,
+				'provider'   => 'divi',
+				'name'       => $title ? $title : ( 'Divi Contact Form #' . $post_id . '-' . $index ),
+				'pageUrl'    => get_permalink( $post_id ),
+				'fields'     => $fields,
+			);
 		}
 
 		return $forms;

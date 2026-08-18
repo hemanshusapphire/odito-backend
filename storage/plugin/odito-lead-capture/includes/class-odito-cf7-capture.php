@@ -159,33 +159,14 @@ class Odito_Cf7_Capture {
 	}
 
 	/**
-	 * Exactly one synchronous attempt (Section 18: "Do NOT retry
-	 * synchronously multiple times inside the form request") with a short
-	 * timeout. Only genuinely temporary failures are queued — a 400
-	 * (permanent validation error, e.g. the form hasn't been synced yet)
-	 * or 401 (revoked credential) would fail identically on every retry,
-	 * so queuing those would just churn the retry table for nothing.
+	 * Section 18: "Do NOT retry synchronously multiple times inside the
+	 * form request" — delegates the actual send/classify/queue-on-failure
+	 * decision to Odito_Submission_Dispatcher (shared with Divi capture;
+	 * see that file — same rules, same behavior as before this was
+	 * extracted out of this class).
 	 */
 	private static function send_with_fallback( $payload ) {
-		$result = Odito_Api::submit_form( $payload );
-
-		if ( $result['success'] ) {
-			return;
-		}
-
-		if ( 401 === $result['status'] ) {
-			Odito_Connection::record_heartbeat_result( $result ); // reuses the existing "credential revoked -> flip to not_connected" handling
-			return;
-		}
-
-		if ( null !== $result['status'] && $result['status'] < 500 && 429 !== $result['status'] ) {
-			// Permanent client-side rejection (400 etc.) — do not queue.
-			return;
-		}
-
-		// Temporary failure (network error, timeout, 429, 5xx) — queue for
-		// background retry rather than blocking or retrying inline.
-		Odito_Queue::enqueue( $payload['eventId'], $payload );
+		Odito_Submission_Dispatcher::dispatch( $payload );
 	}
 
 	/**
