@@ -1,13 +1,13 @@
 <?php
 /**
  * Plugin Name:       Odito Lead Capture
- * Plugin URI:        https://odito.ai
+ * Plugin URI:        https://oditoai.com
  * Description:       Secure integration between WordPress websites and Odito. Connects your site to your Odito project, detects your forms (Contact Form 7, Divi, generic HTML), and turns real Contact Form 7 submissions into Odito leads. Sensitive fields (passwords, payment details, security tokens) are always excluded. Divi and generic form submission capture are not yet supported — see readme.txt.
  * Version:           1.2.0
  * Requires at least: 5.6
  * Requires PHP:      7.4
  * Author:            Odito
- * Author URI:        https://odito.ai
+ * Author URI:        https://oditoai.com
  * License:           GPL v2 or later
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       odito-lead-capture
