@@ -40,6 +40,13 @@ import systemAdminRoutes from '../modules/system_admin/routes/systemAdminRoutes.
 import leadRoutes from '../modules/lead/routes/leadRoutes.js';
 import wordPressRoutes from '../modules/external_integration/routes/wordPressRoutes.js';
 import wordPressPluginRoutes from '../modules/external_integration/routes/wordPressPluginRoutes.js';
+import metaRoutes from '../modules/social_meta/routes/metaRoutes.js';
+import socialAccountRoutes from '../modules/social_meta/routes/socialAccountRoutes.js';
+import facebookRoutes from '../modules/social_meta/routes/facebookRoutes.js';
+import instagramRoutes from '../modules/social_meta/routes/instagramRoutes.js';
+import feedRoutes from '../modules/social_meta/routes/feedRoutes.js';
+import socialPublishingRoutes from '../modules/social_meta/routes/socialPublishingRoutes.js';
+import socialMediaRoutes from '../modules/social_meta/routes/socialMediaRoutes.js';
 const router = express.Router();
 
 router.use('/auth', authRoutes);
@@ -137,5 +144,43 @@ router.use('/wordpress/plugin', wordPressPluginRoutes);
 // WordPress connection layer (Phase 2 — connect/verify/status/disconnect
 // only, no lead capture yet; see modules/external_integration/)
 router.use('/wordpress', wordPressRoutes);
+// Meta (Facebook + Instagram) OAuth foundation (Phase 1 — connection
+// round-trip only: no token persistence, no Page/Instagram discovery, no
+// analytics yet; see modules/social_meta/). Each route sets its own auth
+// requirement individually (/start is authenticated, /callback is public
+// since Meta redirects the browser here directly), so — unlike the
+// WordPress mount above — there's no blanket-auth ordering hazard to
+// worry about with this single mount.
+router.use('/social/meta', metaRoutes);
+
+// Real, MongoDB-sourced connection status for any connected social
+// platform (Facebook/Instagram today) — the piece Phase 2/3 deferred and
+// whose absence caused "Connected" to reset to "Not Connected" on every
+// page refresh, since nothing previously asked the backend for real state.
+router.use('/social/accounts', socialAccountRoutes);
+
+// Real Facebook Page data (profile/posts/insights) for the dashboard —
+// never fake/demo values; returns connected:false + a reason when the
+// stored token is invalid or Meta has no data to give.
+router.use('/social/facebook', facebookRoutes);
+
+// Real Instagram Overview dashboard data (post count, engagements,
+// followers gained, likes, comments-vs-likes chart) — replaces the
+// frontend's static lib/socialMediaDummyData.js Instagram card.
+router.use('/social/instagram', instagramRoutes);
+
+// Real Facebook + Instagram Feeds (posts/media synced from Meta into
+// MongoDB by socialSyncService.js) — replaces the frontend's static
+// lib/socialFeedsDummyData.js. Never fake data; x/linkedin/tiktok are not
+// integrated yet and report real 0 counts, never a placeholder number.
+router.use('/social/feeds', feedRoutes);
+
+// Real Facebook + Instagram publishing (drafts, scheduling, and actual
+// Meta publish attempts via platformAdapters/) — see socialPublishingService.js.
+router.use('/social/publishing', socialPublishingRoutes);
+
+// Media upload for social posts (image/video -> a public HTTPS URL usable
+// by the Facebook/Instagram Graph API adapters) — see mediaStorageService.js.
+router.use('/social/media', socialMediaRoutes);
 
 export default router;

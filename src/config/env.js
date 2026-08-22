@@ -1,5 +1,6 @@
 // Environment configuration and validation - PRODUCTION READY
 import dotenv from 'dotenv';
+import { isPubliclyReachableUrl } from '../utils/publicUrlCheck.js';
 
 // Load environment variables
 dotenv.config();
@@ -68,6 +69,30 @@ export const validateEnvironment = () => {
     warnings.forEach(varName => {
       console.warn(`   - ${varName}`);
     });
+  }
+
+  // Social publishing (Facebook/Instagram media uploads) needs Meta's own
+  // servers to fetch BACKEND_URL/storage/... over the public internet —
+  // a live Instagram container-creation call against a real
+  // http://localhost:5000/... URL was confirmed to fail with Meta's own
+  // OAuthException code 9004 ("Only photo or video can be accepted as
+  // media type"), purely because Meta cannot reach localhost. This never
+  // blocks LOCAL DEVELOPMENT (localhost is expected and fine there — the
+  // app already fails fast and clearly per-publish via
+  // FACEBOOK_MEDIA_URL_UNREACHABLE/INSTAGRAM_MEDIA_URL_UNREACHABLE
+  // instead of silently doing nothing) — it only warns at PRODUCTION
+  // startup, so a misconfigured deploy is caught immediately in the logs
+  // rather than discovered later as a string of failed publishes.
+  // Warn-only, not a hard exit: BACKEND_URL also serves screenshots/
+  // audio/video/PDF reports used by features unrelated to social
+  // publishing, so refusing to boot at all over this one feature's
+  // requirement would be disproportionate.
+  if (process.env.NODE_ENV === 'production' && process.env.BACKEND_URL && !isPubliclyReachableUrl(`${process.env.BACKEND_URL}/storage/social_media/probe`)) {
+    console.warn('⚠️  PRODUCTION WARNING: BACKEND_URL is not a public HTTPS origin:');
+    console.warn(`   - BACKEND_URL=${process.env.BACKEND_URL}`);
+    console.warn('   Facebook/Instagram media (image/video) publishing will fail for every attempt —');
+    console.warn('   Meta\'s servers cannot fetch media from a localhost/private/non-HTTPS URL.');
+    console.warn('   Text-only publishing is unaffected. Set BACKEND_URL to your real public HTTPS domain to fix this.');
   }
 
   return {

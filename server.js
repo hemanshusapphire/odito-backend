@@ -83,6 +83,7 @@ import { startWeeklyRecrawlScheduler } from './src/modules/jobs/service/weeklyRe
 import { startDeletedProjectPurgeScheduler } from './src/modules/jobs/service/deletedProjectPurgeScheduler.js';
 import { startStaleLockScheduler } from './src/modules/jobs/service/staleLockScheduler.js';
 import { startVerificationBatchRecoveryScheduler } from './src/modules/verification/service/verificationBatchRecoveryScheduler.js';
+import { startSocialScheduler } from './src/modules/social_meta/service/socialSchedulerService.js';
 import { handleStripeWebhook } from './src/modules/subscription/controller/subscriptionController.js';
 import auth from './src/modules/user/middleware/auth.js';
 import { requireAdmin } from './src/middleware/auth.middleware.js';
@@ -259,6 +260,13 @@ const startServer = async () => {
   // Verification Batch stuck in AGGREGATING (missing/orphaned aggregation
   // jobs, an interrupted barrier, etc).
   startVerificationBatchRecoveryScheduler();
+
+  // Social Publishing: per-minute cron that actually publishes scheduled
+  // posts to real Facebook/Instagram accounts once they're due. OFF by
+  // default — set SOCIAL_SCHEDULER_ENABLED=true to turn it on (see
+  // socialSchedulerService.js for why this one defaults OFF unlike every
+  // other scheduler above).
+  startSocialScheduler();
 
 
 
