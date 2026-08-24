@@ -2,7 +2,7 @@ import { signOAuthState, verifyOAuthState } from '../../../utils/oauthState.js';
 import { buildAuthorizationUrl, exchangeCodeForToken, fetchGrantedScopes } from '../service/metaOAuthService.js';
 import { getUserPages } from '../service/metaPageService.js';
 import { discoverInstagramForPage } from '../service/metaInstagramService.js';
-import { persistDiscoveredFacebookPages } from '../service/facebookAccountService.js';
+import { persistDiscoveredFacebookPages, enrichPagesWithConnectionState } from '../service/facebookAccountService.js';
 import PendingMetaConnection, { PENDING_TTL_MS } from '../model/PendingMetaConnection.js';
 import { ResponseUtil } from '../../../utils/ResponseUtil.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
@@ -322,8 +322,15 @@ export async function getMetaPages(req, res) {
       picture: page.picture,
     }));
 
-    LoggerUtil.service('MetaPages', 'list', 'completed', { projectId, pageCount: safePages.length });
-    return res.json(ResponseUtil.success({ pages: safePages }));
+    // Cross-referenced against this project's already-persisted
+    // SocialAccount rows in one $in query (see enrichPagesWithConnectionState's
+    // own comment) — never a per-Page lookup, so this stays a single extra
+    // query regardless of whether Meta returned 1 or 19 Pages. `safePages`
+    // already has accessToken stripped before this ever runs.
+    const enrichedPages = await enrichPagesWithConnectionState({ projectId, pages: safePages });
+
+    LoggerUtil.service('MetaPages', 'list', 'completed', { projectId, pageCount: enrichedPages.length });
+    return res.json(ResponseUtil.success({ pages: enrichedPages }));
   } catch (error) {
     LoggerUtil.error('[META_PAGES] Failed to list Pages', { message: error.message }, { projectId });
     return res.status(500).json(ResponseUtil.error('Failed to load Facebook Pages', 500, { code: 'META_PAGES_FETCH_FAILED' }));

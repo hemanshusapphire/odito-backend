@@ -259,6 +259,75 @@ describe('getMetaPages / selectMetaPage — real controllers + real Mongo fixtur
     assert.ok(!JSON.stringify(res.body).includes(page.accessToken));
   });
 
+  // Root-cause regression coverage for a real reported UX bug: the Page
+  // picker shown right after OAuth had no idea some of the discovered
+  // Pages were already connected from an earlier session, so it showed a
+  // bare "Connect" for every single one. getMetaPages must now cross-
+  // reference the project's existing SocialAccount rows in one $in query
+  // (see facebookAccountService.enrichPagesWithConnectionState) and flag
+  // each Page's real connection state.
+  test('4b: getMetaPages flags a Page already persisted as a SocialAccount as alreadyConnected (and isActive if it is the active one), while a genuinely new Page is neither', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const alreadyConnectedPage = fakePage({ name: 'Already Connected Page' });
+    const newPage = fakePage({ name: 'Brand New Page' });
+
+    await SocialAccount.create({
+      user_id: userA, project_id: projectA._id, platform: 'facebook',
+      platformAccountId: alreadyConnectedPage.id, platformAccountName: alreadyConnectedPage.name,
+      accountType: 'page', pageId: alreadyConnectedPage.id, accessToken: 'real-token',
+      status: 'active', isActive: true,
+    });
+
+    await PendingMetaConnection.create({
+      user_id: userA, project_id: projectA._id, userAccessToken: 'userA-token',
+      pages: [alreadyConnectedPage, newPage], expiresAt: new Date(Date.now() + PENDING_TTL_MS),
+    });
+
+    const req = { user: { _id: userA }, projectId: projectA._id.toString() };
+    const res = mockRes();
+    await getMetaPages(req, res);
+
+    const pages = res.body.data.pages;
+    const already = pages.find((p) => p.id === alreadyConnectedPage.id);
+    const fresh = pages.find((p) => p.id === newPage.id);
+
+    assert.equal(already.alreadyConnected, true);
+    assert.equal(already.isActive, true);
+    assert.equal(fresh.alreadyConnected, false);
+    assert.equal(fresh.isActive, false);
+    // Still no token, regardless of connection state.
+    assert.ok(!('accessToken' in already));
+    assert.ok(!('accessToken' in fresh));
+  });
+
+  test('4c: a Page connected to a DIFFERENT project is never reported as alreadyConnected here (project-scoped, not just Page-ID-scoped)', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const otherProject = await SeoProject.create({
+      user_id: userA, project_name: `Other Enrichment Project ${Date.now()}`, main_url: 'https://other-enrich.example.com',
+      seo_scope: 'local', keywords: ['other'],
+    });
+    const sharedPage = fakePage({ name: 'Shared Page ID Across Projects' });
+    await SocialAccount.create({
+      user_id: userA, project_id: otherProject._id, platform: 'facebook',
+      platformAccountId: sharedPage.id, platformAccountName: sharedPage.name,
+      accountType: 'page', pageId: sharedPage.id, accessToken: 'real-token', status: 'active', isActive: true,
+    });
+
+    await PendingMetaConnection.create({
+      user_id: userA, project_id: projectA._id, userAccessToken: 'userA-token',
+      pages: [sharedPage], expiresAt: new Date(Date.now() + PENDING_TTL_MS),
+    });
+
+    const req = { user: { _id: userA }, projectId: projectA._id.toString() };
+    const res = mockRes();
+    await getMetaPages(req, res);
+
+    assert.equal(res.body.data.pages[0].alreadyConnected, false);
+
+    await SocialAccount.deleteMany({ project_id: otherProject._id });
+    await SeoProject.deleteOne({ _id: otherProject._id });
+  });
+
   test('5: getMetaPages with zero Pages is a normal empty result, not an error (real network call — verified live, see file header)', (t) => {
     t.skip('metaPageService.getUserPages requires a real Meta Graph API call for a genuinely empty account; this repo has no HTTP mocking library, so the zero-Page discovery path is verified live and documented in the Phase 2 report instead. The already-cached zero-Pages branch (no fresh discovery call needed) is exercised by test 4 above with a non-empty cache and by the response-shape assertions there.');
   });

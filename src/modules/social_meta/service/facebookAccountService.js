@@ -205,4 +205,47 @@ export async function persistDiscoveredFacebookPages({ userId, projectId, pages,
   return { savedCount: savedAccounts.length, activeAccount: activeResult.success ? activeResult.account : null };
 }
 
-export default { listFacebookAccounts, getActiveFacebookAccount, getActiveInstagramAccount, setActiveFacebookAccount, persistDiscoveredFacebookPages };
+/**
+ * Cross-references a freshly Meta-discovered Page list (from
+ * metaPageService.getUserPages, cached on a PendingMetaConnection) against
+ * this project's already-persisted SocialAccount rows, in ONE query — the
+ * real fix for a genuine UX bug: the Page-picker shown right after OAuth
+ * had no idea some of the 19 discovered Pages were already connected from
+ * an earlier session, so it showed a bare "Connect" for every single one,
+ * indistinguishable from a brand-new Page.
+ *
+ * Never touches accessToken in either direction — `pages` here already
+ * carries no token by the time this runs (see metaOAuthController.js's
+ * getMetaPages, which strips it before calling this), and the SocialAccount
+ * lookup only ever selects platformAccountId/isActive.
+ */
+export async function enrichPagesWithConnectionState({ projectId, pages }) {
+  if (!Array.isArray(pages) || pages.length === 0) return [];
+
+  const pageIds = pages.map((p) => p.id);
+  const existing = await SocialAccount.find({
+    project_id: projectId,
+    platform: 'facebook',
+    platformAccountId: { $in: pageIds },
+    status: 'active',
+  }).select('platformAccountId isActive');
+
+  const byPageId = new Map(existing.map((a) => [a.platformAccountId, a]));
+
+  return pages.map((page) => {
+    const match = byPageId.get(page.id);
+    return {
+      id: page.id,
+      name: page.name,
+      category: page.category,
+      picture: page.picture,
+      alreadyConnected: !!match,
+      isActive: !!match?.isActive,
+    };
+  });
+}
+
+export default {
+  listFacebookAccounts, getActiveFacebookAccount, getActiveInstagramAccount, setActiveFacebookAccount,
+  persistDiscoveredFacebookPages, enrichPagesWithConnectionState,
+};
