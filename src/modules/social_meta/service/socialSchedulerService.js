@@ -7,15 +7,7 @@ const SERVICE = 'SocialSchedulerService';
 // Every minute by default — a scheduled post should go out close to its
 // chosen time, not up to a day late the way the recrawl scheduler's daily
 // cadence would be fine with.
-const CRON_EXPRESSION = process.env.SOCIAL_SCHEDULER_CRON || '* * * * *';
-// Deliberately OPT-IN (default OFF), unlike this codebase's other
-// schedulers (weeklyRecrawlScheduler.js, staleLockScheduler.js — both
-// default ON, `!== 'false'`). Those only ever touch Odito's own database.
-// This one makes REAL, irreversible posts to a real, external Facebook/
-// Instagram account the moment it runs — the user must explicitly set
-// SOCIAL_SCHEDULER_ENABLED=true after connecting real accounts and
-// confirming they want scheduled posts to actually go out automatically.
-const ENABLED = process.env.SOCIAL_SCHEDULER_ENABLED === 'true';
+const DEFAULT_CRON_EXPRESSION = '* * * * *';
 
 let task = null;
 
@@ -33,9 +25,39 @@ export async function runOnce() {
   return summary;
 }
 
-/** Safe to call once at server boot — no-ops if already started or disabled. */
+/**
+ * Safe to call once at server boot — no-ops if already started or disabled.
+ *
+ * SOCIAL_SCHEDULER_ENABLED / SOCIAL_SCHEDULER_CRON are read HERE, at call
+ * time — deliberately NOT as module-top-level constants. This project is
+ * native ESM ("type":"module" in package.json). server.js calls
+ * dotenv.config() as a statement in ITS OWN top-level body, but ES modules
+ * fully evaluate every statically-imported dependency (this file included)
+ * BEFORE the importing module's own top-level statements run, regardless
+ * of where that import is textually positioned relative to dotenv.config().
+ * A top-level `const ENABLED = process.env.SOCIAL_SCHEDULER_ENABLED === 'true'`
+ * here would therefore always observe `undefined` — evaluated before
+ * dotenv ever populates process.env — permanently freezing this scheduler
+ * disabled no matter what .env actually says (confirmed: this was exactly
+ * the bug — a real due 'scheduled' post sat untouched in production
+ * because this line never saw the real value). Reading process.env inside
+ * this function instead means it's read only once startSocialScheduler()
+ * is actually CALLED (server.js's startServer(), long after
+ * dotenv.config() has already run), so it correctly reflects the real
+ * configured value.
+ *
+ * Deliberately OPT-IN (default OFF unless SOCIAL_SCHEDULER_ENABLED is
+ * exactly "true"), unlike this codebase's other schedulers
+ * (weeklyRecrawlScheduler.js, staleLockScheduler.js — both default ON,
+ * `!== 'false'`). Those only ever touch Odito's own database. This one
+ * makes REAL, irreversible posts to a real, external Facebook/Instagram
+ * account the moment it runs — the user must explicitly set
+ * SOCIAL_SCHEDULER_ENABLED=true after connecting real accounts and
+ * confirming they want scheduled posts to actually go out automatically.
+ */
 export function startSocialScheduler() {
-  if (!ENABLED) {
+  const enabled = process.env.SOCIAL_SCHEDULER_ENABLED === 'true';
+  if (!enabled) {
     LoggerUtil.service(SERVICE, 'init', 'disabled', { reason: 'SOCIAL_SCHEDULER_ENABLED is not "true" — scheduled posts will NOT be automatically published until this is set' });
     return null;
   }
@@ -44,8 +66,10 @@ export function startSocialScheduler() {
     return task;
   }
 
+  const cronExpression = process.env.SOCIAL_SCHEDULER_CRON || DEFAULT_CRON_EXPRESSION;
+
   task = schedule(
-    CRON_EXPRESSION,
+    cronExpression,
     () => {
       runOnce().catch((error) => {
         LoggerUtil.error(`${SERVICE}: run crashed unexpectedly`, error);
@@ -54,7 +78,7 @@ export function startSocialScheduler() {
     { noOverlap: true },
   );
 
-  LoggerUtil.service(SERVICE, 'init', 'scheduled', { cronExpression: CRON_EXPRESSION });
+  LoggerUtil.service(SERVICE, 'init', 'scheduled', { cronExpression });
   return task;
 }
 
