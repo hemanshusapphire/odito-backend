@@ -12,6 +12,7 @@ import adapters from '../service/platformAdapters/index.js';
 import { executeDuePublications } from '../service/socialPublishingService.js';
 import {
   listPublicationsHandler, createPublicationHandler, getPublicationHandler, publishPublicationHandler,
+  deletePublicationHandler,
 } from './socialPublishingController.js';
 
 let mongoAvailable = false;
@@ -191,5 +192,69 @@ describe('socialPublishingController — real MongoDB, project ownership, :publi
     } finally {
       adapters.facebook.publish = original;
     }
+  });
+
+  // Regression coverage for "Implement Published Social Post Deletion":
+  // the DELETE endpoint must now succeed for a genuinely published post,
+  // through the real HTTP handler, and the record must actually be gone
+  // from MongoDB afterward — not just report success.
+  test('7: DELETE /social/publishing/:publicationId succeeds for a genuinely published post, and the record is actually gone from MongoDB', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const createRes = mockRes();
+    await createPublicationHandler({
+      projectId: project._id.toString(), userId: userId.toString(),
+      body: { platform: 'facebook', socialAccountId: account._id.toString(), content: 'Publish then delete' },
+    }, createRes);
+    const publicationId = createRes.body.data.publication.id;
+
+    const original = adapters.facebook.publish;
+    adapters.facebook.publish = async () => ({ success: true, externalPostId: 'delete_me_1', error: null });
+    try {
+      const publishRes = mockRes();
+      await publishPublicationHandler({ projectId: project._id.toString(), userId: userId.toString(), params: { publicationId } }, publishRes);
+      assert.equal(publishRes.body.data.publication.status, 'published');
+    } finally {
+      adapters.facebook.publish = original;
+    }
+
+    const deleteRes = mockRes();
+    await deletePublicationHandler({ projectId: project._id.toString(), params: { publicationId } }, deleteRes);
+
+    // The success path calls res.json(...) with no explicit .status() call
+    // first — real Express defaults an unset status to 200; this file's
+    // mockRes() stub only records an EXPLICIT .status(code) call, so
+    // statusCode staying null here (not 200) is this mock's own quirk, not
+    // a real failure — the actually meaningful checks are the response
+    // body and the real MongoDB state below.
+    assert.equal(deleteRes.statusCode, null);
+    assert.equal(deleteRes.body.success, true);
+    assert.equal(deleteRes.body.data.deleted, true);
+    assert.equal(await SocialPublication.findById(publicationId), null);
+  });
+
+  test('8: DELETE for a publication belonging to ANOTHER project still returns NOT_FOUND — never leaks or deletes cross-project', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const otherProject = await SeoProject.create({ user_id: userId, project_name: `Other Delete ${Date.now()}`, main_url: 'https://otherdelete.example.com', seo_scope: 'local', keywords: ['other'] });
+    const otherAccount = await SocialAccount.create({
+      user_id: userId, project_id: otherProject._id, platform: 'facebook', platformAccountId: 'pg_other_delete',
+      platformAccountName: 'Other Delete Page', accountType: 'page', pageId: 'pg_other_delete', accessToken: 'real-token', status: 'active',
+    });
+    const createRes = mockRes();
+    await createPublicationHandler({
+      projectId: otherProject._id.toString(), userId: userId.toString(),
+      body: { platform: 'facebook', socialAccountId: otherAccount._id.toString(), content: 'Belongs to the other project' },
+    }, createRes);
+    const otherPublicationId = createRes.body.data.publication.id;
+
+    const deleteRes = mockRes();
+    await deletePublicationHandler({ projectId: project._id.toString(), params: { publicationId: otherPublicationId } }, deleteRes);
+
+    assert.equal(deleteRes.statusCode, 404);
+    assert.equal(deleteRes.body.details?.code, 'NOT_FOUND');
+    assert.ok(await SocialPublication.findById(otherPublicationId), 'the other project\'s document must still exist untouched');
+
+    await SocialPublication.deleteMany({ project_id: otherProject._id });
+    await SocialAccount.deleteMany({ project_id: otherProject._id });
+    await SeoProject.deleteOne({ _id: otherProject._id });
   });
 });

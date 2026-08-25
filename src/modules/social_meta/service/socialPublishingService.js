@@ -86,7 +86,7 @@ const MAX_PAGE_SIZE = 50;
 // exact same, atomically-guarded path rather than a separate one.
 const PUBLISHABLE_FROM = ['draft', 'scheduled', 'failed'];
 const EDITABLE_STATUSES = ['draft', 'scheduled'];
-const DELETABLE_STATUSES = ['draft', 'scheduled', 'failed', 'cancelled'];
+const DELETABLE_STATUSES = ['draft', 'scheduled', 'failed', 'cancelled', 'published'];
 const CANCELLABLE_STATUSES = ['draft', 'scheduled'];
 
 function toApiPublication(doc) {
@@ -308,11 +308,19 @@ export async function createBulkPublications(projectId, userId, rows) {
   };
 }
 
+// A published post is now deletable like any other status (removes the
+// Odito SocialPublication record only — this never touches the real
+// Facebook/Instagram post itself; no adapter/Graph API call exists for
+// that anywhere in this codebase, so an already-published post remains
+// live on the platform after this, exactly as before this change). The
+// one status this still refuses is 'publishing' — the brief atomically-
+// claimed in-flight window publishNow() itself sets; deleting mid-publish
+// would race the adapter call/status write already in progress.
 export async function deletePublication(projectId, publicationId) {
   const doc = await findOwned(projectId, publicationId);
   if (!doc) return { success: false, error: { code: 'NOT_FOUND', message: 'That publication was not found.' } };
   if (!DELETABLE_STATUSES.includes(doc.status)) {
-    return { success: false, error: { code: 'NOT_DELETABLE', message: 'A published post cannot be deleted — it is real publishing history.' } };
+    return { success: false, error: { code: 'NOT_DELETABLE', message: 'A publication that is currently publishing cannot be deleted — wait for it to finish.' } };
   }
   await SocialPublication.deleteOne({ _id: doc._id });
   return { success: true };

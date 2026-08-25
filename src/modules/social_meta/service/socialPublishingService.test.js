@@ -343,14 +343,33 @@ describe('socialPublishingService', () => {
     assert.equal(second.error.code, 'NOT_PUBLISHABLE');
   });
 
-  test('9: deleting a published post is refused — real history is never deletable', async (t) => {
+  test('9: a genuinely published post can be deleted (Odito record only) — the SocialPublication document is gone from MongoDB afterward, and the adapter is never called during the delete itself', async (t) => {
     if (!mongoAvailable) return t.skip('local MongoDB not reachable');
     const created = await createPublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content: 'Keep' });
     await withMockedFacebookAdapter(async () => ({ success: true, externalPostId: 'keep1', error: null }), () => publishNow(project._id.toString(), created.publication.id, userId));
 
+    const beforeDelete = await SocialPublication.findById(created.publication.id);
+    assert.equal(beforeDelete.status, 'published');
+    assert.equal(beforeDelete.externalPostId, 'keep1');
+
+    let adapterCalledDuringDelete = false;
+    const result = await withMockedFacebookAdapter(async () => { adapterCalledDuringDelete = true; return { success: true, externalPostId: 'should_never_run', error: null }; },
+      () => deletePublication(project._id.toString(), created.publication.id));
+
+    assert.equal(result.success, true);
+    assert.equal(adapterCalledDuringDelete, false, 'deleting a published post must never call the platform adapter — this removes only the local SocialPublication record, never the real Facebook/Instagram post');
+    assert.equal(await SocialPublication.findById(created.publication.id), null, 'the document must be genuinely gone from MongoDB, not just marked deleted');
+  });
+
+  test('9b: a publication still "publishing" (mid atomic-claim) cannot be deleted — the one status this still refuses', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const created = await createPublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content: 'In flight' });
+    await SocialPublication.updateOne({ _id: created.publication.id }, { $set: { status: 'publishing' } });
+
     const result = await deletePublication(project._id.toString(), created.publication.id);
     assert.equal(result.success, false);
     assert.equal(result.error.code, 'NOT_DELETABLE');
+    assert.ok(await SocialPublication.findById(created.publication.id), 'the document must still exist — deletion was correctly refused');
   });
 
   test('10: a draft can be deleted', async (t) => {
