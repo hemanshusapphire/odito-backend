@@ -353,14 +353,33 @@ export async function cancelPublication(projectId, publicationId, userId) {
  * success; never leaves 'publishing' behind on any exit path.
  */
 export async function publishNow(projectId, publicationId, userId) {
+  // Read-only, for the temporary diagnostic log below — never part of the
+  // actual claim decision, which remains the single atomic
+  // findOneAndUpdate immediately after it (unchanged).
+  const beforeStatus = (await SocialPublication.findById(publicationId).select('status').lean())?.status ?? null;
+
   const claimed = await SocialPublication.findOneAndUpdate(
     { _id: publicationId, project_id: toObjectId(projectId), status: { $in: PUBLISHABLE_FROM } },
     { $set: { status: 'publishing', updatedBy: userId || null } },
     { new: true },
   );
+
+  LoggerUtil.info('[SOCIAL_SCHEDULER_CLAIM]', {
+    publicationId,
+    previousStatus: beforeStatus,
+    newStatus: claimed ? claimed.status : null,
+  });
+
   if (!claimed) {
     return { success: false, error: { code: 'NOT_PUBLISHABLE', message: 'That publication cannot be published right now (it may already be publishing, published, or cancelled).' } };
   }
+
+  LoggerUtil.info('[SOCIAL_PUBLISH_START]', {
+    publicationId,
+    platform: claimed.platform,
+    scheduledAt: claimed.scheduledAt ? claimed.scheduledAt.toISOString() : null,
+    currentTime: new Date().toISOString(),
+  });
 
   const resolved = await resolveAccount(projectId, claimed.platform, claimed.social_account_id.toString());
   if (resolved.error) {
@@ -417,6 +436,11 @@ export async function publishNow(projectId, publicationId, userId) {
   }
 
   LoggerUtil.service('SocialPublishing', 'publish', 'completed', { projectId: String(projectId), publicationId, platform: claimed.platform });
+  LoggerUtil.info('[SOCIAL_PUBLISH_SUCCESS]', {
+    publicationId,
+    platform: claimed.platform,
+    publishedAt: claimed.publishedAt.toISOString(),
+  });
   return { success: true, publication: toApiPublication(claimed) };
 }
 
@@ -432,6 +456,11 @@ async function failPublication(doc, error) {
   doc.failureCode = error?.code || null;
   await doc.save();
   LoggerUtil.service('SocialPublishing', 'publish', 'failed', { publicationId: doc._id.toString(), platform: doc.platform, code: error?.code });
+  LoggerUtil.info('[SOCIAL_PUBLISH_FAILED]', {
+    publicationId: doc._id.toString(),
+    platform: doc.platform,
+    error: { code: error?.code || null, message: error?.message || null },
+  });
   return { success: false, error, publication: toApiPublication(doc) };
 }
 
@@ -449,9 +478,25 @@ const MAX_DUE_PER_RUN = 100;
  * split. One publication failing never aborts the run for the others.
  */
 export async function executeDuePublications() {
-  const due = await SocialPublication.find({ status: 'scheduled', scheduledAt: { $lte: new Date() } })
+  const now = new Date();
+  const due = await SocialPublication.find({ status: 'scheduled', scheduledAt: { $lte: now } })
     .sort({ scheduledAt: 1 })
     .limit(MAX_DUE_PER_RUN);
+
+  // Temporary high-value diagnostic — logs every publication THIS tick
+  // considers due (the query itself already restricts to scheduledAt <=
+  // now, so isDue is always true for anything logged here; the point is
+  // proving, per real MongoDB timestamps, that nothing NOT yet due is
+  // ever included in a given tick's batch).
+  for (const pub of due) {
+    LoggerUtil.info('[SOCIAL_SCHEDULER_CHECK]', {
+      now: now.toISOString(),
+      publicationId: pub._id.toString(),
+      scheduledAt: pub.scheduledAt ? pub.scheduledAt.toISOString() : null,
+      status: pub.status,
+      isDue: true,
+    });
+  }
 
   const results = [];
   for (const pub of due) {

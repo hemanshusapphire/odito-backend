@@ -88,6 +88,20 @@ export async function createPublicationHandler(req, res) {
       return res.status(status).json(ResponseUtil.error(result.error.message, status, { code: result.error.code }));
     }
 
+    // Temporary high-value diagnostic for the "scheduled post publishes
+    // immediately" investigation — proves, per request, exactly what this
+    // request believed `publishNow` was and what status the record was
+    // actually created with, so a production incident can be correlated
+    // against this log instead of re-deriving it from source alone.
+    LoggerUtil.info('[SOCIAL_SCHEDULE_CREATE]', {
+      publicationId: result.publication.id,
+      platform,
+      scheduledAt: scheduledAt || null,
+      timezone: timezone || null,
+      publishNow: !!shouldPublishNow,
+      status: result.publication.status,
+    });
+
     if (!shouldPublishNow) {
       return res.status(201).json(ResponseUtil.success({ publication: result.publication }));
     }

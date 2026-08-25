@@ -9,6 +9,7 @@ import SeoProject from '../../app_user/model/SeoProject.js';
 import SocialAccount from '../model/SocialAccount.js';
 import SocialPublication from '../model/SocialPublication.js';
 import adapters from '../service/platformAdapters/index.js';
+import { executeDuePublications } from '../service/socialPublishingService.js';
 import {
   listPublicationsHandler, createPublicationHandler, getPublicationHandler, publishPublicationHandler,
 } from './socialPublishingController.js';
@@ -135,6 +136,58 @@ describe('socialPublishingController — real MongoDB, project ownership, :publi
       assert.equal(res.body.data.publication.status, 'published');
       const bodyText = JSON.stringify(res.body);
       assert.ok(!bodyText.includes('real-token'));
+    } finally {
+      adapters.facebook.publish = original;
+    }
+  });
+
+  // Regression coverage for the "scheduled post publishes immediately"
+  // investigation: schedules a post through the exact same HTTP handler
+  // the real Create Post -> Schedule flow uses, with publishNow explicitly
+  // false and a real future scheduledAt (5-10 minutes out, matching the
+  // reported repro), and proves — against real MongoDB, not a mock —
+  // that (a) it lands as status='scheduled'/publishedAt=null immediately,
+  // (b) the adapter is never called during creation, and (c) a real
+  // executeDuePublications() tick run right afterward correctly leaves it
+  // untouched because it is not yet due.
+  test('6: scheduling 5-10 minutes in the future with publishNow:false creates status=scheduled/publishedAt=null, never calls the adapter, and is correctly skipped by the due-publication scheduler', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    let adapterCalled = false;
+    const original = adapters.facebook.publish;
+    adapters.facebook.publish = async () => { adapterCalled = true; return { success: true, externalPostId: 'should_never_be_called', error: null }; };
+
+    try {
+      const scheduledAt = new Date(Date.now() + 7 * 60 * 1000).toISOString(); // 7 minutes from now
+      const res = mockRes();
+      await createPublicationHandler({
+        projectId: project._id.toString(), userId: userId.toString(),
+        body: {
+          platform: 'facebook', socialAccountId: account._id.toString(), content: 'Scheduled 7 minutes out',
+          scheduledAt, timezone: 'Asia/Kolkata', publishNow: false,
+        },
+      }, res);
+
+      assert.equal(res.statusCode, 201);
+      assert.equal(res.body.data.publication.status, 'scheduled');
+      assert.equal(res.body.data.publication.publishedAt, null);
+      assert.equal(adapterCalled, false, 'the adapter must never be called while creating a scheduled post');
+
+      const publicationId = res.body.data.publication.id;
+      const storedImmediately = await SocialPublication.findById(publicationId);
+      assert.equal(storedImmediately.status, 'scheduled');
+      assert.equal(storedImmediately.publishedAt, null);
+      assert.equal(storedImmediately.scheduledAt.toISOString(), new Date(scheduledAt).toISOString());
+
+      // A real due-publication tick, run immediately after creation, must
+      // NOT touch this post — it is 7 minutes away from being due.
+      const summary = await executeDuePublications();
+      assert.equal(summary.results.some((r) => r.id === publicationId), false, 'a not-yet-due post must not appear in this tick\'s results at all');
+      assert.equal(adapterCalled, false, 'the adapter must still never have been called after a due-publication tick, since this post is not due');
+
+      const storedAfterTick = await SocialPublication.findById(publicationId);
+      assert.equal(storedAfterTick.status, 'scheduled');
+      assert.equal(storedAfterTick.publishedAt, null);
     } finally {
       adapters.facebook.publish = original;
     }
