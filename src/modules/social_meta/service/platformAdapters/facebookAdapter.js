@@ -99,6 +99,67 @@ function finalizeResult(result, idKeys) {
   return { success: true, externalPostId, error: null };
 }
 
+/**
+ * Deletes a previously-published Facebook Page post: DELETE /{externalPostId}
+ * using the same Page access token and pages_manage_posts permission
+ * required to create it (Meta has no separate delete-scope for Page
+ * posts). `externalPostId` must be the real Meta post id already recorded
+ * on the owned SocialPublication — the caller (socialPublishingService.js)
+ * is responsible for never sourcing this from anything else.
+ *
+ * Meta's documented response for successfully deleting an object is
+ * `{ success: true }`; for an object that is already gone/inaccessible,
+ * Meta returns its standard "nonexisting node" error —
+ * GraphMethodException, code 100 (commonly with error_subcode 33,
+ * "Unsupported get request... object... does not exist, cannot be
+ * loaded... or does not support this operation"). That specific,
+ * well-documented signature is treated as an IDEMPOTENT success here
+ * (`alreadyDeleted: true`): if the post is already gone on Facebook's
+ * side, there is nothing left to delete, and refusing to let the Odito
+ * record be removed in that case would leave it stuck forever. Any other
+ * failure (permission, invalid/expired token, rate limit, or anything
+ * unrecognized) is a real failure — the Odito record must NOT be deleted.
+ */
+export async function remove({ account, externalPostId }) {
+  const pageAccessToken = account.accessToken; // decrypted via the schema's own getter, same as publish() above
+
+  const result = await metaApiService.request({
+    method: 'DELETE',
+    path: `/${externalPostId}`,
+    accessToken: pageAccessToken,
+    context: 'facebook_delete_post',
+  });
+
+  if (result.success) {
+    LoggerUtil.service('FacebookAdapter', 'delete', 'completed', {});
+    return { success: true, alreadyDeleted: false, error: null };
+  }
+
+  const metaError = result.data?.error;
+  if (metaError?.type === 'GraphMethodException' && metaError?.code === 100) {
+    LoggerUtil.service('FacebookAdapter', 'delete', 'already_deleted', { subcode: metaError?.error_subcode ?? null });
+    return { success: true, alreadyDeleted: true, error: null };
+  }
+
+  return { success: false, alreadyDeleted: false, error: normalizeDeleteFailure(result) };
+}
+
+function normalizeDeleteFailure(result) {
+  LoggerUtil.service('FacebookAdapter', 'delete', 'failed', { status: result.status });
+
+  const metaError = result.data?.error;
+  if (metaError?.type === 'OAuthException' && /permission/i.test(metaError.message || '')) {
+    return { code: 'FACEBOOK_PERMISSION_MISSING', message: 'This Facebook Page is connected but missing posting permission — reconnect it, then try deleting again. The post was NOT deleted.' };
+  }
+  if (result.status === 401 || result.status === 403) {
+    return { code: 'FACEBOOK_TOKEN_INVALID', message: 'Meta denied this request — the Page connection may need to be reconnected. The post was NOT deleted.' };
+  }
+  if (result.status === 429) {
+    return { code: 'FACEBOOK_RATE_LIMITED', message: 'Meta is rate-limiting requests for this Page right now. Try again shortly. The post was NOT deleted.' };
+  }
+  return { code: 'FACEBOOK_DELETE_FAILED', message: 'Meta refused to delete this post. The post still exists on Facebook and the Odito record was NOT deleted.' };
+}
+
 function normalizeFailure(result) {
   LoggerUtil.service('FacebookAdapter', 'publish', 'failed', { status: result.status });
 
@@ -134,4 +195,4 @@ function normalizeFailure(result) {
   return { code: 'FACEBOOK_PUBLISH_FAILED', message: 'Meta rejected this post.' };
 }
 
-export default { publish };
+export default { publish, remove };

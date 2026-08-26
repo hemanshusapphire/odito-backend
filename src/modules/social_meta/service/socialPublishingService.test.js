@@ -343,25 +343,239 @@ describe('socialPublishingService', () => {
     assert.equal(second.error.code, 'NOT_PUBLISHABLE');
   });
 
-  test('9: a genuinely published post can be deleted (Odito record only) — the SocialPublication document is gone from MongoDB afterward, and the adapter is never called during the delete itself', async (t) => {
+  // Root-cause coverage for "Implement Real External Social Post
+  // Deletion" — deleting a published Facebook post now attempts a REAL
+  // Meta DELETE via facebookAdapter.remove() BEFORE ever touching MongoDB.
+  // `adapters.facebook.remove` is substituted the same way `.publish` is
+  // in the tests above (Meta can't be made to deterministically succeed/
+  // fail for a fake token) — never the underlying HTTP client.
+  async function withMockedFacebookDelete(remove, fn) {
+    const original = adapters.facebook.remove;
+    adapters.facebook.remove = remove;
+    try {
+      return await fn();
+    } finally {
+      adapters.facebook.remove = original;
+    }
+  }
+
+  async function publishRealPost(content, externalPostId) {
+    const created = await createPublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content });
+    await withMockedFacebookAdapter(async () => ({ success: true, externalPostId, error: null }), () => publishNow(project._id.toString(), created.publication.id, userId));
+    return created;
+  }
+
+  test('9: a genuinely published Facebook post is deleted for real — Meta DELETE is called with the account\'s Page token and the record\'s own externalPostId (never the Mongo _id), and the SocialPublication document is gone afterward', async (t) => {
     if (!mongoAvailable) return t.skip('local MongoDB not reachable');
-    const created = await createPublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content: 'Keep' });
-    await withMockedFacebookAdapter(async () => ({ success: true, externalPostId: 'keep1', error: null }), () => publishNow(project._id.toString(), created.publication.id, userId));
+    const created = await publishRealPost('Keep', 'keep1');
 
-    const beforeDelete = await SocialPublication.findById(created.publication.id);
-    assert.equal(beforeDelete.status, 'published');
-    assert.equal(beforeDelete.externalPostId, 'keep1');
-
-    let adapterCalledDuringDelete = false;
-    const result = await withMockedFacebookAdapter(async () => { adapterCalledDuringDelete = true; return { success: true, externalPostId: 'should_never_run', error: null }; },
-      () => deletePublication(project._id.toString(), created.publication.id));
+    let calledWith = null;
+    const result = await withMockedFacebookDelete(
+      async ({ account: a, externalPostId }) => { calledWith = { accessToken: a.accessToken, externalPostId }; return { success: true, alreadyDeleted: false, error: null }; },
+      () => deletePublication(project._id.toString(), created.publication.id),
+    );
 
     assert.equal(result.success, true);
-    assert.equal(adapterCalledDuringDelete, false, 'deleting a published post must never call the platform adapter — this removes only the local SocialPublication record, never the real Facebook/Instagram post');
+    assert.equal(calledWith.externalPostId, 'keep1', 'must delete using the record\'s real externalPostId');
+    assert.notEqual(calledWith.externalPostId, created.publication.id, 'must never use the Odito Mongo _id as the Meta target');
+    assert.equal(calledWith.accessToken, 'real-token', 'must use the existing connected account\'s Page token');
     assert.equal(await SocialPublication.findById(created.publication.id), null, 'the document must be genuinely gone from MongoDB, not just marked deleted');
   });
 
-  test('9b: a publication still "publishing" (mid atomic-claim) cannot be deleted — the one status this still refuses', async (t) => {
+  test('9b: Meta DELETE fails (e.g. a real permission/token error) — the SocialPublication record remains untouched', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const created = await publishRealPost('Must survive', 'survive1');
+
+    const result = await withMockedFacebookDelete(
+      async () => ({ success: false, alreadyDeleted: false, error: { code: 'FACEBOOK_TOKEN_INVALID', message: 'Meta denied this request — the Page connection may need to be reconnected. The post was NOT deleted.' } }),
+      () => deletePublication(project._id.toString(), created.publication.id),
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'FACEBOOK_TOKEN_INVALID');
+    const stillThere = await SocialPublication.findById(created.publication.id);
+    assert.ok(stillThere, 'the document must still exist — a failed external deletion must never delete the Odito record');
+    assert.equal(stillThere.status, 'published');
+  });
+
+  test('9c: a published Facebook post with no recorded externalPostId fails safely — no Meta call is attempted, and the Odito record is not deleted', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const created = await publishRealPost('No id', 'temp1');
+    // Simulate the "should never happen" data state directly, rather than
+    // relying on any code path that could actually produce it.
+    await SocialPublication.updateOne({ _id: created.publication.id }, { $set: { externalPostId: null } });
+
+    let adapterCalled = false;
+    const result = await withMockedFacebookDelete(
+      async () => { adapterCalled = true; return { success: true, alreadyDeleted: false, error: null }; },
+      () => deletePublication(project._id.toString(), created.publication.id),
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'EXTERNAL_POST_ID_MISSING');
+    assert.equal(adapterCalled, false, 'must never call Meta with no id to delete');
+    assert.ok(await SocialPublication.findById(created.publication.id), 'the document must still exist');
+  });
+
+  test('9d: an invalid/expired Page token surfaces FACEBOOK_TOKEN_INVALID and leaves the record untouched (real adapter classification, not a generic failure)', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const created = await publishRealPost('Bad token', 'badtoken1');
+
+    const result = await withMockedFacebookDelete(
+      async () => ({ success: false, alreadyDeleted: false, error: { code: 'FACEBOOK_TOKEN_INVALID', message: 'Meta denied this request — the Page connection may need to be reconnected. The post was NOT deleted.' } }),
+      () => deletePublication(project._id.toString(), created.publication.id),
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'FACEBOOK_TOKEN_INVALID');
+    assert.ok(await SocialPublication.findById(created.publication.id));
+  });
+
+  test('9e: a published post whose connected social account no longer exists/is disconnected fails safely instead of deleting the record', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const created = await publishRealPost('Account gone', 'accgone1');
+    await SocialAccount.updateOne({ _id: account._id }, { $set: { status: 'disconnected' } });
+
+    let adapterCalled = false;
+    const result = await withMockedFacebookDelete(
+      async () => { adapterCalled = true; return { success: true, alreadyDeleted: false, error: null }; },
+      () => deletePublication(project._id.toString(), created.publication.id),
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'ACCOUNT_NOT_CONNECTED');
+    assert.equal(adapterCalled, false, 'must never attempt Meta delete against a disconnected account');
+    assert.ok(await SocialPublication.findById(created.publication.id));
+
+    await SocialAccount.updateOne({ _id: account._id }, { $set: { status: 'active' } });
+  });
+
+  test('9f: a real, live-shaped Meta "object already deleted" error (GraphMethodException code 100) is treated as an idempotent success — the Odito record is still removed', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const created = await publishRealPost('Already gone on Facebook', 'gone_already_1');
+
+    // This exercises facebookAdapter.remove's own real classification logic
+    // (not a stubbed {success:true}) by mocking one level lower — the
+    // shared metaApiService.request the adapter itself calls — so the
+    // adapter's actual GraphMethodException/code-100 handling runs for real.
+    const metaApiService = (await import('./metaApiService.js')).default;
+    const originalRequest = metaApiService.request;
+    metaApiService.request = async () => ({
+      success: false,
+      status: 400,
+      data: { error: { message: 'Unsupported get request. Object with ID \'gone_already_1\' does not exist, cannot be loaded due to missing permissions, or does not support this operation.', type: 'GraphMethodException', code: 100, error_subcode: 33, fbtrace_id: 'AbC123' } },
+    });
+    let result;
+    try {
+      result = await deletePublication(project._id.toString(), created.publication.id);
+    } finally {
+      metaApiService.request = originalRequest;
+    }
+
+    assert.equal(result.success, true, 'an already-deleted external post must be treated as a successful (idempotent) deletion, not a failure the user has to retry forever');
+    assert.equal(await SocialPublication.findById(created.publication.id), null);
+  });
+
+  test('9g: an unrelated Meta error (e.g. a different GraphMethodException, or a code other than 100) is NOT treated as idempotent success — the record remains', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const created = await publishRealPost('Different error', 'differr1');
+
+    const metaApiService = (await import('./metaApiService.js')).default;
+    const originalRequest = metaApiService.request;
+    metaApiService.request = async () => ({
+      success: false, status: 400,
+      data: { error: { message: 'Some other failure', type: 'OAuthException', code: 190, fbtrace_id: 'XyZ999' } },
+    });
+    let result;
+    try {
+      result = await deletePublication(project._id.toString(), created.publication.id);
+    } finally {
+      metaApiService.request = originalRequest;
+    }
+
+    assert.equal(result.success, false, 'only the specific documented "does not exist" signature (GraphMethodException, code 100) is treated as idempotent — nothing else');
+    assert.ok(await SocialPublication.findById(created.publication.id));
+  });
+
+  test('9h: cross-project — a published Facebook post belonging to ANOTHER project cannot be deleted (NOT_FOUND), and no Meta call is ever attempted', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const created = await publishRealPost('Belongs elsewhere', 'elsewhere1');
+    const otherProject = await SeoProject.create({ user_id: userId, project_name: `Other Delete Svc ${Date.now()}`, main_url: 'https://otherdeletesvc.example.com', seo_scope: 'local', keywords: ['other'] });
+
+    let adapterCalled = false;
+    const result = await withMockedFacebookDelete(
+      async () => { adapterCalled = true; return { success: true, alreadyDeleted: false, error: null }; },
+      () => deletePublication(otherProject._id.toString(), created.publication.id),
+    );
+
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'NOT_FOUND');
+    assert.equal(adapterCalled, false, 'must never call Meta for a publication that does not belong to the requesting project');
+    assert.ok(await SocialPublication.findById(created.publication.id));
+
+    await SeoProject.deleteOne({ _id: otherProject._id });
+  });
+
+  test('9i: a published Instagram post refuses external deletion with a clear, platform-specific error — the record remains untouched, and no Meta call is attempted (Instagram Graph API has no DELETE for IG Media)', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const igAccount = await SocialAccount.create({
+      user_id: userId, project_id: project._id, platform: 'instagram', platformAccountId: 'ig_delete_test',
+      platformAccountName: 'ig_delete_test', accountType: 'business', instagramBusinessAccountId: 'ig_delete_test',
+      accessToken: 'real-token', status: 'active', scopes: ['instagram_basic', 'instagram_content_publish'],
+    });
+    const { backend } = (await import('../../../config/env.js')).getServiceUrls();
+    const created = await createPublication(project._id.toString(), userId, {
+      platform: 'instagram', socialAccountId: igAccount._id.toString(), content: 'IG post',
+      media: [{ url: `${backend}/storage/social_media/${project._id.toString()}/img.png`, type: 'image' }],
+    });
+    const originalIgPublish = adapters.instagram.publish;
+    adapters.instagram.publish = async () => ({ success: true, externalPostId: 'ig_media_1', error: null });
+    try {
+      await publishNow(project._id.toString(), created.publication.id, userId);
+    } finally {
+      adapters.instagram.publish = originalIgPublish;
+    }
+    assert.equal((await SocialPublication.findById(created.publication.id)).status, 'published');
+
+    let igAdapterHasDelete = typeof adapters.instagram.remove === 'function';
+    const result = await deletePublication(project._id.toString(), created.publication.id);
+
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'EXTERNAL_DELETE_UNSUPPORTED');
+    assert.ok(await SocialPublication.findById(created.publication.id), 'the record must remain — Instagram has no supported external delete path');
+    // Documents the actual current capability directly, per this task's
+    // explicit "verify the current Instagram Graph API capability" ask:
+    // the adapter itself never grew a remove()/delete() at all.
+    assert.equal(igAdapterHasDelete, false, 'instagramAdapter must not expose a remove()/delete() — no such Graph API capability exists to wrap');
+  });
+
+  test('9j: "Remove from Odito history" (historyOnly:true) on a published Instagram post removes only the Odito record, still without ever calling Meta', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const igAccount = await SocialAccount.create({
+      user_id: userId, project_id: project._id, platform: 'instagram', platformAccountId: 'ig_history_test',
+      platformAccountName: 'ig_history_test', accountType: 'business', instagramBusinessAccountId: 'ig_history_test',
+      accessToken: 'real-token', status: 'active', scopes: ['instagram_basic', 'instagram_content_publish'],
+    });
+    const { backend } = (await import('../../../config/env.js')).getServiceUrls();
+    const created = await createPublication(project._id.toString(), userId, {
+      platform: 'instagram', socialAccountId: igAccount._id.toString(), content: 'IG history post',
+      media: [{ url: `${backend}/storage/social_media/${project._id.toString()}/img.png`, type: 'image' }],
+    });
+    const originalIgPublish = adapters.instagram.publish;
+    adapters.instagram.publish = async () => ({ success: true, externalPostId: 'ig_media_2', error: null });
+    try {
+      await publishNow(project._id.toString(), created.publication.id, userId);
+    } finally {
+      adapters.instagram.publish = originalIgPublish;
+    }
+
+    const result = await deletePublication(project._id.toString(), created.publication.id, { historyOnly: true });
+
+    assert.equal(result.success, true);
+    assert.equal(await SocialPublication.findById(created.publication.id), null, 'the Odito record is removed once the user explicitly opts into history-only removal');
+  });
+
+  test('9k: a publication still "publishing" (mid atomic-claim) cannot be deleted — the one status this still refuses', async (t) => {
     if (!mongoAvailable) return t.skip('local MongoDB not reachable');
     const created = await createPublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content: 'In flight' });
     await SocialPublication.updateOne({ _id: created.publication.id }, { $set: { status: 'publishing' } });

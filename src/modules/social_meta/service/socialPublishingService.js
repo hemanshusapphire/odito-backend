@@ -308,21 +308,98 @@ export async function createBulkPublications(projectId, userId, rows) {
   };
 }
 
-// A published post is now deletable like any other status (removes the
-// Odito SocialPublication record only — this never touches the real
-// Facebook/Instagram post itself; no adapter/Graph API call exists for
-// that anywhere in this codebase, so an already-published post remains
-// live on the platform after this, exactly as before this change). The
-// one status this still refuses is 'publishing' — the brief atomically-
-// claimed in-flight window publishNow() itself sets; deleting mid-publish
-// would race the adapter call/status write already in progress.
-export async function deletePublication(projectId, publicationId) {
+/**
+ * Deletes a publication. The one status this always refuses is
+ * 'publishing' — the brief atomically-claimed in-flight window
+ * publishNow() itself sets; deleting mid-publish would race the adapter
+ * call/status write already in progress.
+ *
+ * draft/scheduled/failed/cancelled have no successfully published
+ * external post to touch — unchanged, MongoDB-only deletion.
+ *
+ * 'published' now attempts REAL external deletion where the platform API
+ * supports it:
+ *   - Facebook: DELETE /{externalPostId} via facebookAdapter.remove(), using
+ *     the exact same account/token resolution (resolveAccount) and
+ *     permission check (isPublishingReady) publishNow() already uses —
+ *     pages_manage_posts is required for both creating AND deleting a Page
+ *     post; there is no separate delete scope. The Odito record is only
+ *     ever removed AFTER Meta confirms the post is gone (or was already
+ *     gone — see facebookAdapter.remove's own idempotent-delete handling).
+ *     If the external deletion fails for any other reason, the Odito
+ *     record is left completely untouched and a clear, actionable error
+ *     is returned.
+ *   - Instagram: the Graph API has no DELETE for IG Media at all (verified
+ *     against Meta's current documented capabilities — there is no
+ *     endpoint to call, so none is attempted). Refused with
+ *     EXTERNAL_DELETE_UNSUPPORTED unless the caller explicitly opts into
+ *     `historyOnly` (the frontend's separate "Remove from Odito history"
+ *     action) — in which case only the Odito record is removed and the
+ *     real Instagram post is left completely untouched, exactly as
+ *     labeled to the user.
+ */
+export async function deletePublication(projectId, publicationId, { historyOnly = false } = {}) {
   const doc = await findOwned(projectId, publicationId);
   if (!doc) return { success: false, error: { code: 'NOT_FOUND', message: 'That publication was not found.' } };
   if (!DELETABLE_STATUSES.includes(doc.status)) {
     return { success: false, error: { code: 'NOT_DELETABLE', message: 'A publication that is currently publishing cannot be deleted — wait for it to finish.' } };
   }
+
+  if (doc.status !== 'published') {
+    await SocialPublication.deleteOne({ _id: doc._id });
+    return { success: true };
+  }
+
+  if (doc.platform === 'instagram') {
+    if (!historyOnly) {
+      return {
+        success: false,
+        error: {
+          code: 'EXTERNAL_DELETE_UNSUPPORTED',
+          message: 'Instagram does not support deleting a published post through the API. Remove it directly in the Instagram app, or choose "Remove from Odito history" to delete only this record — the real Instagram post will remain untouched.',
+        },
+      };
+    }
+    await SocialPublication.deleteOne({ _id: doc._id });
+    LoggerUtil.service('SocialPublishing', 'delete', 'history_only', { publicationId: doc._id.toString(), platform: doc.platform });
+    return { success: true };
+  }
+
+  if (doc.platform !== 'facebook') {
+    // Defensive: no other platform can reach 'published' today (only
+    // facebook/instagram adapters exist), but never silently allow an
+    // unrecognized platform through an external-delete path that doesn't
+    // exist for it.
+    return { success: false, error: { code: 'PLATFORM_NOT_SUPPORTED', message: `Deleting a published ${doc.platform || 'unknown'} post is not supported.` } };
+  }
+
+  if (!doc.externalPostId) {
+    // Should never happen for a genuinely 'published' record (publishNow()
+    // always sets it on success) — but never attempt an external delete
+    // without a real target id, and never remove the Odito record either,
+    // since that would silently discard the only evidence something is
+    // wrong with this record.
+    return { success: false, error: { code: 'EXTERNAL_POST_ID_MISSING', message: 'This post has no recorded Facebook post ID, so Odito cannot verify what to delete on Facebook. The Odito record was NOT deleted.' } };
+  }
+
+  const resolved = await resolveAccount(projectId, 'facebook', doc.social_account_id.toString());
+  if (resolved.error) {
+    return { success: false, error: { code: resolved.error.code, message: `Could not verify the connected Facebook Page (${resolved.error.message}). The Odito record was NOT deleted.` } };
+  }
+  if (!isPublishingReady(resolved.account)) {
+    return { success: false, error: { code: 'FACEBOOK_PERMISSION_MISSING', message: 'This Facebook Page connection is missing posting permission, which is also required to delete a post — reconnect the Page, then try again. The Odito record was NOT deleted.' } };
+  }
+
+  const deleteResult = await adapters.facebook.remove({ account: resolved.account, externalPostId: doc.externalPostId });
+  if (!deleteResult.success) {
+    return { success: false, error: deleteResult.error };
+  }
+
   await SocialPublication.deleteOne({ _id: doc._id });
+  LoggerUtil.service('SocialPublishing', 'delete', 'completed', {
+    publicationId: doc._id.toString(), platform: doc.platform, externalPostId: doc.externalPostId,
+    externallyDeleted: deleteResult.alreadyDeleted ? 'already_gone' : 'deleted',
+  });
   return { success: true };
 }
 

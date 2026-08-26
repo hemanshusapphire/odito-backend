@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import metaApiService from '../metaApiService.js';
-import { publish } from './facebookAdapter.js';
+import { publish, remove } from './facebookAdapter.js';
 
 /**
  * metaApiService.request is substituted on its shared default-exported
@@ -157,5 +157,75 @@ describe('facebookAdapter.publish — failure mapping', () => {
       data: { error: { message: 'Only photo or video can be accepted as media type', type: 'OAuthException', code: 9004 } },
     }), () => publish({ account, content: '', media: [{ url: 'https://cdn.example.com/photo.jpg', type: 'image' }] }));
     assert.equal(result.error.code, 'FACEBOOK_MEDIA_INVALID');
+  });
+});
+
+describe('facebookAdapter.remove — real external deletion of a published Page post', () => {
+  test('calls DELETE /{externalPostId} with the Page access token, never the pageId or any Odito id', async () => {
+    let calledMethod, calledPath, calledToken;
+    const result = await withMockedRequest(async ({ method, path, accessToken }) => {
+      calledMethod = method; calledPath = path; calledToken = accessToken;
+      return { success: true, status: 200, data: { success: true } };
+    }, () => remove({ account, externalPostId: 'pg_1_post_2' }));
+
+    assert.equal(calledMethod, 'DELETE');
+    assert.equal(calledPath, '/pg_1_post_2');
+    assert.equal(calledToken, 'token_1');
+    assert.equal(result.success, true);
+    assert.equal(result.alreadyDeleted, false);
+  });
+
+  test('a real Meta "object does not exist" error (GraphMethodException, code 100, subcode 33) is treated as an idempotent success', async () => {
+    const result = await withMockedRequest(async () => ({
+      success: false, status: 400,
+      data: { error: { message: 'Unsupported get request. Object with ID \'pg_1_post_2\' does not exist, cannot be loaded due to missing permissions, or does not support this operation.', type: 'GraphMethodException', code: 100, error_subcode: 33, fbtrace_id: 'AbC123' } },
+    }), () => remove({ account, externalPostId: 'pg_1_post_2' }));
+
+    assert.equal(result.success, true);
+    assert.equal(result.alreadyDeleted, true);
+    assert.equal(result.error, null);
+  });
+
+  test('GraphMethodException with code 100 but NO error_subcode is still treated as idempotent (subcode is documentation context, not the actual match condition)', async () => {
+    const result = await withMockedRequest(async () => ({
+      success: false, status: 400,
+      data: { error: { message: 'Unsupported get request.', type: 'GraphMethodException', code: 100 } },
+    }), () => remove({ account, externalPostId: 'pg_1_post_2' }));
+    assert.equal(result.success, true);
+    assert.equal(result.alreadyDeleted, true);
+  });
+
+  test('a GraphMethodException with a DIFFERENT code is NOT treated as idempotent — a real failure', async () => {
+    const result = await withMockedRequest(async () => ({
+      success: false, status: 400,
+      data: { error: { message: 'Some other graph method problem', type: 'GraphMethodException', code: 200 } },
+    }), () => remove({ account, externalPostId: 'pg_1_post_2' }));
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'FACEBOOK_DELETE_FAILED');
+  });
+
+  test('a missing-permission OAuthException maps to FACEBOOK_PERMISSION_MISSING', async () => {
+    const result = await withMockedRequest(async () => ({
+      success: false, status: 403,
+      data: { error: { message: '(#200) If posting to a page, requires both pages_read_engagement and pages_manage_posts as an admin with sufficient administrative permission', type: 'OAuthException', code: 200 } },
+    }), () => remove({ account, externalPostId: 'pg_1_post_2' }));
+    assert.equal(result.error.code, 'FACEBOOK_PERMISSION_MISSING');
+  });
+
+  test('a 401/403 from Meta maps to FACEBOOK_TOKEN_INVALID, never a false success', async () => {
+    const result = await withMockedRequest(async () => ({ success: false, status: 401, data: null, message: 'Invalid token' }), () => remove({ account, externalPostId: 'pg_1_post_2' }));
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'FACEBOOK_TOKEN_INVALID');
+  });
+
+  test('a 429 from Meta maps to FACEBOOK_RATE_LIMITED', async () => {
+    const result = await withMockedRequest(async () => ({ success: false, status: 429, data: null, message: 'Rate limited' }), () => remove({ account, externalPostId: 'pg_1_post_2' }));
+    assert.equal(result.error.code, 'FACEBOOK_RATE_LIMITED');
+  });
+
+  test('an unrecognized failure falls back to FACEBOOK_DELETE_FAILED, never a fabricated success', async () => {
+    const result = await withMockedRequest(async () => ({ success: false, status: 500, data: null, message: 'Unexpected' }), () => remove({ account, externalPostId: 'pg_1_post_2' }));
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'FACEBOOK_DELETE_FAILED');
   });
 });

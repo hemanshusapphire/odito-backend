@@ -194,32 +194,49 @@ describe('socialPublishingController — real MongoDB, project ownership, :publi
     }
   });
 
-  // Regression coverage for "Implement Published Social Post Deletion":
-  // the DELETE endpoint must now succeed for a genuinely published post,
-  // through the real HTTP handler, and the record must actually be gone
-  // from MongoDB afterward — not just report success.
-  test('7: DELETE /social/publishing/:publicationId succeeds for a genuinely published post, and the record is actually gone from MongoDB', async (t) => {
-    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+  // Helper: create + publish a real Facebook post through the real HTTP
+  // handlers, with adapters.facebook.publish mocked (Meta can't actually
+  // publish for a fake token). Returns the publicationId.
+  async function createAndPublishFacebook(content, externalPostId) {
     const createRes = mockRes();
     await createPublicationHandler({
       projectId: project._id.toString(), userId: userId.toString(),
-      body: { platform: 'facebook', socialAccountId: account._id.toString(), content: 'Publish then delete' },
+      body: { platform: 'facebook', socialAccountId: account._id.toString(), content },
     }, createRes);
     const publicationId = createRes.body.data.publication.id;
 
-    const original = adapters.facebook.publish;
-    adapters.facebook.publish = async () => ({ success: true, externalPostId: 'delete_me_1', error: null });
+    const originalPublish = adapters.facebook.publish;
+    adapters.facebook.publish = async () => ({ success: true, externalPostId, error: null });
     try {
       const publishRes = mockRes();
       await publishPublicationHandler({ projectId: project._id.toString(), userId: userId.toString(), params: { publicationId } }, publishRes);
       assert.equal(publishRes.body.data.publication.status, 'published');
     } finally {
-      adapters.facebook.publish = original;
+      adapters.facebook.publish = originalPublish;
+    }
+    return publicationId;
+  }
+
+  // Regression coverage for "Implement Real External Social Post
+  // Deletion": the DELETE endpoint must now attempt a REAL Meta DELETE
+  // for a published Facebook post through the real HTTP handler chain,
+  // and only remove the MongoDB record once that succeeds.
+  test('7: DELETE succeeds for a genuinely published Facebook post — Meta DELETE is called for real (mocked at the adapter boundary) and the record is gone from MongoDB afterward', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const publicationId = await createAndPublishFacebook('Publish then delete', 'delete_me_1');
+
+    let deleteCalledWith = null;
+    const originalRemove = adapters.facebook.remove;
+    adapters.facebook.remove = async ({ externalPostId }) => { deleteCalledWith = externalPostId; return { success: true, alreadyDeleted: false, error: null }; };
+    let deleteRes;
+    try {
+      deleteRes = mockRes();
+      await deletePublicationHandler({ projectId: project._id.toString(), params: { publicationId } }, deleteRes);
+    } finally {
+      adapters.facebook.remove = originalRemove;
     }
 
-    const deleteRes = mockRes();
-    await deletePublicationHandler({ projectId: project._id.toString(), params: { publicationId } }, deleteRes);
-
+    assert.equal(deleteCalledWith, 'delete_me_1');
     // The success path calls res.json(...) with no explicit .status() call
     // first — real Express defaults an unset status to 200; this file's
     // mockRes() stub only records an EXPLICIT .status(code) call, so
@@ -227,6 +244,95 @@ describe('socialPublishingController — real MongoDB, project ownership, :publi
     // a real failure — the actually meaningful checks are the response
     // body and the real MongoDB state below.
     assert.equal(deleteRes.statusCode, null);
+    assert.equal(deleteRes.body.success, true);
+    assert.equal(deleteRes.body.data.deleted, true);
+    assert.equal(await SocialPublication.findById(publicationId), null);
+  });
+
+  test('7b: DELETE returns a real error status and keeps the post visible when Meta DELETE fails', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const publicationId = await createAndPublishFacebook('Must survive via HTTP', 'survive_http_1');
+
+    const originalRemove = adapters.facebook.remove;
+    adapters.facebook.remove = async () => ({ success: false, alreadyDeleted: false, error: { code: 'FACEBOOK_TOKEN_INVALID', message: 'Meta denied this request — the Page connection may need to be reconnected. The post was NOT deleted.' } });
+    let deleteRes;
+    try {
+      deleteRes = mockRes();
+      await deletePublicationHandler({ projectId: project._id.toString(), params: { publicationId } }, deleteRes);
+    } finally {
+      adapters.facebook.remove = originalRemove;
+    }
+
+    assert.equal(deleteRes.statusCode, 409);
+    assert.equal(deleteRes.body.success, false);
+    assert.equal(deleteRes.body.details?.code, 'FACEBOOK_TOKEN_INVALID');
+    const stillThere = await SocialPublication.findById(publicationId);
+    assert.ok(stillThere, 'the post must still be visible — a failed external deletion must never remove the Odito record');
+    assert.equal(stillThere.status, 'published');
+  });
+
+  test('7c: DELETE on a published Instagram post is rejected with EXTERNAL_DELETE_UNSUPPORTED (409) via the real HTTP handler, and the record remains', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const igAccount = await SocialAccount.create({
+      user_id: userId, project_id: project._id, platform: 'instagram', platformAccountId: 'ig_ctrl_delete',
+      platformAccountName: 'ig_ctrl_delete', accountType: 'business', instagramBusinessAccountId: 'ig_ctrl_delete',
+      accessToken: 'real-token', status: 'active', scopes: ['instagram_basic', 'instagram_content_publish'],
+    });
+    const { backend } = (await import('../../../config/env.js')).getServiceUrls();
+    const createRes = mockRes();
+    await createPublicationHandler({
+      projectId: project._id.toString(), userId: userId.toString(),
+      body: { platform: 'instagram', socialAccountId: igAccount._id.toString(), content: 'IG via HTTP',
+        media: [{ url: `${backend}/storage/social_media/${project._id.toString()}/img.png`, type: 'image' }] },
+    }, createRes);
+    const publicationId = createRes.body.data.publication.id;
+
+    const originalIgPublish = adapters.instagram.publish;
+    adapters.instagram.publish = async () => ({ success: true, externalPostId: 'ig_ctrl_media_1', error: null });
+    try {
+      const publishRes = mockRes();
+      await publishPublicationHandler({ projectId: project._id.toString(), userId: userId.toString(), params: { publicationId } }, publishRes);
+      assert.equal(publishRes.body.data.publication.status, 'published');
+    } finally {
+      adapters.instagram.publish = originalIgPublish;
+    }
+
+    const deleteRes = mockRes();
+    await deletePublicationHandler({ projectId: project._id.toString(), params: { publicationId } }, deleteRes);
+
+    assert.equal(deleteRes.statusCode, 409);
+    assert.equal(deleteRes.body.details?.code, 'EXTERNAL_DELETE_UNSUPPORTED');
+    assert.ok(await SocialPublication.findById(publicationId));
+  });
+
+  test('7d: "Remove from Odito history" (body.historyOnly=true) succeeds via the real HTTP handler for a published Instagram post', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+    const igAccount = await SocialAccount.create({
+      user_id: userId, project_id: project._id, platform: 'instagram', platformAccountId: 'ig_ctrl_history',
+      platformAccountName: 'ig_ctrl_history', accountType: 'business', instagramBusinessAccountId: 'ig_ctrl_history',
+      accessToken: 'real-token', status: 'active', scopes: ['instagram_basic', 'instagram_content_publish'],
+    });
+    const { backend } = (await import('../../../config/env.js')).getServiceUrls();
+    const createRes = mockRes();
+    await createPublicationHandler({
+      projectId: project._id.toString(), userId: userId.toString(),
+      body: { platform: 'instagram', socialAccountId: igAccount._id.toString(), content: 'IG history via HTTP',
+        media: [{ url: `${backend}/storage/social_media/${project._id.toString()}/img.png`, type: 'image' }] },
+    }, createRes);
+    const publicationId = createRes.body.data.publication.id;
+
+    const originalIgPublish = adapters.instagram.publish;
+    adapters.instagram.publish = async () => ({ success: true, externalPostId: 'ig_ctrl_media_2', error: null });
+    try {
+      const publishRes = mockRes();
+      await publishPublicationHandler({ projectId: project._id.toString(), userId: userId.toString(), params: { publicationId } }, publishRes);
+    } finally {
+      adapters.instagram.publish = originalIgPublish;
+    }
+
+    const deleteRes = mockRes();
+    await deletePublicationHandler({ projectId: project._id.toString(), params: { publicationId }, body: { historyOnly: true } }, deleteRes);
+
     assert.equal(deleteRes.body.success, true);
     assert.equal(deleteRes.body.data.deleted, true);
     assert.equal(await SocialPublication.findById(publicationId), null);

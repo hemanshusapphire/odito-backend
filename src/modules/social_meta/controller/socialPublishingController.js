@@ -34,6 +34,16 @@ const ERROR_STATUS = {
   NOT_DELETABLE: 409,
   NOT_CANCELLABLE: 409,
   NOT_PUBLISHABLE: 409,
+  // Real external-deletion failure modes (deletePublication -> a
+  // published Facebook post's Meta DELETE call, or an Instagram post
+  // with no supported delete path at all) — the Odito record is
+  // guaranteed untouched whenever any of these is returned.
+  EXTERNAL_DELETE_UNSUPPORTED: 409,
+  EXTERNAL_POST_ID_MISSING: 409,
+  FACEBOOK_PERMISSION_MISSING: 409,
+  FACEBOOK_TOKEN_INVALID: 409,
+  FACEBOOK_RATE_LIMITED: 429,
+  FACEBOOK_DELETE_FAILED: 502,
 };
 
 function statusFor(code) {
@@ -141,8 +151,13 @@ export async function updatePublicationHandler(req, res) {
 export async function deletePublicationHandler(req, res) {
   const projectId = req.projectId;
   const { publicationId } = req.params;
+  // Only meaningful for a published Instagram post (the platform with no
+  // supported external-delete path at all) — the frontend's explicit,
+  // separately-labeled "Remove from Odito history" action sends this;
+  // the regular Delete action never does. Ignored for every other case.
+  const historyOnly = !!req.body?.historyOnly;
   try {
-    const result = await deletePublication(projectId, publicationId);
+    const result = await deletePublication(projectId, publicationId, { historyOnly });
     if (!result.success) {
       const status = statusFor(result.error.code);
       return res.status(status).json(ResponseUtil.error(result.error.message, status, { code: result.error.code }));
