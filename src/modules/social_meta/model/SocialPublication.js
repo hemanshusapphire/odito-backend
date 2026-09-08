@@ -114,6 +114,20 @@ const socialPublicationSchema = new mongoose.Schema({
     ref: 'User',
     default: null,
   },
+  // Bulk-upload provenance (additive, nullable — every existing
+  // publication has both null and is completely unaffected). Set ONLY
+  // when a publication was created by the bulk-upload importer (a later
+  // phase) from a specific SocialImportRow. The partial unique index
+  // below guarantees one import row can never produce two publications.
+  importBatchId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SocialImportBatch',
+    default: null,
+  },
+  importRowNumber: {
+    type: Number,
+    default: null,
+  },
 }, {
   timestamps: { createdAt: 'createdAt', updatedAt: 'updatedAt' },
 });
@@ -133,6 +147,15 @@ socialPublicationSchema.index({ project_id: 1, createdAt: -1 });
 socialPublicationSchema.index(
   { social_account_id: 1, externalPostId: 1 },
   { unique: true, partialFilterExpression: { externalPostId: { $type: 'string' } } },
+);
+// One SocialImportRow -> at most one SocialPublication. Partial: only
+// applies once importBatchId is actually set (a bulk-imported post) —
+// every manually-created publication has importBatchId: null and must
+// never collide on that. Same partial-index discipline as the
+// externalPostId guarantee above.
+socialPublicationSchema.index(
+  { importBatchId: 1, importRowNumber: 1 },
+  { unique: true, partialFilterExpression: { importBatchId: { $type: 'objectId' } } },
 );
 // The scheduler's own due-publication scan (Phase 9): status='scheduled'
 // across ALL projects, ordered by scheduledAt.

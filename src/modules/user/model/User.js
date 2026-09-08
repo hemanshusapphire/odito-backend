@@ -29,6 +29,17 @@ const userSchema = new mongoose.Schema({
     // config/passwordPolicy.js. Was 6, out of sync with the frontend's own
     // 8-character check; unified to 8 here (Phase 2 of the Profile module).
     minlength: [PASSWORD_MIN_LENGTH, `Password must be at least ${PASSWORD_MIN_LENGTH} characters`],
+    // Never loaded unless a query explicitly asks for it with
+    // `.select('+password')`. Before this, a bare `User.findById()` (the
+    // auth middleware runs one on every authenticated request) pulled the
+    // bcrypt hash into memory / onto `req.user`, one careless
+    // `res.json(req.user)` away from leaking every active user's hash.
+    // The password-verifying paths (authService.login / changePassword,
+    // accountDeletionService) already opt back in with `.select('+password')`.
+    // Mongoose does not validate an unselected path on `.save()`, so
+    // markEmailVerified()/profile/avatar updates that never load the hash
+    // still save fine and never touch it.
+    select: false,
   },
   roleId: {
     type: Number,
@@ -64,6 +75,23 @@ const userSchema = new mongoose.Schema({
   oauthProviderId: {
     type: String,
     default: null
+  },
+  // Session-invalidation counter (NOT the refresh-token architecture — that
+  // is a later phase). Every auth JWT carries the value this had at sign
+  // time (see tokenService.signAuthToken); the auth middleware rejects a
+  // token whose value no longer matches. Bumped by a password change and by
+  // a password reset, so those actions kill previously-issued tokens.
+  //
+  // Backwards compatible on deploy: a document created before this field
+  // existed reads back `undefined`, which tokenService.resolveUserTokenVersion()
+  // treats as 0 — and every JWT already in the wild has no `tokenVersion`
+  // claim, which resolveTokenVersion() also treats as 0. 0 === 0, so no
+  // existing web session is invalidated by shipping this. No migration
+  // script is required; the default is applied lazily on the next save of
+  // each user, and the "absent === 0" rule covers everyone until then.
+  tokenVersion: {
+    type: Number,
+    default: 0,
   },
   // Long-term profile fields (Profile module, Phase 1 — data foundation
   // only). All optional/additive: no existing field renamed or removed.

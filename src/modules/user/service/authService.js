@@ -1,4 +1,3 @@
-import jwt from 'jsonwebtoken';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { writeFile, unlink, mkdir } from 'fs/promises';
@@ -6,6 +5,9 @@ import sharp from 'sharp';
 import User from '../model/User.js';
 import { AuthUtil } from '../../../utils/AuthUtil.js';
 import { summarizeQuota } from '../../../utils/creditService.js';
+import { normalizeAuthEmail } from '../utils/authEmail.js';
+import { signAuthToken } from './tokenService.js';
+import { issueSessionBundle, revokeUserRefreshTokens } from './refreshTokenService.js';
 import { issueOtp, verifyOtp } from '../../otp/service/otpService.js';
 import { createResetSession, validateResetSession, consumeResetSession } from '../../password_reset/service/passwordResetSessionService.js';
 import { sendMail } from '../../mail/services/mailService.js';
@@ -30,12 +32,10 @@ const formatSubscriptionForResponse = (user) => {
   };
 };
 
-const generateToken = (id, rememberMe = false) => {
-  const expiry = rememberMe ? '7d' : '1d';
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: expiry,
-  });
-};
+// JWT signing now lives in one place (tokenService.signAuthToken) so
+// password login and the two Google callbacks stop drifting apart. Lifetime
+// is unchanged: rememberMe -> LONG_SESSION_EXPIRY (JWT_EXPIRY || '7d'),
+// otherwise SHORT_SESSION_EXPIRY ('1d').
 
 const register = async (userData) => {
   const { firstName, lastName, email, password, termsAccepted } = userData;
@@ -46,7 +46,7 @@ const register = async (userData) => {
   }
 
   // Normalize email to lowercase for case-insensitive comparison
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = normalizeAuthEmail(email);
 
   const existingUser = await User.findOne({ email: normalizedEmail });
   if (existingUser) {
@@ -93,7 +93,7 @@ const register = async (userData) => {
 
 const verifyEmailOTP = async (email, otp) => {
   // Normalize email to lowercase for case-insensitive comparison
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = normalizeAuthEmail(email);
   
   // Trim and validate OTP
   const trimmedOTP = otp.trim();
@@ -140,7 +140,7 @@ const verifyEmailOTP = async (email, otp) => {
 
 const generateEmailOTP = async (email) => {
   // Normalize email to lowercase for case-insensitive comparison
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = normalizeAuthEmail(email);
   
   const user = await User.findOne({ email: normalizedEmail });
   
@@ -169,7 +169,7 @@ const resendVerificationEmail = async (email) => {
 };
 
 const forgotPassword = async (email) => {
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = normalizeAuthEmail(email);
   const user = await User.findOne({ email: normalizedEmail });
 
   // Deliberately generic regardless of whether the account exists — a
@@ -201,7 +201,7 @@ const forgotPassword = async (email) => {
  * part of that page's contract (no `?email=` query param, ever).
  */
 const verifyResetOtp = async (email, otp, { ipAddress = null, userAgent = null } = {}) => {
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = normalizeAuthEmail(email);
   const trimmedOTP = otp.trim();
 
   const user = await User.findOne({ email: normalizedEmail });
@@ -242,7 +242,9 @@ const validateResetToken = async (token) => {
 const resetPasswordWithToken = async (token, newPassword) => {
   const userId = await consumeResetSession(token);
 
-  const user = await User.findById(userId);
+  // `+password` so the pre-save hook's `isModified('password')` check and
+  // this doc are working from the same field state; harmless if unset.
+  const user = await User.findById(userId).select('+password');
   if (!user) {
     const error = new Error('Account not found.');
     error.code = 'RESET_TOKEN_INVALID';
@@ -252,7 +254,13 @@ const resetPasswordWithToken = async (token, newPassword) => {
   // Reuses the existing pre-save hook (User.js) that hashes `password`
   // whenever it's modified — no separate hashing logic here.
   user.password = newPassword;
+  // A reset is the "I may be locked out / compromised" path — kill every
+  // still-valid ACCESS token (tokenVersion bump — Phase 1) …
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
   await user.save();
+
+  // … and every server-stored REFRESH session across all devices (Phase 2).
+  await revokeUserRefreshTokens(user._id, 'password_reset');
 
   return {
     message: 'Password reset successfully. Please log in with your new password.',
@@ -499,14 +507,29 @@ const changePassword = async (userId, currentPassword, newPassword) => {
   }
 
   user.password = newPassword;
+  // Invalidate every previously-issued ACCESS token for this account,
+  // including the one that made this request (tokenVersion bump — Phase 1).
+  user.tokenVersion = (user.tokenVersion || 0) + 1;
   await user.save();
+
+  // Phase 2: also revoke every server-stored refresh session, so a stolen
+  // refresh token cannot mint fresh access tokens after the password
+  // changed. Complete session invalidation across web + mobile.
+  await revokeUserRefreshTokens(user._id, 'password_changed');
 
   return { message: 'Password updated successfully.' };
 };
 
-const login = async (email, password, rememberMe = false) => {
+/**
+ * @param {string} email
+ * @param {string} password
+ * @param {boolean} [rememberMe]
+ * @param {{ deviceLabel?: string, userAgent?: string, ipAddress?: string }} [deviceContext]
+ *   Optional per-device metadata for the refresh-token record (Phase 2).
+ */
+const login = async (email, password, rememberMe = false, deviceContext = {}) => {
   // Normalize email to lowercase for case-insensitive comparison
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = normalizeAuthEmail(email);
 
   const user = await User.findOne({ email: normalizedEmail }).select('+password');
 
@@ -543,7 +566,22 @@ const login = async (email, password, rememberMe = false) => {
   // Update last login using the new method
   await user.updateLastLogin();
 
-  const token = generateToken(user._id, rememberMe);
+  // LEGACY web session token — `data.token`. Unchanged 1d/7d lifetime; the
+  // existing web frontend consumes this directly and has no refresh logic.
+  const token = signAuthToken(user, { rememberMe });
+
+  // NEW mobile bundle — `data.tokens`. Short-lived access token + opaque
+  // rotating refresh token (see refreshTokenService). A mobile client uses
+  // this bundle exclusively and calls POST /auth/refresh; it ignores
+  // `data.token`. `tokens.accessToken` is deliberately a DIFFERENT token
+  // from `data.token` (different lifetime, different purpose).
+  const tokens = await issueSessionBundle(user, {
+    rememberMe,
+    deviceLabel: deviceContext.deviceLabel,
+    userAgent: deviceContext.userAgent,
+    ipAddress: deviceContext.ipAddress,
+  });
+
   const landingPage = await AuthUtil.determineUserLandingPage(user._id);
 
   return {
@@ -561,6 +599,7 @@ const login = async (email, password, rememberMe = false) => {
       redirectTo: landingPage.redirectTo
     },
     token,
+    tokens,
   };
 };
 

@@ -1187,7 +1187,6 @@ function _codeInstruction(framework, cms, target) {
 
 function _wcagReference(issueId) {
   const refs = {
-    text_contrast:        'WCAG 2.1 SC 1.4.3 (Contrast, AA) — 4.5:1 for normal text',
     form_inputs_labels:   'WCAG 2.1 SC 1.3.1 (Info and Relationships) + SC 4.1.2 (Name, Role, Value)',
     keyboard_accessibility:'WCAG 2.1 SC 2.1.1 (Keyboard)',
     focus_indicators:     'WCAG 2.1 SC 2.4.7 (Focus Visible)',

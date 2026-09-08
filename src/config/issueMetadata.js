@@ -94,8 +94,6 @@ export const CANONICAL_ISSUE_TITLES = {
   social_tags_missing:            "Social Tags Missing",
 
   // Accessibility
-  alt_text_accessibility:         "Images Missing Alt Text (Accessibility)",
-  text_contrast:                  "Insufficient Text Contrast",
   form_labels_missing:            "Form Labels Missing",
   keyboard_navigation:            "Keyboard Navigation Issues",
 

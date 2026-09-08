@@ -96,18 +96,8 @@ export class AccessibilityValidator extends BaseValidator {
       }
     }
 
-    // ── Contrast: warning that actual ratio not verified ──────────────────
-    if (issueId === 'text_contrast') {
-      satisfiesConstraint = Boolean(recommended || implCode);
-      if (!satisfiesConstraint) {
-        warnings.push('text_contrast: no contrast fix provided');
-      }
-      // Always warn — Claude cannot verify visual rendering
-      warnings.push('Contrast fix must be visually verified in browser — Claude output is CSS only');
-    }
-
     // ── Generic: non-empty and non-placeholder satisfies ─────────────────
-    if (!ALT_TEXT_ISSUES.has(issueId) && issueId !== 'text_contrast') {
+    if (!ALT_TEXT_ISSUES.has(issueId)) {
       satisfiesConstraint = this._absentSatisfiesConstraint(sections) || Boolean(implCode);
       if (!satisfiesConstraint) {
         warnings.push(`${issueId}: no actionable fix produced`);

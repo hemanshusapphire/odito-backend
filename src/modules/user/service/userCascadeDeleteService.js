@@ -284,6 +284,12 @@ export async function deleteUserCascade(userId) {
     { collection: 'jobs', field: 'user_id' },
     { collection: 'otps', field: 'userId' },
     { collection: 'passwordresetsessions', field: 'userId' },
+    // Phase 2 — every server-stored refresh-token session for this user.
+    // The `isActive: false` claim at the top of this cascade already blocks
+    // /auth/refresh (refreshTokenService checks user.isActive), and the
+    // User document is deleted below regardless; this hard-deletes the rows
+    // so nothing is left pointing at a gone account.
+    { collection: 'refreshtokens', field: 'userId' },
     { collection: 'homepage_audits', field: 'user_id' },
     // Defensive: every GoogleConnection is project-scoped and required to
     // have a project_id (see GoogleConnection.js), so step 4 should have

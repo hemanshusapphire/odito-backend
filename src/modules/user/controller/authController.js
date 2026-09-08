@@ -2,9 +2,21 @@ import { validationResult } from 'express-validator';
 import { register, login, updateProfile as updateProfileService, uploadAvatar as uploadAvatarService, removeAvatar as removeAvatarService, changePassword as changePasswordService, verifyEmailOTP, generateEmailOTP, resendVerificationEmail, forgotPassword, verifyResetOtp, validateResetToken, resetPasswordWithToken, formatSubscriptionForResponse } from '../service/authService.js';
 import { requestAccountDeletion, verifyAccountDeletion, verifyDeletionToken } from '../service/accountDeletionService.js';
 import { deleteUserCascade } from '../service/userCascadeDeleteService.js';
+import { rotateRefreshToken, revokeRefreshTokenForUser, revokeUserRefreshTokens } from '../service/refreshTokenService.js';
 import User from '../model/User.js';
 import { AuthUtil } from '../../../utils/AuthUtil.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
+
+/**
+ * Per-device metadata for the refresh-token record (Phase 2). All optional;
+ * `deviceLabel` is the only client-supplied field and the service
+ * length-bounds it.
+ */
+const deviceContextFromRequest = (req) => ({
+  deviceLabel: typeof req.body?.deviceLabel === 'string' ? req.body.deviceLabel : undefined,
+  userAgent: req.get('user-agent') || undefined,
+  ipAddress: req.ip || undefined,
+});
 
 const getRoleName = (roleId) => {
   const roleMap = {
@@ -36,7 +48,10 @@ const registerUser = async (req, res) => {
 const loginUser = async (req, res) => {
   try {
     const { email, password, rememberMe = false } = req.body;
-    const result = await login(email, password, rememberMe);
+    const result = await login(email, password, rememberMe, deviceContextFromRequest(req));
+    // `data.token` (legacy, web) + `data.tokens` (Phase 2 mobile bundle:
+    // short access token + rotating refresh token). Both present; web
+    // ignores `data.tokens`, mobile ignores `data.token`.
     res.status(200).json({
       success: true,
       message: 'Login successful',
@@ -570,21 +585,29 @@ const deleteAccountController = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/auth/logout — now authenticated (Bearer access token). Revokes
+ * the supplied refresh token IF it belongs to the caller. Kept at HTTP 200
+ * with the original body: the existing web client sends no refresh token
+ * and its `apiService.logout()` reads `response.json()` unconditionally (a
+ * 204 would make it throw). A web logout is therefore a no-op server-side
+ * and still returns 200; a mobile logout revokes its session.
+ */
 const logoutUser = async (req, res) => {
   try {
-    // In a stateless JWT setup, logout is primarily handled client-side
-    // by removing the token. Server-side logout can include:
-    // 1. Token blacklisting (if implemented)
-    // 2. Logging the logout event
-    // 3. Clearing any server-side sessions
-    
-    // For now, we'll just return a success response
-    // The frontend will handle clearing the localStorage token
+    const refreshToken = req.body?.refreshToken;
+    if (refreshToken) {
+      await revokeRefreshTokenForUser({ presentedToken: refreshToken, userId: req.user._id });
+    }
     res.status(200).json({
       success: true,
       message: 'Logout successful',
     });
   } catch (error) {
+    if (error.code === 'REFRESH_TOKEN_MISMATCH') {
+      return res.status(error.httpStatus || 403).json({ success: false, code: error.code, message: error.message });
+    }
+    LoggerUtil.error('Logout failed', error);
     res.status(500).json({
       success: false,
       message: 'Server error during logout',
@@ -592,4 +615,68 @@ const logoutUser = async (req, res) => {
   }
 };
 
-export { registerUser, loginUser, getProfile, updateProfile, uploadAvatarController, removeAvatarController, changePasswordController, requestAccountDeletionController, verifyAccountDeletionController, deleteAccountController, logoutUser, verifyEmailOTPController, generateEmailOTPController, resendVerificationEmailController, forgotPasswordController, verifyResetOtpController, validateResetTokenController, resetPasswordController };
+/**
+ * POST /api/auth/logout-all — revoke every active refresh session for the
+ * authenticated user. Does not touch the user, projects, subscription, or
+ * Google connections.
+ */
+const logoutAllController = async (req, res) => {
+  try {
+    const revokedCount = await revokeUserRefreshTokens(req.user._id, 'logout_all');
+    res.status(200).json({
+      success: true,
+      message: 'Signed out of all sessions.',
+      data: { revokedCount },
+    });
+  } catch (error) {
+    LoggerUtil.error('Logout-all failed', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+/**
+ * POST /api/auth/refresh — NOT behind the Bearer `auth` middleware; the
+ * opaque refresh token in the body is the credential. Atomically rotates it
+ * and returns a fresh { accessToken, refreshToken } pair.
+ */
+const refreshTokenController = async (req, res) => {
+  try {
+    const refreshToken = req.body?.refreshToken;
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      return res.status(400).json({
+        success: false,
+        code: 'REFRESH_TOKEN_REQUIRED',
+        message: 'A refresh token is required.',
+      });
+    }
+
+    const result = await rotateRefreshToken({
+      presentedToken: refreshToken,
+      userAgent: req.get('user-agent') || null,
+      ipAddress: req.ip || null,
+      deviceLabel: typeof req.body?.deviceLabel === 'string' ? req.body.deviceLabel : undefined,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        tokenType: result.tokenType,
+        expiresIn: result.expiresIn,
+      },
+    });
+  } catch (error) {
+    if (error.code && error.httpStatus) {
+      return res.status(error.httpStatus).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+      });
+    }
+    LoggerUtil.error('Refresh token rotation failed', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+export { registerUser, loginUser, getProfile, updateProfile, uploadAvatarController, removeAvatarController, changePasswordController, requestAccountDeletionController, verifyAccountDeletionController, deleteAccountController, logoutUser, logoutAllController, refreshTokenController, verifyEmailOTPController, generateEmailOTPController, resendVerificationEmailController, forgotPasswordController, verifyResetOtpController, validateResetTokenController, resetPasswordController };

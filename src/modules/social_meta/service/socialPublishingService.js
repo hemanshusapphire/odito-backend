@@ -200,8 +200,17 @@ async function resolveAccount(projectId, platform, socialAccountId) {
  * Content/media validity for the CHOSEN platform is only fully enforced
  * at actual publish time (by the adapter) — a draft is allowed to be
  * incomplete, matching Phase 6's own "save draft" affordance.
+ *
+ * `importBatchId` / `importRowNumber` are OPTIONAL bulk-upload
+ * provenance. When omitted (every single-post create, and the legacy
+ * POST /social/publishing/bulk path) the created SocialPublication has
+ * both fields null and behaves exactly as before. When present, they are
+ * stamped onto the document and the model's partial unique index on
+ * `{importBatchId, importRowNumber}` guarantees one import row can never
+ * produce two publications — a concurrent/retried bulk import surfaces
+ * that as an E11000 the caller recovers from idempotently.
  */
-export async function createPublication(projectId, userId, { platform, socialAccountId, content = '', media = [], scheduledAt, timezone = null } = {}) {
+export async function createPublication(projectId, userId, { platform, socialAccountId, content = '', media = [], scheduledAt, timezone = null, importBatchId = null, importRowNumber = null } = {}) {
   const resolved = await resolveAccount(projectId, platform, socialAccountId);
   if (resolved.error) return { success: false, error: resolved.error };
 
@@ -225,6 +234,8 @@ export async function createPublication(projectId, userId, { platform, socialAcc
     scheduledAt: scheduledDate,
     timezone: scheduledDate ? (timezone || null) : null,
     createdBy: userId,
+    importBatchId: importBatchId || null,
+    importRowNumber: importRowNumber === null || importRowNumber === undefined ? null : importRowNumber,
   });
 
   LoggerUtil.service('SocialPublishing', 'create', 'completed', { projectId: String(projectId), publicationId: doc._id.toString(), platform, status: doc.status });

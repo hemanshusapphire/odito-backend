@@ -57,6 +57,25 @@ export const validateEnvironment = () => {
     'GOOGLE_ADS_DEVELOPER_TOKEN'
   ];
 
+  // Auth-hardening knobs are deliberately NOT in the list above: every one
+  // has a safe production default and is only a tuning/opt-in override, so
+  // an unset value is never worth a startup warning. All are documented in
+  // .env.example:
+  //   - AUTH_RATE_LIMIT_ENABLED / _WINDOW_MS, AUTH_LOGIN_MAX,
+  //     AUTH_OTP_VERIFY_MAX, AUTH_OTP_REQUEST_MAX, AUTH_REGISTER_MAX,
+  //     AUTH_REGISTER_EMAIL_MAX, AUTH_GOOGLE_MAX  (see authRateLimiters.js)
+  //   - GOOGLE_ANDROID_CLIENT_ID / GOOGLE_IOS_CLIENT_ID / GOOGLE_OAUTH_AUDIENCES
+  //     (mobile "Sign in with Google" — see config/googleAudiences.js)
+  //   - TRUST_PROXY  (set when the app runs behind a reverse proxy so
+  //     req.ip — which rate limiting keys on — is the real client IP)
+  //   - JWT_EXPIRY  (already honoured; now also the "remember me" lifetime
+  //     for the LEGACY web `data.token` via tokenService.LONG_SESSION_EXPIRY)
+  //   - ACCESS_TOKEN_EXPIRES_IN (default 30m), REFRESH_TOKEN_EXPIRES_IN
+  //     (default 60d), REFRESH_TOKEN_EXPIRES_IN_SHORT (default 7d),
+  //     AUTH_REFRESH_MAX (default 30), TOKEN_ISSUER / TOKEN_AUDIENCE
+  //     — Phase 2 mobile session (short access token + rotating refresh
+  //     token); see refreshTokenService.js / tokenService.js
+
   const warnings = [];
   for (const envVar of recommended) {
     if (!process.env[envVar]) {

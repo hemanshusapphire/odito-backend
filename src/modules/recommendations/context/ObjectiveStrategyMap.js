@@ -417,15 +417,6 @@ const STRATEGY_MAP = {
     promptMode:      PROMPT_MODE.ELEMENT_ADD,
   },
 
-  content_freshness: {
-    action:          OBJECTIVE_ACTION.ADD,
-    target:          'visible publication or last-updated date in page content',
-    constraint:      'date must be visible in rendered content — not only in schema or meta tags',
-    preserveContext: 'existing page content and structure must remain intact',
-    successCriteria: 'A visible "Published" or "Last Updated" date appears in the page content near the title or at the end of the article',
-    promptMode:      PROMPT_MODE.ELEMENT_ADD,
-  },
-
   person_schema_linked: (cs) => ({
     action:          cs.isAbsent ? OBJECTIVE_ACTION.ADD : OBJECTIVE_ACTION.FIX,
     target:          'Person schema',

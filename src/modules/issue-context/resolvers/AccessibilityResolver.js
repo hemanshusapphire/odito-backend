@@ -15,24 +15,6 @@ export class AccessibilityResolver extends BaseResolver {
 
     switch (issueId) {
 
-      case 'text_contrast': {
-        const failures = headlessData?.contrast_failures || _parseArray(detectedFromDoc);
-        const rows = failures.map(f => ({
-          'Element':      f.selector || f.element || 'Unknown element',
-          'Foreground':   f.foreground || f.fg || '—',
-          'Background':   f.background || f.bg || '—',
-          'Actual Ratio': f.ratio || f.contrast_ratio || '—',
-          'Required':     '4.5:1',
-        }));
-        return {
-          currentState: this._tableState(
-            ['Element', 'Foreground', 'Background', 'Actual Ratio', 'Required'],
-            rows
-          ),
-          expectedState: this._expectedState('Text contrast ratio ≥ 4.5:1 (WCAG AA)'),
-        };
-      }
-
       case 'form_inputs_labels': {
         const inputs = headlessData?.unlabeled_inputs || _parseArray(detectedFromDoc);
         const rows = inputs.map(i => ({

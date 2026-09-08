@@ -341,12 +341,6 @@ export class ContentResolver extends BaseResolver {
           expectedState: this._expectedState('Visible update date or dateModified in schema'),
         };
       }
-      case 'content_freshness': {
-        return {
-          currentState: this._absentState('visible publication or last-updated date in page content'),
-          expectedState: this._expectedState('Visible "Published" or "Last Updated" date displayed in page content (not only in schema or meta tags)'),
-        };
-      }
       case 'semantic_subtopics_covered': {
         const score = typeof detectedFromDoc === 'number' ? detectedFromDoc : null;
         return {

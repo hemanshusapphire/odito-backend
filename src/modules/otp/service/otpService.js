@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import Otp from '../model/Otp.js';
+import { normalizeAuthEmail } from '../../user/utils/authEmail.js';
 
 const OTP_MIN = 100000;
 const OTP_MAX = 1000000; // exclusive — crypto.randomInt(min, max) always yields exactly 6 digits
@@ -33,7 +34,7 @@ function expiryMinutesFor(purpose) {
  *   directly to a mail template, never persist or return it from an API.
  */
 export async function issueOtp({ userId = null, email, purpose }) {
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = normalizeAuthEmail(email);
 
   const latest = await Otp.findOne({ email: normalizedEmail, purpose, isUsed: false }).sort({ createdAt: -1 });
   if (latest?.cooldownUntil && latest.cooldownUntil > new Date()) {
@@ -70,7 +71,7 @@ export async function issueOtp({ userId = null, email, purpose }) {
  * record used on success so it can never be replayed.
  */
 export async function verifyOtp({ email, purpose, code }) {
-  const normalizedEmail = email.toLowerCase().trim();
+  const normalizedEmail = normalizeAuthEmail(email);
 
   const record = await Otp.findOne({ email: normalizedEmail, purpose, isUsed: false }).sort({ createdAt: -1 });
 

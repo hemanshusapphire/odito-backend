@@ -1,11 +1,16 @@
 import express from "express";
-import jwt from "jsonwebtoken";
 import { OAuth2Client } from "google-auth-library";
 import User from "../model/User.js";
 import GoogleConnection, { encryptToken } from "../../app_user/model/GoogleConnection.js";
 import SeoProject from "../../app_user/model/SeoProject.js";
 import { formatSubscriptionForResponse } from "../service/authService.js";
+import { signAuthToken } from "../service/tokenService.js";
+import { issueSessionBundle } from "../service/refreshTokenService.js";
+import { normalizeAuthEmail } from "../utils/authEmail.js";
+import { buildGoogleAudiences } from "../config/googleAudiences.js";
+import { googleCallbackLimiter } from "../middleware/authRateLimiters.js";
 import { AuthUtil } from "../../../utils/AuthUtil.js";
+import { LoggerUtil } from "../../../utils/LoggerUtil.js";
 import auth from "../middleware/auth.js";
 import { signGoogleVisibilityState, verifyGoogleVisibilityState } from "../../../utils/oauthState.js";
 import { getAccountConnectionStatus, disconnectAccountGoogleConnections } from "../../app_user/service/googleAccountConnectionService.js";
@@ -235,9 +240,13 @@ router.get("/google/callback", async (req, res) => {
       throw tokenError;
     }
 
+    const getAud = buildGoogleAudiences();
     const ticket = await exchangeClient.verifyIdToken({
       idToken: tokens.id_token,
-      audience: process.env.GOOGLE_CLIENT_ID
+      // Configured -> strict allow-list (now incl. mobile client IDs).
+      // Nothing configured (a broken deploy: GOOGLE_CLIENT_ID also unset) ->
+      // undefined, i.e. the same permissive behaviour this line had before.
+      audience: getAud.length ? getAud : undefined
     });
     const googleUser = ticket.getPayload();
 
@@ -357,6 +366,7 @@ router.get("/google/callback", async (req, res) => {
 
     // user_login purpose (legacy direct-hit path; the primary "Sign in with
     // Google" entry point is NextAuth, which uses the POST route below).
+    const googleEmail = normalizeAuthEmail(googleUser.email);
     let user = await User.findOne({ oauthProvider: "google", oauthProviderId: googleUser.sub });
 
     if (!user) {
@@ -364,7 +374,7 @@ router.get("/google/callback", async (req, res) => {
       // the email - otherwise an attacker could register the victim's email
       // first and then "verify" it via an unverified Google identity.
       user = googleUser.email_verified
-        ? await User.findOne({ email: googleUser.email })
+        ? await User.findOne({ email: googleEmail })
         : null;
 
       if (user) {
@@ -377,7 +387,7 @@ router.get("/google/callback", async (req, res) => {
         await user.save();
       } else {
         user = await User.create({
-          email: googleUser.email,
+          email: googleEmail,
           firstName: googleUser.given_name || googleUser.name?.split(" ")[0] || "",
           lastName: googleUser.family_name || googleUser.name?.split(" ").slice(1).join(" ") || "",
           avatar: googleUser.picture,
@@ -389,11 +399,17 @@ router.get("/google/callback", async (req, res) => {
       }
     }
 
-    const jwtToken = jwt.sign(
-      { id: user._id, roleId: user.roleId },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRY || "7d" }
-    );
+    // Google must not be a way around account suspension — same check
+    // password login has always done (authService.login).
+    if (!user.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: "Your account has been suspended.",
+        code: "ACCOUNT_SUSPENDED",
+      });
+    }
+
+    const jwtToken = signAuthToken(user, { rememberMe: true });
 
     const landingPage = await AuthUtil.determineUserLandingPage(user._id);
 
@@ -417,7 +433,8 @@ router.get("/google/callback", async (req, res) => {
       }
     });
   } catch (err) {
-    console.error("[GOOGLE_OAUTH] Callback error:", err.response?.data || err.message);
+    // Full diagnostics server-side only — never in the HTTP response.
+    LoggerUtil.error("[GOOGLE_OAUTH] GET callback error", err, { purpose });
 
     if (purpose === "google_visibility" || purpose === "google_ads") {
       const projectId = decodedState?.projectId;
@@ -431,23 +448,15 @@ router.get("/google/callback", async (req, res) => {
     if (err.code === 11000) {
       return res.json({
         success: true,
-        message: "Google account already connected",
-        error: "Connection already exists"
+        message: "Google account already connected"
       });
     }
 
-    if (err.response?.data?.error) {
-      return res.status(400).json({
-        success: false,
-        message: "Google OAuth failed",
-        error: err.response.data.error_description || err.message
-      });
-    }
-
+    // Generic, non-revealing — no err.message, no Google library / Mongo
+    // internals, no OAuth error_description.
     return res.status(400).json({
       success: false,
-      message: "Authentication failed",
-      error: err.message
+      message: "Authentication failed"
     });
   }
 });
@@ -460,7 +469,7 @@ router.get("/google/callback", async (req, res) => {
 // verified (signature, issuer, audience, expiry) before any user is looked
 // up or created. Previously this route minted app JWTs directly from raw
 // {email, googleId} body fields with no verification at all.
-router.post("/google/callback", async (req, res) => {
+router.post("/google/callback", googleCallbackLimiter, async (req, res) => {
   try {
     const { idToken } = req.body;
 
@@ -468,14 +477,20 @@ router.post("/google/callback", async (req, res) => {
       return res.status(400).json({ success: false, message: "Google ID token is required" });
     }
 
-    const validAudiences = [process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_NEXTAUTH_CLIENT_ID].filter(Boolean);
+    // Web (this backend + NextAuth) AND native (Android/iOS) client IDs — a
+    // native Google Sign-In SDK issues an ID token whose `aud` is the
+    // platform client ID, which the previous two-entry list rejected. All
+    // sourced from env, empty slots filtered. See config/googleAudiences.js.
+    const validAudiences = buildGoogleAudiences();
 
     let ticket;
     try {
       const verifierClient = new OAuth2Client();
       ticket = await verifierClient.verifyIdToken({
         idToken,
-        audience: validAudiences
+        // `undefined` only in a broken deploy with zero Google client IDs
+        // set — same effect the old `[...].filter(Boolean)` had when empty.
+        audience: validAudiences.length ? validAudiences : undefined
       });
     } catch (verifyError) {
       console.warn("[GOOGLE_OAUTH] Rejected POST callback: invalid ID token:", verifyError.message);
@@ -492,7 +507,7 @@ router.post("/google/callback", async (req, res) => {
       return res.status(401).json({ success: false, message: "Google account email is not verified" });
     }
 
-    const email = payload.email;
+    const email = normalizeAuthEmail(payload.email);
     const googleId = payload.sub;
     const name = payload.name;
     const avatar = payload.picture;
@@ -528,11 +543,28 @@ router.post("/google/callback", async (req, res) => {
       }
     }
 
-    const jwtToken = jwt.sign(
-      { id: user._id, roleId: user.roleId },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRY || "7d" }
-    );
+    // Google is not a bypass for account suspension (parity with password
+    // login — this check was missing here).
+    if (!user.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: "Your account has been suspended.",
+        code: "ACCOUNT_SUSPENDED",
+      });
+    }
+
+    // LEGACY web session token (`data.token`, 7d) — unchanged.
+    const jwtToken = signAuthToken(user, { rememberMe: true });
+
+    // Phase 2 mobile bundle (`data.tokens`) — short access token + rotating
+    // refresh token. A native app sends `{ idToken, deviceLabel? }` and
+    // consumes `data.tokens.*`; the web NextAuth flow ignores it.
+    const tokens = await issueSessionBundle(user, {
+      rememberMe: true,
+      deviceLabel: typeof req.body?.deviceLabel === "string" ? req.body.deviceLabel : undefined,
+      userAgent: req.get("user-agent") || undefined,
+      ipAddress: req.ip || undefined,
+    });
 
     const landingPage = await AuthUtil.determineUserLandingPage(user._id);
 
@@ -541,6 +573,7 @@ router.post("/google/callback", async (req, res) => {
       message: "Google login successful",
       data: {
         token: jwtToken,
+        tokens,
         user: {
           id: user._id,
           email: user.email,
@@ -557,8 +590,10 @@ router.post("/google/callback", async (req, res) => {
       }
     });
   } catch (err) {
-    console.error("[GOOGLE_OAUTH] NextAuth POST error:", err.message);
-    return res.status(500).json({ success: false, message: "Authentication failed", error: err.message });
+    // Full detail server-side only; response is generic (no err.message,
+    // no Mongo/Google-library internals).
+    LoggerUtil.error("[GOOGLE_OAUTH] POST callback error", err);
+    return res.status(500).json({ success: false, message: "Authentication failed" });
   }
 });
 

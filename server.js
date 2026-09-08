@@ -62,6 +62,8 @@ import express from 'express';
 
 import cors from 'cors';
 
+import helmet from 'helmet';
+
 import { createServer } from 'http';
 
 import { Server } from 'socket.io';
@@ -84,6 +86,7 @@ import { startDeletedProjectPurgeScheduler } from './src/modules/jobs/service/de
 import { startStaleLockScheduler } from './src/modules/jobs/service/staleLockScheduler.js';
 import { startVerificationBatchRecoveryScheduler } from './src/modules/verification/service/verificationBatchRecoveryScheduler.js';
 import { startSocialScheduler } from './src/modules/social_meta/service/socialSchedulerService.js';
+import { startBulkImportRecoveryScheduler } from './src/modules/social_meta/service/bulkImport/bulkImportRecoveryScheduler.js';
 import { handleStripeWebhook } from './src/modules/subscription/controller/subscriptionController.js';
 import auth from './src/modules/user/middleware/auth.js';
 import { requireAdmin } from './src/middleware/auth.middleware.js';
@@ -96,7 +99,18 @@ const startServer = async () => {
 
   const server = createServer(app);
 
-  
+  // Behind a reverse proxy / load balancer, req.ip is the proxy's address
+  // unless Express is told to trust the X-Forwarded-For chain. Auth rate
+  // limiting keys on req.ip, so this must be set correctly in such a
+  // deployment. Opt-in and off by default so single-host / local setups are
+  // completely unchanged. TRUST_PROXY accepts the same values app.set
+  // supports: "1" (first hop), "true", "loopback", a subnet, etc.
+  if (process.env.TRUST_PROXY) {
+    const tp = process.env.TRUST_PROXY;
+    app.set('trust proxy', tp === 'true' ? true : (/^\d+$/.test(tp) ? Number(tp) : tp));
+  }
+
+
 
   // Validate required environment variables
 
@@ -268,6 +282,12 @@ const startServer = async () => {
   // other scheduler above).
   startSocialScheduler();
 
+  // Bulk Social Upload: every 2 minutes, flip a genuinely abandoned
+  // `importing` import batch back to `failed` (re-claimable) so a crashed
+  // mid-import never blocks a project's next upload. Never touches
+  // publications. Opt-out via BULK_IMPORT_RECOVERY_ENABLED=false.
+  startBulkImportRecoveryScheduler();
+
 
 
   /**
@@ -379,6 +399,29 @@ const startServer = async () => {
   app.use("/reports", express.static(reportsDir));
 
 
+
+  // Security headers for the API surface (mounted here, so it covers /api/*,
+  // /, and the debug/test routes below — deliberately NOT the static
+  // /storage,/audio,/videos,/reports handlers registered above, so nothing
+  // interferes with the frontend loading avatars/screenshots/PDF reports
+  // cross-origin; uploaded avatars are already re-encoded to real WebP by
+  // sharp on upload).
+  //   - contentSecurityPolicy: off — a JSON API plus a one-line HTML health
+  //     page gains nothing from CSP and it's an easy way to break a future
+  //     embedded response.
+  //   - crossOriginResourcePolicy: 'cross-origin' — the frontend origin is
+  //     different from this API's; the default 'same-origin' would block
+  //     legitimate cross-origin reads.
+  //   - crossOriginEmbedderPolicy: off (also the current helmet default) —
+  //     pinned so a helmet upgrade can't silently enable COEP and break
+  //     third-party resource loads.
+  //   - HSTS left at helmet's default: ignored by browsers over plain HTTP
+  //     (local dev), correct once the backend is served over HTTPS.
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+    crossOriginEmbedderPolicy: false,
+  }));
 
   app.use(cors({
 

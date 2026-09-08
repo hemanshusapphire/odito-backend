@@ -1,9 +1,18 @@
 import { body, query } from 'express-validator';
+import { normalizeAuthEmail } from '../../user/utils/authEmail.js';
+
+// H3 fix: these chains previously used express-validator's `.normalizeEmail()`,
+// which strips dots and `+tags` from Gmail addresses. authService.js /
+// otpService.js store and look up with only `toLowerCase().trim()`, so a
+// user who registered `jane.doe@gmail.com` could never verify or reset —
+// the OTP routes searched for `janedoe@gmail.com`. Reads and writes now use
+// ONE normalizer (normalizeAuthEmail = trim + lowercase, nothing else),
+// applied here in place on req.body.email exactly as before.
 
 // Shared by any auth route that only needs an email — generate/resend
 // verification OTP, forgot-password.
 export const emailValidator = [
-  body('email').isEmail().normalizeEmail().withMessage('A valid email address is required'),
+  body('email').trim().isEmail().withMessage('A valid email address is required').customSanitizer(normalizeAuthEmail),
 ];
 
 // Shared by any auth route that verifies an email+code pair — email
@@ -12,7 +21,7 @@ export const emailValidator = [
 // of the reset flow) — it never returns a password-reset capability
 // itself, only a resetToken; see resetTokenValidator/resetPasswordTokenValidator.
 export const emailAndOtpValidator = [
-  body('email').isEmail().normalizeEmail().withMessage('A valid email address is required'),
+  body('email').trim().isEmail().withMessage('A valid email address is required').customSanitizer(normalizeAuthEmail),
   body('otp').trim().isLength({ min: 6, max: 6 }).isNumeric().withMessage('A valid 6-digit code is required'),
 ];
 

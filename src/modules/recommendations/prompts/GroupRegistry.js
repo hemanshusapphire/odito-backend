@@ -150,7 +150,6 @@ const ISSUE_GROUP_MAP = {
   child_schemas_reference_main_id:  GROUP.SCHEMA,
 
   // ── GROUP 5: Accessibility ──────────────────────────────────────────────────
-  text_contrast:                    GROUP.ACCESSIBILITY,
   form_inputs_labels:               GROUP.ACCESSIBILITY,
   keyboard_accessibility:           GROUP.ACCESSIBILITY,
   focus_indicators:                 GROUP.ACCESSIBILITY,
@@ -168,7 +167,6 @@ const ISSUE_GROUP_MAP = {
   // ── GROUP 6: AI Visibility Core ───────────────────────────────────────────
   // LLM readiness, citation signals, entity intro, semantic structure
   last_updated_date_visible:        GROUP.AI_VISIBILITY,
-  content_freshness:                GROUP.AI_VISIBILITY,
   only_one_primary_entity:          GROUP.AI_VISIBILITY,
   description_minimum_50_characters:GROUP.AI_VISIBILITY,
   semantic_html_tags_used:          GROUP.AI_VISIBILITY,
