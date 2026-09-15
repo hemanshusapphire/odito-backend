@@ -488,15 +488,23 @@ export const getGoogleAdsOverviewController = async (req, res) => {
 };
 
 /**
- * GET /projects/:projectId/google-ads/trends?range=7|30|90|365&granularity=daily|weekly|monthly
+ * GET /projects/:projectId/google-ads/trends?range=7|30|90|365&granularity=daily|weekly|monthly&campaignId=1234567890
  * Historical trend series backing the Campaign Performance Trends chart.
  * daily reads GoogleAdsCampaignMetrics directly; weekly/monthly read the
  * pre-aggregated GoogleAdsCampaignSnapshot rollups - neither calls Google.
+ *
+ * Optional `campaignId` scopes the series to one campaign (Campaign Detail
+ * page) instead of the account-wide rollup - GoogleAdsCampaignSnapshot
+ * already stores a dedicated per-campaign rollup row alongside the
+ * account-wide one (`campaign_id: null` vs a real id, see that model's
+ * getTrend), and GoogleAdsCampaignMetrics.getCampaignSeries already exists
+ * for the daily grain - both were simply never wired to this endpoint.
  */
 export const getGoogleAdsTrendsController = async (req, res) => {
   const { projectId } = req.params;
   const granularity = ['daily', 'weekly', 'monthly'].includes(req.query.granularity) ? req.query.granularity : 'daily';
-  LoggerUtil.info('Getting Google Ads trends', { projectId, granularity, userId: req.user._id.toString() });
+  const campaignId = /^\d+$/.test(req.query.campaignId || '') ? req.query.campaignId : null;
+  LoggerUtil.info('Getting Google Ads trends', { projectId, granularity, campaignId, userId: req.user._id.toString() });
 
   try {
     const ctx = await resolveProjectAndAdsConnection(req, res, { requireSelectedAccount: true });
@@ -505,7 +513,7 @@ export const getGoogleAdsTrendsController = async (req, res) => {
     const customerId = ctx.googleConnection.google_ads_customer_id;
     const { startDate, endDate, days, range: resolvedRange, cacheKey: rangeCacheKey } = await resolveDateRange(req, projectId, customerId);
 
-    const cacheKey = getCacheKey('ads_trends', ctx.googleConnection._id, customerId, granularity, rangeCacheKey);
+    const cacheKey = getCacheKey('ads_trends', ctx.googleConnection._id, customerId, granularity, campaignId || 'account', rangeCacheKey);
     const cached = getCachedData(cacheKey);
     if (cached) {
       return res.json(ResponseUtil.success(cached, 'Google Ads trends retrieved successfully'));
@@ -513,14 +521,16 @@ export const getGoogleAdsTrendsController = async (req, res) => {
 
     let series;
     if (granularity === 'daily') {
-      series = await GoogleAdsCampaignMetrics.getAccountDailySeries(projectId, customerId, startDate, endDate);
+      series = campaignId
+        ? await GoogleAdsCampaignMetrics.getCampaignSeries(projectId, campaignId, startDate, endDate)
+        : await GoogleAdsCampaignMetrics.getAccountDailySeries(projectId, customerId, startDate, endDate);
     } else {
       // Phase 2: scale the snapshot lookback to the resolved range instead
       // of a fixed 26 weeks / 12 months, so range=all / 12m / custom
       // actually widen the weekly/monthly trend too, not just the daily one.
       const periodDays = granularity === 'weekly' ? 7 : 30;
       const limit = Math.max(1, Math.ceil(days / periodDays));
-      const snapshotRows = await GoogleAdsCampaignSnapshot.getTrend(projectId, customerId, granularity, { campaignId: null, limit });
+      const snapshotRows = await GoogleAdsCampaignSnapshot.getTrend(projectId, customerId, granularity, { campaignId, limit });
       // GoogleAdsCampaignSnapshot documents key their period by `period_start`,
       // not `date` - but CampaignPerformanceTrendsCard.jsx's chart (XAxis
       // dataKey="date") only knows the `date` contract GoogleAdsCampaignMetrics.

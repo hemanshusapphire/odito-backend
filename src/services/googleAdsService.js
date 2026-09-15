@@ -61,7 +61,7 @@ let _client = null;
 /** Singleton GoogleAdsApi client - holds only app-level credentials (client
  * id/secret/developer token), never anything per-user. Per-connection state
  * (refresh_token, customer_id) is supplied per call via buildCustomer(). */
-function getGoogleAdsClient() {
+export function getGoogleAdsClient() {
   if (_client) return _client;
 
   if (!process.env.GOOGLE_ADS_DEVELOPER_TOKEN) {
@@ -87,7 +87,7 @@ function getGoogleAdsClient() {
  * `.refresh_token` here reads through the same Mongoose getter/decryptToken
  * pair every other Google integration relies on (see GoogleConnection.js).
  */
-function buildCustomer(googleConnection, { customerId, loginCustomerId } = {}) {
+export function buildCustomer(googleConnection, { customerId, loginCustomerId } = {}) {
   const client = getGoogleAdsClient();
   return client.Customer({
     customer_id: customerId,
@@ -181,7 +181,7 @@ function mapCampaignRow(row) {
  * bookkeeping as every other Google product, instead of only surfacing deep
  * inside a Google Ads-specific error shape.
  */
-async function ensureConnectionAlive(googleConnection) {
+export async function ensureConnectionAlive(googleConnection) {
   await getValidAccessToken(googleConnection);
 }
 
@@ -272,7 +272,7 @@ function categorizeErrorCodeKey(key) {
  * withRetry rethrows immediately instead of wasting attempts on a
  * deterministic failure.
  */
-async function withGoogleAdsRetry(fn, context) {
+export async function withGoogleAdsRetry(fn, context) {
   return withRetry(async () => {
     try {
       return await fn();
@@ -294,7 +294,7 @@ async function withGoogleAdsRetry(fn, context) {
 /** Wraps a failure from the functions below into a plain Error carrying
  * .category/.httpStatus/.response, mirroring validateBusinessProfileAccess's
  * "preserve the real diagnostics on a rethrown error" pattern. */
-function wrapGoogleAdsError(err, context, extra = {}) {
+export function wrapGoogleAdsError(err, context, extra = {}) {
   if (err?.type && err?.statusCode) {
     // Already a typed ErrorUtil error (e.g. a validation failure raised
     // before any Google call was made) - pass it through unchanged.
@@ -1683,6 +1683,11 @@ export function clearCacheForGoogleAdsConnection(connectionId) {
 }
 
 export default {
+  getGoogleAdsClient,
+  buildCustomer,
+  ensureConnectionAlive,
+  withGoogleAdsRetry,
+  wrapGoogleAdsError,
   getGoogleAdsAccessibleAccounts,
   validateGoogleAdsAccountAccess,
   getGoogleAdsCampaigns,

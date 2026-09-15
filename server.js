@@ -87,6 +87,7 @@ import { startStaleLockScheduler } from './src/modules/jobs/service/staleLockSch
 import { startVerificationBatchRecoveryScheduler } from './src/modules/verification/service/verificationBatchRecoveryScheduler.js';
 import { startSocialScheduler } from './src/modules/social_meta/service/socialSchedulerService.js';
 import { startBulkImportRecoveryScheduler } from './src/modules/social_meta/service/bulkImport/bulkImportRecoveryScheduler.js';
+import { startAutomationScheduler } from './src/modules/aiCampaign/service/automation/automationScheduler.js';
 import { handleStripeWebhook } from './src/modules/subscription/controller/subscriptionController.js';
 import auth from './src/modules/user/middleware/auth.js';
 import { requireAdmin } from './src/middleware/auth.middleware.js';
@@ -288,6 +289,13 @@ const startServer = async () => {
   // publications. Opt-out via BULK_IMPORT_RECOVERY_ENABLED=false.
   startBulkImportRecoveryScheduler();
 
+  // AI Campaign Builder — Phase 8 automation: every 15 minutes, scans for
+  // enabled automation policies whose scheduled window has arrived and runs
+  // them (observe/recommend/execute per policy). Global kill switch:
+  // AI_CAMPAIGN_AUTOMATION_ENABLED=false. A policy itself defaults
+  // disabled, so this being on is not sufficient for anything to happen —
+  // a user must also explicitly enable each policy.
+  startAutomationScheduler();
 
 
   /**

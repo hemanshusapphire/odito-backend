@@ -10,6 +10,7 @@ import searchConsoleRoutes from '../modules/app_user/routes/searchConsoleRoutes.
 import analyticsRoutes from '../modules/app_user/routes/analyticsRoutes.js';
 import businessProfileRoutes from '../modules/app_user/routes/businessProfileRoutes.js';
 import googleAdsRoutes from '../modules/app_user/routes/googleAdsRoutes.js';
+import aiCampaignRoutes from '../modules/aiCampaign/routes/aiCampaignRoutes.js';
 import brandAssetRoutes from '../modules/app_user/routes/brandAssetRoutes.js';
 import exportRoutes from '../modules/export/exportRoutes.js';
 import keywordResearchRoutes from '../modules/keyword_research/routes/keywordResearchRoutes.js';
@@ -69,6 +70,11 @@ router.use('/projects', analyticsRoutes);
 router.use('/projects', businessProfileRoutes);
 // Google Ads routes (matches frontend API calls)
 router.use('/projects', googleAdsRoutes);
+// AI Campaign Builder — Draft foundation (Phase 1: authenticated draft CRUD
+// only; no Claude generation, no Google Ads publishing yet — those are
+// later phases). Additive sibling namespace to the Google Ads routes above;
+// does not modify any existing Google Ads endpoint. See modules/aiCampaign/.
+router.use('/google-ads/ai-campaigns', aiCampaignRoutes);
 // Brand Asset Resolver routes (platform-wide logo/favicon resolution)
 router.use('/projects', brandAssetRoutes);
 // Job status update routes (for Python worker callbacks)
