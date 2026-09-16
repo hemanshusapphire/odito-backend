@@ -65,7 +65,6 @@ const REGISTRY = {
   multiple_h1_tags:           { resolver: RESOLVER.CONTENT,  dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.LIST,    issueType: 'on_page' },
   heading_hierarchy_skipped:  { resolver: RESOLVER.CONTENT,  dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.TREE,    issueType: 'on_page' },
   thin_content:               { resolver: RESOLVER.CONTENT,  dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.TEXT,    issueType: 'on_page' },
-  keyword_not_in_title:       { resolver: RESOLVER.CONTENT,  dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.TEXT,    issueType: 'on_page' },
   keyword_not_in_h1:          { resolver: RESOLVER.CONTENT,  dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.TEXT,    issueType: 'on_page' },
   duplicate_content:          { resolver: RESOLVER.CONTENT,  dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.LIST,    issueType: 'on_page' },
   title_pixel_length:         { resolver: RESOLVER.CONTENT,  dataSources: [DATA_SOURCE.PAGE_DATA],  displayType: DISPLAY_TYPE.TEXT,    issueType: 'on_page' },

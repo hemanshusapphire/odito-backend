@@ -76,7 +76,6 @@ const ISSUE_GROUP_MAP = {
   meta_description_too_long:  GROUP.TEXT_OPTIMIZATION,
   meta_description_ctr:       GROUP.TEXT_OPTIMIZATION,
   multiple_meta_descriptions: GROUP.TEXT_OPTIMIZATION,
-  keyword_not_in_title:       GROUP.TEXT_OPTIMIZATION,
   keyword_not_in_h1:          GROUP.TEXT_OPTIMIZATION,
   h1_missing:                 GROUP.TEXT_OPTIMIZATION,
   multiple_h1_tags:           GROUP.TEXT_OPTIMIZATION,

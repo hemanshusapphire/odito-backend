@@ -292,14 +292,6 @@ export class ContentResolver extends BaseResolver {
         };
       }
 
-      // ─── Keyword ──────────────────────────────────────────────────────
-      case 'keyword_not_in_title': {
-        const displayTitle = pageTitle || (_isActualText(detectedFromDoc) ? detectedFromDoc : null) || null;
-        return {
-          currentState: this._textState(displayTitle, displayTitle ? displayTitle.length : null, 'characters', null, null, 'Title'),
-          expectedState: this._expectedState('Title tag contains the primary keyword'),
-        };
-      }
       // ─── Duplicate Content ────────────────────────────────────────────
       case 'duplicate_content': {
         const dupes = Array.isArray(detectedFromDoc) ? detectedFromDoc : [];

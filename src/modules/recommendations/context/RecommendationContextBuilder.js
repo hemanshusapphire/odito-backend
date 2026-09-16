@@ -43,7 +43,7 @@ const CONTENT_ISSUE_IDS = new Set([
   'meta_description_missing', 'meta_description_too_short', 'meta_description_too_long',
   'meta_description_ctr', 'multiple_meta_descriptions',
   'title_missing', 'title_too_short', 'title_too_long', 'title_pixel_length',
-  'multiple_title_tags', 'keyword_not_in_title', 'keyword_not_in_h1',
+  'multiple_title_tags', 'keyword_not_in_h1',
   'h1_missing', 'multiple_h1_tags', 'heading_hierarchy_skipped',
   'thin_content', 'service_pages_800_words',
   'description_minimum_50_characters', 'first_60_words_direct_answer',

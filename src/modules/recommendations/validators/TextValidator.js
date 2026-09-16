@@ -21,7 +21,6 @@ const CHAR_RANGE_BY_ISSUE = {
   title_too_long:             [30,  60],
   title_missing:              [30,  60],
   title_pixel_length:         [30,  60],
-  keyword_not_in_title:       [30,  60],
   meta_description_too_short: [120, 160],
   meta_description_too_long:  [120, 160],
   meta_description_missing:   [120, 160],

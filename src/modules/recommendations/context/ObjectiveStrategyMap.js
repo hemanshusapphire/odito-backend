@@ -145,15 +145,6 @@ const STRATEGY_MAP = {
     promptMode:      PROMPT_MODE.STRUCTURAL_FIX,
   },
 
-  keyword_not_in_title: (cs) => ({
-    action:          OBJECTIVE_ACTION.IMPROVE,
-    target:          'title tag',
-    constraint:      'primary keyword present near the start of the title',
-    preserveContext: `keep existing meaning${cs.rawText ? `. Current title: "${_preview(cs.rawText, 60)}"` : ''}`,
-    successCriteria: 'Title tag contains the primary keyword within the first 30 characters',
-    promptMode:      PROMPT_MODE.CONTENT_REWRITE,
-  }),
-
   // ─── Content ───────────────────────────────────────────────────────────────
 
   thin_content: (cs, es) => ({
