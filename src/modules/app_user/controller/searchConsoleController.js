@@ -98,7 +98,7 @@ export const syncSearchConsoleData = async (req, res) => {
 
     // Step 2: Validate Google connection
     LoggerUtil.debug('Step 2: Validating Google connection...');
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'search_console');
     
     if (!googleConnection) {
       LoggerUtil.warn('No active Google connection found', { projectId });
@@ -352,7 +352,7 @@ export const getSearchConsoleSyncStatus = async (req, res) => {
     }
 
     // Check Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'search_console');
     
     if (!googleConnection) {
       return res.json(ResponseUtil.success({
@@ -453,7 +453,7 @@ export const getSearchConsoleData = async (req, res) => {
     }
 
     // Validate Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'search_console');
     
     if (!googleConnection || !googleConnection.service_type.includes('search_console')) {
       return res.status(400).json(ResponseUtil.error('Search Console not connected for this project', 400));
@@ -581,7 +581,7 @@ export const getSearchConsoleSitesList = async (req, res) => {
       return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'search_console');
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
     }
@@ -623,7 +623,7 @@ export const selectSearchConsoleSite = async (req, res) => {
       return res.status(400).json(ResponseUtil.error('Site URL is required', 400));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'search_console');
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
     }
@@ -675,7 +675,7 @@ export const getSearchConsoleTrends = async (req, res) => {
       return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'search_console');
     if (!googleConnection || !googleConnection.service_type.includes('search_console')) {
       return res.status(400).json(ResponseUtil.error('Search Console not connected for this project', 400));
     }
@@ -736,7 +736,7 @@ export const getSearchConsoleBreakdown = async (req, res) => {
       return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'search_console');
     if (!googleConnection || !googleConnection.service_type.includes('search_console')) {
       return res.status(400).json(ResponseUtil.error('Search Console not connected for this project', 400));
     }
@@ -788,7 +788,7 @@ export const getSearchConsoleSitemapsList = async (req, res) => {
       return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'search_console');
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
     }
@@ -833,7 +833,7 @@ export const inspectSearchConsoleUrlHandler = async (req, res) => {
       return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'search_console');
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
     }

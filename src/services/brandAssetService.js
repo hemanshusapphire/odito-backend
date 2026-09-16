@@ -235,7 +235,7 @@ export async function extractWebsiteBrandAssets(url) {
 export async function resolveProjectBrandAssets(project, { force = false } = {}) {
   // Tier 1: Google Business Profile logo - live read, already synced/cached
   // by businessProfileMediaService.js. Never re-fetched here.
-  const googleConnection = await GoogleConnection.findActiveConnection(project.user_id, project._id, 'google_visibility');
+  const googleConnection = await GoogleConnection.findActiveConnection(project.user_id, project._id, 'business_profile');
   if (googleConnection?.service_type?.includes('business_profile')) {
     const byCategory = await BusinessProfileMedia.getPrimaryByCategory(project._id, ['LOGO']);
     const googleLogo = byCategory?.LOGO;

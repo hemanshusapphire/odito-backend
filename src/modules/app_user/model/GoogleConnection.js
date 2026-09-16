@@ -90,16 +90,24 @@ const googleConnectionSchema = new mongoose.Schema({
   },
 
   // 🎯 Connection purpose
-  // 'google_ads' is a deliberately separate purpose from 'google_visibility'
-  // (not a 4th service_type on the existing bundle) so that adding Google
-  // Ads never forces existing Search Console/Analytics/Business Profile
-  // connections to re-consent to a new scope. Same model, same encryption,
-  // same refresh flow — just its own row per (user_id, project_id), matching
-  // the compound unique index below.
+  // 'google_ads' was the first purpose split out from 'google_visibility' (a
+  // dedicated row per (user_id, project_id) rather than a 4th service_type
+  // on the bundle) so that adding Google Ads never forced existing Search
+  // Console/Analytics/Business Profile connections to re-consent to a new
+  // scope. 'search_console', 'analytics' and 'business_profile' repeat that
+  // same split for the remaining three services — each now gets its own row,
+  // its own Google account, its own OAuth consent, independent of the
+  // others. 'google_visibility' is kept in the enum as a frozen legacy value
+  // only: existing bundled rows are never deleted or mutated, but nothing
+  // writes a new 'google_visibility' row after this change (see
+  // scripts/splitGoogleVisibilityConnections.js for the one-time backfill
+  // that splits each legacy row into three independent ones). Same model,
+  // same encryption, same refresh flow — just one row per
+  // (user_id, project_id, purpose), matching the compound unique index below.
   purpose: {
     type: String,
     required: [true, 'Purpose is required'],
-    enum: ['google_visibility', 'google_ads'],
+    enum: ['google_visibility', 'google_ads', 'search_console', 'analytics', 'business_profile'],
     default: 'google_visibility'
   },
 

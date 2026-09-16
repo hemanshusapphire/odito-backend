@@ -15,6 +15,7 @@
     "seed:jobs": "node seeds/jobTypesSeed.js",
     "seed:system-admin": "node src/modules/user/scripts/seedSystemAdmin.js",
     "seed:ranking-history": "node src/modules/app_user/scripts/seedRankingHistory.js",
+    "migrate:split-google-visibility": "node src/modules/app_user/scripts/splitGoogleVisibilityConnections.js",
     "load:smoke": "node load-tests/index.js --level=smoke",
     "load:light": "node load-tests/index.js --level=light",
     "load:medium": "node load-tests/index.js --level=medium",

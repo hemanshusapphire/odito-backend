@@ -78,7 +78,7 @@ export const syncAnalyticsData = async (req, res) => {
     });
 
     LoggerUtil.debug('Step 2: Validating Google connection...');
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'analytics');
     
     if (!googleConnection) {
       LoggerUtil.warn('No active Google connection found', { projectId });
@@ -268,7 +268,7 @@ export const getAnalyticsSyncStatus = async (req, res) => {
     }
 
     // Check Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'analytics');
     
     if (!googleConnection) {
       return res.json(ResponseUtil.success({
@@ -363,7 +363,7 @@ export const getAnalyticsData = async (req, res) => {
     }
 
     // Validate Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'analytics');
     
     if (!googleConnection || !googleConnection.service_type.includes('analytics')) {
       return res.status(400).json(ResponseUtil.error('Analytics not connected for this project', 400));
@@ -496,7 +496,7 @@ export const getAnalyticsPropertiesList = async (req, res) => {
     }
 
     // Check Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'analytics');
     
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
@@ -546,7 +546,7 @@ export const selectAnalyticsProperty = async (req, res) => {
     }
 
     // Check Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'analytics');
     
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
@@ -601,7 +601,7 @@ async function resolveAnalyticsConnection(projectId, userId) {
     return { error: { status: 403, body: ResponseUtil.accessDenied('Access denied') } };
   }
 
-  const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+  const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'analytics');
   if (!googleConnection || !googleConnection.service_type.includes('analytics') || !googleConnection.analytics_property_id) {
     return { error: { status: 400, body: ResponseUtil.error('Analytics not connected for this project. Please connect Google and select a property first.', 400) } };
   }

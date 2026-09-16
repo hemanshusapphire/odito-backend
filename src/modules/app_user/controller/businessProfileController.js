@@ -71,7 +71,7 @@ export const syncBusinessProfileData = async (req, res) => {
     });
 
     LoggerUtil.debug('Step 2: Validating Google connection...');
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
     
     if (!googleConnection) {
       LoggerUtil.warn('No active Google connection found', { projectId });
@@ -246,7 +246,7 @@ export const getBusinessProfileSyncStatus = async (req, res) => {
     }
 
     // Check Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
 
     if (!googleConnection) {
       // Distinguish "never connected" from "connected once, now expired/revoked"
@@ -254,7 +254,7 @@ export const getBusinessProfileSyncStatus = async (req, res) => {
       const staleConnection = await GoogleConnection.findOne({
         user_id: userId,
         project_id: projectId,
-        purpose: 'google_visibility'
+        purpose: 'business_profile'
       });
 
       return res.json(ResponseUtil.success({
@@ -355,7 +355,7 @@ export const getBusinessProfileData = async (req, res) => {
     }
 
     // Validate Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
     
     if (!googleConnection || !googleConnection.service_type.includes('business_profile')) {
       return res.status(400).json(ResponseUtil.error('Business Profile not connected for this project', 400));
@@ -498,7 +498,7 @@ export const getBusinessProfileAccountsController = async (req, res) => {
     }
 
     // Check Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
     
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
@@ -567,7 +567,7 @@ export const getBusinessProfileLocationsController = async (req, res) => {
     }
 
     // Check Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
     
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
@@ -623,7 +623,7 @@ export const selectBusinessProfile = async (req, res) => {
     }
 
     // Check Google connection
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
     
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
@@ -949,7 +949,7 @@ export const syncBusinessProfileReviewsController = async (req, res) => {
       return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
     }
@@ -1071,7 +1071,7 @@ export const getBusinessProfileTrendsController = async (req, res) => {
       return res.status(400).json(ResponseUtil.error(`Invalid range. Must be one of: ${Object.keys(VALID_TREND_RANGES).join(', ')}`, 400));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
     if (!googleConnection || !googleConnection.business_location_id) {
       return res.status(400).json(ResponseUtil.error('Business Profile not connected for this project', 400));
     }
@@ -1133,7 +1133,7 @@ export const getBusinessProfileMediaController = async (req, res) => {
       return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
     if (!googleConnection || !googleConnection.business_account_id || !googleConnection.business_location_id) {
       return res.json(ResponseUtil.success({
         available: false,
@@ -1192,7 +1192,7 @@ export const syncBusinessProfileMediaController = async (req, res) => {
       return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
     }
 
-    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId);
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
     if (!googleConnection) {
       return res.status(400).json(ResponseUtil.error('Google account not connected', 400));
     }

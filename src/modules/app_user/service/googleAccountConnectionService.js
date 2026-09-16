@@ -1,8 +1,15 @@
 import GoogleConnection from '../model/GoogleConnection.js';
+import SeoProject from '../model/SeoProject.js';
 import { revokeGoogleToken } from './googleTokenRevocationService.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 
 const SERVICE = 'GoogleAccountConnection';
+
+// The four independent per-service purposes a project can have its own
+// Google account for (Section 3/16) — 'google_visibility' is deliberately
+// excluded here, it's a frozen legacy value nothing new ever reads/writes
+// through this project-scoped path (see GoogleConnection.js).
+const PROJECT_SERVICE_PURPOSES = ['google_ads', 'search_console', 'analytics', 'business_profile'];
 
 /**
  * Account-level Google connection status — Settings → Connected Accounts.
@@ -110,4 +117,112 @@ export async function disconnectAccountGoogleConnections(userId) {
   }
 
   return { total: connections.length, revoked, failed };
+}
+
+/**
+ * Shapes one GoogleConnection (or its absence) into the small status object
+ * every service row in Settings → Google Services renders. Mirrors the
+ * "connected now" vs "connected once, now expired/revoked" vs "never
+ * connected" distinction already proven by the per-service status
+ * controllers (getBusinessProfileSyncStatus etc.), just without the
+ * service-specific data-count fields those also return - this is Settings'
+ * lightweight, DB-only connection summary, not a full sync status.
+ */
+function shapeConnectionStatus(connection) {
+  if (!connection) {
+    return { connected: false, status: 'not_connected', email: null, connectedAt: null, lastSync: null };
+  }
+
+  const now = new Date();
+  const isLive = connection.status === 'active' && (!connection.token_expires_at || connection.token_expires_at > now);
+
+  if (isLive) {
+    return {
+      connected: true,
+      status: 'connected',
+      email: connection.google_email,
+      connectedAt: connection.connected_at,
+      lastSync: connection.last_sync_at,
+    };
+  }
+
+  const isExpired = connection.token_expires_at && connection.token_expires_at <= now;
+  return {
+    connected: false,
+    status: connection.status === 'revoked' ? 'revoked' : (isExpired ? 'expired' : connection.status),
+    email: connection.google_email,
+    connectedAt: connection.connected_at,
+    lastSync: connection.last_sync_at,
+  };
+}
+
+/**
+ * Project-scoped, per-service Google connection status — Settings → Google
+ * Services. Unlike getAccountConnectionStatus above (an account-wide rollup
+ * across every project and every service, used only for account deletion
+ * cascade bookkeeping), this reflects exactly what Section 16 requires:
+ * one independent status per service, for THIS project only. A single query
+ * against the existing {user_id, project_id, purpose} index - no live
+ * Google API calls (Section 34: Settings must never call Google just to
+ * render "Connected").
+ * @param {string} userId
+ * @param {string} projectId
+ * @returns {Promise<{google_ads: object, search_console: object, analytics: object, business_profile: object}>}
+ */
+export async function getProjectGoogleServiceConnections(userId, projectId) {
+  const connections = await GoogleConnection.find({
+    user_id: userId,
+    project_id: projectId,
+    purpose: { $in: PROJECT_SERVICE_PURPOSES },
+  });
+
+  const byPurpose = new Map(connections.map((c) => [c.purpose, c]));
+
+  const result = {};
+  for (const purpose of PROJECT_SERVICE_PURPOSES) {
+    result[purpose] = shapeConnectionStatus(byPurpose.get(purpose) || null);
+  }
+  return result;
+}
+
+/**
+ * Disconnects exactly one service's Google connection for one project -
+ * never any other service, never any other project. Revokes the real token
+ * with Google first (same revokeGoogleToken helper every other disconnect
+ * path uses), then marks that single row 'revoked' rather than deleting it.
+ * @param {string} userId
+ * @param {string} projectId
+ * @param {'google_ads'|'search_console'|'analytics'|'business_profile'} purpose
+ * @returns {Promise<{disconnected: boolean, alreadyDisconnected?: boolean}>}
+ */
+export async function disconnectProjectGoogleConnection(userId, projectId, purpose) {
+  if (!PROJECT_SERVICE_PURPOSES.includes(purpose)) {
+    throw new Error(`Invalid Google service: ${purpose}`);
+  }
+
+  const project = await SeoProject.findById(projectId);
+  if (!project || project.user_id.toString() !== userId.toString()) {
+    const err = new Error('Access denied');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const connection = await GoogleConnection.findOne({
+    user_id: userId,
+    project_id: projectId,
+    purpose,
+    status: 'active',
+  });
+
+  if (!connection) {
+    return { disconnected: false, alreadyDisconnected: true };
+  }
+
+  const token = connection.refresh_token || connection.access_token;
+  if (token) await revokeGoogleToken(token);
+
+  connection.status = 'revoked';
+  await connection.save();
+
+  return { disconnected: true };
 }
