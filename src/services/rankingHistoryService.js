@@ -19,6 +19,55 @@ function normalizeKeyword(kw) {
   return (kw || '').toLowerCase().trim();
 }
 
+/**
+ * Maps a raw upstream error (DataForSEO's own message, a network error,
+ * etc.) to a short, generic, customer-safe message. The RAW message is
+ * still logged via LoggerUtil.warn wherever this is called from — full
+ * detail for support/debugging never disappears — but last_scan_error is
+ * a database field returned verbatim by getProjectRankings/rescanKeyword/
+ * addKeywordController's JSON responses, so whatever lands here must never
+ * name the vendor, an account status, a support email, or any other
+ * internal infrastructure detail a customer shouldn't see over the wire.
+ */
+function sanitizeScanErrorForStorage(rawError) {
+  const msg = String(rawError || '');
+  // \bNNN\b (word-boundary), never a bare substring match — "402" must not
+  // accidentally match inside an unrelated code like "40201" (DataForSEO's
+  // account-pause code), which has no digit boundary around "402" at all.
+  if (/rate limit|too many requests|\b429\b/i.test(msg)) {
+    return 'Ranking check temporarily rate-limited. Please try again shortly.';
+  }
+  if (/unusual activity|account.*paused|paused.*account|\b40201\b/i.test(msg)) {
+    return 'Ranking check temporarily unavailable — the search data provider has paused API access. Please try again later.';
+  }
+  if (/timed?\s*out|timeout|ETIMEDOUT|ECONNABORTED/i.test(msg)) {
+    return 'Ranking check timed out. Please try again.';
+  }
+  if (/authentication failed|insufficient credits|\b401\b|\b402\b/i.test(msg)) {
+    return 'Ranking check is temporarily unavailable. Please try again later.';
+  }
+  return 'Ranking check temporarily unavailable — the search data provider could not be reached. Please try again shortly.';
+}
+
+/**
+ * Explicit, additive per-keyword status derived from fields already on
+ * the document (last_scan_status + current_rank) — Section E of the
+ * UX/state-handling audit. Existing response fields are unchanged; this is
+ * a convenience on top of them, not a replacement, so no consumer relying
+ * on the current shape breaks.
+ *
+ * 'scan_error'  — the last scan's organic request/parse itself failed;
+ *                 current_rank (if present) is a stale-but-still-valid
+ *                 prior result, not a fresh "not ranked".
+ * 'ranked'      — a real scan succeeded and found the target domain.
+ * 'not_ranked'  — a real scan succeeded and did NOT find it.
+ */
+export function deriveKeywordStatus(kw) {
+  if (!kw) return null;
+  if (kw.last_scan_status === 'error') return 'scan_error';
+  return kw.current_rank != null ? 'ranked' : 'not_ranked';
+}
+
 function cleanRankingUrls(rawUrls) {
   if (!Array.isArray(rawUrls)) {
     LoggerUtil.warn('[cleanRankingUrls] received non-array', { type: typeof rawUrls, value: String(rawUrls).slice(0, 200) });
@@ -186,6 +235,48 @@ export async function deriveHistoricalRanksForProject(projectId) {
  *   - history cache refreshed when stale (>1 hour)
  */
 async function buildKeywordUpdate({ existingKw, projectId, incomingResult, now, scanSource }) {
+  // incomingResult.scan_error is set by processKeyword() (seoOnboardingController.js)
+  // only when the organic SERP request/parse itself failed (DataForSEO task-level
+  // error, timeout, etc.) — NOT when the request succeeded and simply found no
+  // match. On a genuine failure we have zero new information about this
+  // keyword's ranking: falling through to the normal path would derive
+  // current_rank from an empty ranking_urls array and overwrite whatever was
+  // previously known with null, turning an infrastructure failure into a false
+  // "Not ranked". So every rank-derived field is preserved verbatim from the
+  // existing document, and only last_scan_status/last_scan_error change —
+  // enough for the UI to show a distinct "scan error" state instead of
+  // conflating it with "confirmed not ranked" (see UserAddedKeywords.jsx).
+  if (incomingResult.scan_error) {
+    LoggerUtil.warn('[buildKeywordUpdate] scan failed — preserving existing rank state', {
+      keyword:    incomingResult.keyword,
+      scan_error: incomingResult.scan_error
+    });
+
+    return {
+      keyword:            incomingResult.keyword,
+      current_rank:       existingKw?.current_rank    ?? null,
+      rank:               existingKw?.current_rank    ?? null,
+      best_rank:          existingKw?.best_rank        ?? null,
+      benchmark_rank:     existingKw?.benchmark_rank   ?? null,
+      prev_scan_rank:     existingKw?.prev_scan_rank   ?? null,
+      prev_week_rank:     existingKw?.prev_week_rank   ?? null,
+      prev_month_rank:    existingKw?.prev_month_rank  ?? null,
+      history_derived_at: existingKw?.history_derived_at ?? null,
+      // maps_rank/maps_listing come from a completely independent API call
+      // (MapsRankingService, not DataForSeoService.getSerpOrganic) — an
+      // organic scan_error must never suppress a maps result this same run
+      // legitimately produced.
+      maps_rank:          incomingResult.maps_rank    ?? existingKw?.maps_rank    ?? null,
+      maps_listing:       incomingResult.maps_listing ?? existingKw?.maps_listing ?? null,
+      ranking_urls:       existingKw?.ranking_urls    ?? [],
+      last_rescanned_at:  now,
+      last_scan_source:   scanSource || 'onboarding',
+      scan_count:         (existingKw?.scan_count ?? 0) + 1,
+      last_scan_status:   'error',
+      last_scan_error:    sanitizeScanErrorForStorage(incomingResult.scan_error)
+    };
+  }
+
   const rankingUrls      = cleanRankingUrls(incomingResult.ranking_urls);
   const incomingCurrent  = computeCurrentRank(rankingUrls);  // enforces invariant
 
@@ -242,7 +333,11 @@ async function buildKeywordUpdate({ existingKw, projectId, incomingResult, now, 
     ranking_urls:       rankingUrls,
     last_rescanned_at:  now,
     last_scan_source:   scanSource || 'onboarding',
-    scan_count:         (existingKw?.scan_count ?? 0) + 1
+    scan_count:         (existingKw?.scan_count ?? 0) + 1,
+    // Clears any error left by a previous failed scan (see the scan_error
+    // branch above) now that a scan has actually succeeded.
+    last_scan_status:   'ok',
+    last_scan_error:    null
   };
 }
 

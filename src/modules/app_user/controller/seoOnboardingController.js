@@ -8,7 +8,8 @@ import {
   deriveHistoricalRanks,
   deriveHistoricalRanksForProject,
   addKeyword,
-  deleteKeyword
+  deleteKeyword,
+  deriveKeywordStatus
 } from '../../../services/rankingHistoryService.js';
 import { canConsumeQuota } from '../../subscription/service/subscriptionLifecycle.js';
 import { getKeywordLimit } from '../../../config/plans.js';
@@ -164,16 +165,86 @@ function getFallbackKeywords(subType) {
 }
 
 /**
+ * TEMPORARY structured logging for the organic-call-flow investigation
+ * (verifying the DataForSEO organic request actually runs, actually
+ * succeeds, and is actually parsed correctly — as opposed to a Maps result
+ * being mistaken for an organic one, or an API failure silently becoming
+ * rank=null). Only called when serpData is non-null, i.e. getSerpOrganic()
+ * did NOT throw — a thrown error is logged separately by
+ * DataForSeoService's own [DATAFORSEO_ORGANIC_ERROR] and never reaches here.
+ * Logs only shape/metadata — never credentials, never the full raw response.
+ * Safe to remove once the investigation is closed.
+ */
+function logSerpOrganicDebug({ keyword, locationCode, languageCode, cleanDomain, serpData }) {
+  try {
+    const task  = serpData?.tasks?.[0];
+    const allItems = RankingParserService._collectAllItems(serpData);
+
+    console.log(
+      `[DATAFORSEO_ORGANIC_RESULT] taskId=${task?.id ?? 'null'} | statusCode=${task?.status_code ?? 'null'} | ` +
+      `statusMessage="${task?.status_message ?? 'null'}" | resultExists=${task?.result != null} | ` +
+      `resultLength=${Array.isArray(task?.result) ? task.result.length : 0} | itemsCount=${allItems.length} | ` +
+      `types=${JSON.stringify(allItems.slice(0, 20).map(i => i?.type ?? 'unknown'))}`
+    );
+
+    // Step 5/6 sanity check: this MUST be organic items only, never a maps
+    // result mistaken for one — RankingParserService.parseOrganic() filters
+    // strictly on item.type === 'organic' (schema_rules-style type gate),
+    // and 'maps_search'/'local_pack' items are never counted here.
+    const organicOnly = allItems.filter(i => i?.type === 'organic');
+    const positions = organicOnly.map(i => i.rank_group ?? i.rank_absolute ?? null).filter(p => p != null);
+
+    console.log(
+      `[DATAFORSEO_ORGANIC_ITEMS] totalItems=${allItems.length} | organicItems=${organicOnly.length} | ` +
+      `firstOrganicPosition=${positions[0] ?? 'null'} | lastOrganicPosition=${positions[positions.length - 1] ?? 'null'}`
+    );
+
+    let targetMatch = { found: false, position: null, domain: null, url: null };
+    for (const item of organicOnly.slice(0, 20)) {
+      const url    = item.url || item.snippet_url || item.link || '';
+      const domain = url ? RankingParserService.normalizeDomain(url) : RankingParserService.normalizeDomain(item.domain || '');
+      const position = item.rank_group ?? item.rank_absolute ?? null;
+
+      console.log(
+        `[DATAFORSEO_ORGANIC_ITEM] position=${position} | rank_group=${item.rank_group ?? 'null'} | ` +
+        `rank_absolute=${item.rank_absolute ?? 'null'} | domain="${domain}" | url="${url}" | title="${(item.title || '').slice(0, 80)}"`
+      );
+
+      const isMatch = domain === cleanDomain || (cleanDomain && domain && (cleanDomain.includes(domain) || domain.includes(cleanDomain)));
+      if (isMatch && !targetMatch.found) {
+        targetMatch = { found: true, position, domain, url };
+      }
+    }
+
+    console.log(
+      `[DATAFORSEO_TARGET_MATCH] targetDomain="${cleanDomain}" | found=${targetMatch.found} | ` +
+      `position=${targetMatch.position ?? 'null'} | domain="${targetMatch.domain ?? ''}" | url="${targetMatch.url ?? ''}"`
+    );
+  } catch (err) {
+    LoggerUtil.warn('[DATAFORSEO_ORGANIC_RESULT] failed to build debug summary (non-fatal)', { keyword, error: err.message });
+  }
+}
+
+/**
  * Run SERP + optional Maps API in parallel for a single keyword.
  * Returns a result object matching the shape the frontend expects.
  */
 async function processKeyword(keyword, cleanDomain, locationCode, languageCode, seoScope, businessName) {
   const shouldFetchMaps = seoScope === 'local' && !!businessName?.trim();
 
+  // Distinguishes "the organic SERP request/parse itself failed" from "the
+  // request succeeded and genuinely found no match" — buildKeywordUpdate
+  // (rankingHistoryService.js) uses this to decide whether current_rank/
+  // ranking_urls may be safely overwritten (real scan) or must be left
+  // untouched (a failure carries no information about the real ranking —
+  // see that function's own doc comment for the full rationale).
+  let serpError = null;
+
   const [serpData, mapsResult] = await Promise.all([
     DataForSeoService.getSerpOrganic(keyword, locationCode, languageCode)
       .catch(err => {
         console.error(`[SERP] Failed | keyword="${keyword}" | ${err.message}`);
+        serpError = err.message;
         return null;
       }),
     shouldFetchMaps
@@ -183,6 +254,8 @@ async function processKeyword(keyword, cleanDomain, locationCode, languageCode, 
 
   let rankingUrls = [], bestRank = null, organicMapsRank = null;
   if (serpData) {
+    logSerpOrganicDebug({ keyword, locationCode, languageCode, cleanDomain, serpData });
+
     const parsed     = RankingParserService.parseOrganic(serpData, cleanDomain);
     rankingUrls      = parsed.ranking_urls;
     bestRank         = parsed.best_rank;
@@ -205,7 +278,25 @@ async function processKeyword(keyword, cleanDomain, locationCode, languageCode, 
     finalMapsListing = null;
   }
 
-  console.log(`[ONBOARDING] keyword="${keyword}" | rank=${bestRank} | maps_rank=${finalMapsRank} | urls=${rankingUrls.length}`);
+  console.log(
+    `[ONBOARDING] keyword="${keyword}" | rank=${bestRank} | maps_rank=${finalMapsRank} | urls=${rankingUrls.length}` +
+    (serpError ? ` | serp_error="${serpError}"` : '')
+  );
+
+  // Step 8 trace: the exact value getSerpOrganic()'s result was parsed
+  // into, right before it's handed to the caller (checkRanking/rescanKeyword/
+  // addKeywordController -> buildKeywordUpdate). rawResultCount reflects the
+  // DataForSEO response itself (task.result page count); organicResultCount/
+  // urlsCount reflect what survived RankingParserService.parseOrganic's
+  // type filter and domain match — if serpData is null (organic call
+  // threw), all three are necessarily 0/null, which is the CORRECT signal
+  // to distinguish from a real "not found" (see scan_error above, carried
+  // separately so this is never conflated with a genuine null rank).
+  console.log(
+    `[ORGANIC_RETURN] keyword="${keyword}" | rawResultCount=${serpData?.tasks?.[0]?.result?.length ?? 0} | ` +
+    `organicResultCount=${serpData ? RankingParserService._collectAllItems(serpData).filter(i => i?.type === 'organic').length : 0} | ` +
+    `urlsCount=${rankingUrls.length} | detectedRank=${bestRank}`
+  );
 
   return {
     keyword,
@@ -214,6 +305,10 @@ async function processKeyword(keyword, cleanDomain, locationCode, languageCode, 
     ranking_urls: rankingUrls,
     maps_rank:    finalMapsRank    ?? null,
     maps_listing: finalMapsListing ?? null,
+    // null when the organic scan itself succeeded (even with zero matches);
+    // set to the failure message when the request/parse failed outright —
+    // see buildKeywordUpdate (rankingHistoryService.js) for how this is used.
+    scan_error:   serpError,
   };
 }
 
@@ -565,6 +660,10 @@ export const saveRanking = async (req, res) => {
         ranking_urls: kw.ranking_urls    || [],
         maps_rank:    (mr != null && mr >= 1) ? mr : null,
         maps_listing: kw.maps_listing    ?? null,
+        // Echoed back from checkRanking's response (see processKeyword) —
+        // must survive this round-trip so buildKeywordUpdate can tell a
+        // genuine "not found" apart from a failed scan (rankingHistoryService.js).
+        scan_error:   kw.scan_error      ?? null,
       };
     });
 
@@ -637,7 +736,21 @@ export const getProjectRankings = async (req, res) => {
       .lean();
 
     if (canonical) {
-      const hasAtLeastOneRank = canonical.keywords?.some(k => k.current_rank !== null);
+      // "All null" used to mean "this canonical doc isn't really populated
+      // yet, prefer the legacy archive" — but current_rank can now
+      // legitimately stay null after a keyword's very first scan fails
+      // (see buildKeywordUpdate's scan_error branch in
+      // rankingHistoryService.js), while the canonical doc still carries
+      // real data that branch preserves (maps_rank, last_scan_status/
+      // last_scan_error). The legacy seo_rankings archive has none of
+      // those fields, so falling back to it would silently erase exactly
+      // the distinction this fix exists to make. A keyword counts as
+      // "real data" here if it has a rank, a maps rank, OR a recorded scan
+      // error — only a doc with truly nothing (a stale/incomplete write)
+      // still falls back.
+      const hasAtLeastOneRank = canonical.keywords?.some(
+        k => k.current_rank !== null || k.maps_rank != null || k.last_scan_status === 'error'
+      );
       if (hasAtLeastOneRank) {
         LoggerUtil.info('Rankings retrieved from canonical store', { projectId });
 
@@ -676,6 +789,11 @@ export const getProjectRankings = async (req, res) => {
         // an add/delete mutation (whose own responses already include this).
         const keywordLimit = getKeywordLimit(req.user.subscription.plan);
         canonical.usage = computeKeywordUsage(canonical.keywords.length, keywordLimit);
+
+        // Explicit status ('ranked'|'not_ranked'|'scan_error') alongside the
+        // existing current_rank/last_scan_status fields — additive, nothing
+        // removed or renamed (Section E, UX/state-handling audit).
+        canonical.keywords = canonical.keywords.map(kw => ({ ...kw, status: deriveKeywordStatus(kw) }));
 
         return res.status(200).json({ success: true, data: [canonical] });
       }
@@ -821,6 +939,7 @@ export const rescanKeyword = async (req, res) => {
         ranking_urls: result.ranking_urls || [],
         maps_rank:    result.maps_rank    ?? null,
         maps_listing: result.maps_listing ?? null,
+        scan_error:   result.scan_error   ?? null,
       },
       scanSource: 'manual_rescan'
     });
@@ -851,8 +970,21 @@ export const rescanKeyword = async (req, res) => {
       }
     }
 
+    // Explicit status ('ranked'|'not_ranked'|'scan_error') — additive,
+    // alongside the existing current_rank/last_scan_status fields (Section E).
+    // success/200 stay true here even for 'scan_error': the REQUEST and the
+    // write both genuinely succeeded (the previous valid rank was correctly
+    // preserved, per buildKeywordUpdate) — it's the underlying DataForSEO
+    // scan that degraded, not this endpoint. Flipping success to false for
+    // that case would make the frontend treat a gracefully-handled scan
+    // failure as a hard request failure, exactly the conflation this fix
+    // exists to prevent.
+    if (updatedKw) {
+      updatedKw = { ...updatedKw, status: deriveKeywordStatus(updatedKw) };
+    }
+
     LoggerUtil.info('Keyword rescan complete', {
-      projectId, keyword, newRank: updatedKw?.current_rank
+      projectId, keyword, newRank: updatedKw?.current_rank, status: updatedKw?.status
     });
 
     return res.status(200).json({
@@ -976,6 +1108,7 @@ export const addKeywordController = async (req, res) => {
           ranking_urls: result.ranking_urls || [],
           maps_rank:    result.maps_rank    ?? null,
           maps_listing: result.maps_listing ?? null,
+          scan_error:   result.scan_error   ?? null,
         },
         planId,
         scanSource: 'manual_add'
@@ -1014,7 +1147,16 @@ export const addKeywordController = async (req, res) => {
 
     const usage = computeKeywordUsage(updated.keywords.length, limit);
 
-    LoggerUtil.info('Add keyword complete', { projectId, keyword: trimmedKeyword, newRank: newKw?.current_rank, usage });
+    // Explicit status ('ranked'|'not_ranked'|'scan_error') — additive, same
+    // reasoning as rescanKeyword above. A newly added keyword whose initial
+    // scan hit a DataForSEO failure is still added successfully (201,
+    // success:true) — it must stay visible in the table as "Scan Error",
+    // never silently dropped or mislabeled "Not ranked".
+    if (newKw) {
+      newKw = { ...newKw, status: deriveKeywordStatus(newKw) };
+    }
+
+    LoggerUtil.info('Add keyword complete', { projectId, keyword: trimmedKeyword, newRank: newKw?.current_rank, status: newKw?.status, usage });
 
     return res.status(201).json({
       success: true,

@@ -54,6 +54,25 @@ async function post(url, payload, { timeoutMs = 60_000, maxRetries = 3, retryDel
         );
       }
 
+      // The envelope's own status_code can be 20000 ("Ok.") while the
+      // individual task still failed — every caller in this codebase sends
+      // exactly one task per request, so tasks[0] is checked directly
+      // (matches actual usage; no need to iterate). A task-level failure
+      // (e.g. 40201 "temporarily paused for unusual activity" on the
+      // account) carries result: null. Without this check, that null was
+      // silently treated as a successful-but-empty response — downstream,
+      // RankingParserService._collectAllItems() turns a non-array `result`
+      // into `[]`, which is indistinguishable from "the keyword was
+      // searched and the target domain genuinely wasn't found". Caught
+      // here instead, before any parsing happens.
+      const task = data?.tasks?.[0];
+      if (task && task.status_code !== 20000) {
+        throw Object.assign(
+          new Error(`DataForSEO task error: ${task.status_message ?? 'unknown'} (code ${task.status_code})`),
+          { isApiError: true, isTaskError: true }
+        );
+      }
+
       return data;
 
     } catch (err) {
@@ -131,25 +150,77 @@ export const DataForSeoService = {
   /**
    * Google organic SERP for domain ranking check.
    * 90s timeout, 3 attempts, 8s between retries — matches Python production config.
+   *
+   * TEMPORARY structured logging (organic-call-flow investigation): logs the
+   * exact request parameters immediately before the HTTP call, and the
+   * response shape (or the exact thrown error — never swallowed) immediately
+   * after. Safe to remove once the investigation is closed; no credentials,
+   * no full response body.
    */
-  getSerpOrganic(keyword, locationCode, languageCode) {
+  async getSerpOrganic(keyword, locationCode, languageCode) {
+    const endpointPath = ENDPOINTS.SERP_ORGANIC.split('/v3/')[1];
+    const device = 'desktop';
+    const depth  = 100;
+
     console.log(`[DATAFORSEO] getSerpOrganic | keyword="${keyword}" | loc=${locationCode}`);
+    console.log(
+      `[DATAFORSEO_ORGANIC_REQUEST] keyword="${keyword}" | locationCode=${locationCode} | ` +
+      `endpoint=${endpointPath} | device=${device} | language=${languageCode} | depth=${depth}`
+    );
+    console.log(`[DATAFORSEO_CALL] type=organic | keyword="${keyword}" | timestamp=${new Date().toISOString()}`);
+
     const payload = [{
       keyword,
       location_code: locationCode,
       language_code: languageCode,
-      depth:         100,
-      device:        'desktop',
+      depth,
+      device,
       os:            'windows',
     }];
-    return post(ENDPOINTS.SERP_ORGANIC, payload, { timeoutMs: 90_000, maxRetries: 3, retryDelayMs: 8_000 });
+
+    const startedAt = Date.now();
+    try {
+      const data = await post(ENDPOINTS.SERP_ORGANIC, payload, { timeoutMs: 90_000, maxRetries: 3, retryDelayMs: 8_000 });
+      const responseTimeMs = Date.now() - startedAt;
+      const task = data?.tasks?.[0];
+      const resultCount = Array.isArray(task?.result) ? task.result.length : 0;
+
+      console.log(
+        `[DATAFORSEO_ORGANIC_RESPONSE] status=${data?.status_code} | success=true | ` +
+        `responseTimeMs=${responseTimeMs} | tasksCount=${data?.tasks?.length ?? 0} | resultCount=${resultCount}`
+      );
+
+      return data;
+    } catch (err) {
+      const responseTimeMs = Date.now() - startedAt;
+      // Never swallowed — logged for visibility, then rethrown unchanged so
+      // the caller (processKeyword, seoOnboardingController.js) still sees
+      // the real failure and records it as scan_error rather than silently
+      // deriving rank=null from an empty result.
+      console.error(
+        `[DATAFORSEO_ORGANIC_ERROR] message="${err.message}" | ` +
+        `status=${err.response?.status ?? (err.isTaskError ? 'task_error' : 'unknown')} | ` +
+        `responseTimeMs=${responseTimeMs} | ` +
+        `responseBodySummary="${JSON.stringify(err.response?.data ?? {}).slice(0, 200)}"`
+      );
+      throw err;
+    }
   },
 
   /**
-   * Google Maps SERP for local business rank.
+   * Google Maps SERP for local business rank. Completely separate endpoint/
+   * request from getSerpOrganic above — see the "STEP 6" call-flow
+   * investigation notes for why the two must never be conflated.
    */
-  getMapsResults(keyword, locationCode, languageCode) {
+  async getMapsResults(keyword, locationCode, languageCode) {
+    const endpointPath = ENDPOINTS.MAPS.split('/v3/')[1];
+
     console.log(`[DATAFORSEO] getMapsResults | keyword="${keyword}" | loc=${locationCode}`);
+    console.log(
+      `[DATAFORSEO_MAPS_REQUEST] keyword="${keyword}" | locationCode=${locationCode} | endpoint=${endpointPath}`
+    );
+    console.log(`[DATAFORSEO_CALL] type=maps | keyword="${keyword}" | timestamp=${new Date().toISOString()}`);
+
     const payload = [{
       keyword,
       location_code: locationCode,

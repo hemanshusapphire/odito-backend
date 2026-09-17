@@ -46,6 +46,14 @@ const keywordRankSchema = new mongoose.Schema({
   last_scan_source:  { type: String, enum: ['onboarding', 'manual_rescan', 'scheduled', 'dev_seed', 'manual_add'], default: 'onboarding' },
   last_rescanned_at: { type: Date, default: null },
 
+  // 'error' means the last scan's organic SERP request/parse itself failed
+  // (DataForSEO task-level error, timeout, etc.) — current_rank/best_rank/
+  // ranking_urls above were left untouched by buildKeywordUpdate rather than
+  // being overwritten with null, so the UI must render a distinct "scan
+  // error" state instead of "Not ranked" (see UserAddedKeywords.jsx).
+  last_scan_status:  { type: String, enum: ['ok', 'error'], default: 'ok' },
+  last_scan_error:   { type: String, default: null },
+
   ranking_urls: [rankingUrlSchema]
 });
 
