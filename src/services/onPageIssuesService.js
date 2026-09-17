@@ -38,12 +38,19 @@ export async function getOnPageIssues(projectId) {
         }
       },
 
-      // Stage 1 — deduplicate by (issue_code, page_url)
+      // Stage 1 — deduplicate by (issue_code, page_url, data_path).
+      // data_path is included because a single rule can emit genuinely
+      // different finding types on the same page under the same issue_code
+      // (e.g. OrganizationSchemaRule can fire both a "missing required
+      // field" AND a "missing recommended field" issue on one page, at
+      // different severities) — grouping on data_path too keeps those
+      // distinct instead of collapsing to one arbitrarily-picked document.
       {
         $group: {
           _id: {
             issue_code: '$issue_code',
             page_url: '$page_url',
+            data_path: '$data_path',
           },
           issue_message: { $first: '$issue_message' },
           severity: { $first: '$severity' },
@@ -52,10 +59,18 @@ export async function getOnPageIssues(projectId) {
         },
       },
 
-      // Stage 2 — group by issue_code, count distinct pages
+      // Stage 2 — group by (issue_code, data_path), count distinct pages.
+      // Grouping in data_path too means a rule with multiple finding
+      // types/severities (see Stage 1 comment) surfaces as separate rows,
+      // each with its own correct severity/title/pages_affected — instead
+      // of one row whose severity is an arbitrary $first pick across
+      // documents that may not even agree on severity.
       {
         $group: {
-          _id: '$_id.issue_code',
+          _id: {
+            issue_code: '$_id.issue_code',
+            data_path: '$_id.data_path',
+          },
           issue_message: { $first: '$issue_message' },
           severity: { $first: '$severity' },
           category: { $first: '$category' },
@@ -70,7 +85,8 @@ export async function getOnPageIssues(projectId) {
       {
         $project: {
           _id: 0,
-          issue_code: '$_id',
+          issue_code: '$_id.issue_code',
+          data_path: '$_id.data_path',
           issue_message: 1,
           severity: 1,
           category: 1,
@@ -129,7 +145,8 @@ export async function getOnPageIssues(projectId) {
 
     const enrichedIssue = {
       issue_code: issue.issue_code,
-      title: CANONICAL_ISSUE_TITLES[issue.issue_code] || _deriveTitle(issue.issue_message),
+      data_path: issue.data_path,
+      title: resolveIssueTitle(issue.issue_code, issue.data_path, issue.issue_message),
       issue_message: issue.issue_message,
       severity: issue.severity,
       category: issue.category,
@@ -168,7 +185,39 @@ function _deriveTitle(msg) {
 }
 
 /**
- * Get ALL affected URLs for a specific issue code
+ * Resolve the display title for an issue, honouring CANONICAL_ISSUE_TITLES'
+ * two supported shapes (see the JSDoc on that export in issueMetadata.js):
+ *   - a plain string             → used as-is for every finding under that
+ *                                   issue_code (the common case).
+ *   - { default, byDataPath }    → `byDataPath[data_path]` wins when the
+ *                                   issue's data_path matches one of that
+ *                                   rule's known finding types, otherwise
+ *                                   falls back to `default`.
+ * Backward compatible with documents that predate a rule's severity/subtype
+ * split (missing or unrecognised data_path): they fall through to `default`,
+ * i.e. exactly the single title the rule showed before the split existed.
+ * Issue codes with no CANONICAL_ISSUE_TITLES entry keep deriving from
+ * issue_message as before.
+ */
+function resolveIssueTitle(issue_code, data_path, issue_message) {
+  const entry = CANONICAL_ISSUE_TITLES[issue_code];
+  if (typeof entry === 'string') return entry;
+  if (entry && typeof entry === 'object') {
+    return (data_path && entry.byDataPath?.[data_path]) || entry.default || _deriveTitle(issue_message);
+  }
+  return _deriveTitle(issue_message);
+}
+
+/**
+ * Get ALL affected URLs for a specific issue code, each carrying its own
+ * finding detail rather than a single shared message repeated for every
+ * row. Generic across every issue_code (not special-cased for any one
+ * rule) — any rule whose finding varies per page benefits automatically.
+ *
+ * If a page somehow has more than one open document under the same
+ * issue_code (a rule emitting two distinct findings on one page, e.g.
+ * both a required-field and a recommended-field gap), the most severe one
+ * is kept so the URL list never under-represents a page's worst finding.
  */
 export async function getIssueUrls(projectId, issueCode) {
   const db = mongoose.connection.db;
@@ -179,21 +228,47 @@ export async function getIssueUrls(projectId, issueCode) {
     .aggregate([
       { $match: { projectId: projectIdObj, issue_code: issueCode, status: 'open' } },
       {
+        // Deterministic severity ranking so $first (below) reliably keeps
+        // the most severe finding when a page has more than one document
+        // under this issue_code, instead of picking whichever document
+        // happened to come first in natural/index order.
+        $addFields: {
+          _severityRank: {
+            $switch: {
+              branches: [
+                { case: { $eq: ['$severity', 'high'] }, then: 3 },
+                { case: { $eq: ['$severity', 'medium'] }, then: 2 },
+                { case: { $eq: ['$severity', 'low'] }, then: 1 },
+              ],
+              default: 0,
+            },
+          },
+        },
+      },
+      { $sort: { page_url: 1, _severityRank: -1 } },
+      {
         $group: {
           _id: '$page_url',
-          created_at: { $first: '$created_at' }
-        }
+          issue_message: { $first: '$issue_message' },
+          severity: { $first: '$severity' },
+          detected_value: { $first: '$detected_value' },
+          data_path: { $first: '$data_path' },
+          created_at: { $first: '$created_at' },
+        },
       },
       { $sort: { _id: 1 } },
       {
         $project: {
           _id: 0,
-          page_url: '$_id',
-          created_at: 1
-        }
-      }
+          url: '$_id',
+          issue_message: 1,
+          severity: 1,
+          detected_value: 1,
+          data_path: 1,
+        },
+      },
     ])
     .toArray();
 
-  return urls.map(item => item.page_url);
+  return urls;
 }

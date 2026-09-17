@@ -37,6 +37,21 @@ export const ISSUE_METADATA = {
  * Canonical display titles for issue codes.
  * Keys match the Python rule_id values (lowercase snake_case).
  * Used to ensure the UI never shows evidence values (URLs, selectors) as headings.
+ *
+ * Most rules emit exactly one finding type and use a plain string here.
+ *
+ * A rule whose evaluate() can emit multiple, genuinely different-severity
+ * finding types under the same rule_id (e.g. "entity schema entirely
+ * missing" vs "entity schema present but missing a recommended field") may
+ * instead use:
+ *   {
+ *     default: "<title shown when no more specific entry matches>",
+ *     byDataPath: { "<issue.data_path value>": "<title for that finding>" },
+ *   }
+ * `resolveIssueTitle()` in onPageIssuesService.js resolves either shape —
+ * see that function for the exact fallback order. This keeps per-subtype
+ * titles centralized and reusable instead of string-matching issue_message
+ * in the frontend.
  */
 export const CANONICAL_ISSUE_TITLES = {
   // Image rules
@@ -69,7 +84,19 @@ export const CANONICAL_ISSUE_TITLES = {
   schema_missing:                 "Schema Markup Missing",
   schema_invalid:                 "Schema Markup Invalid",
   structured_data_missing:        "Structured Data Missing",
-  organization_schema:            "Missing Organization or LocalBusiness Schema",
+  // organization_schema emits three finding types under one rule_id — see
+  // OrganizationSchemaRule.evaluate() (schema_rules.py). Only the "entirely
+  // missing" case is a true "Missing ... Schema" finding; the other two mean
+  // a valid Organization/LocalBusiness schema WAS found. Docs written before
+  // this split (no data_path match, or missing data_path entirely on very
+  // old documents) fall back to `default`, which preserves the pre-fix title.
+  organization_schema: {
+    default: "Missing Organization or LocalBusiness Schema",
+    byDataPath: {
+      "structured_data.organization.missing_fields": "Incomplete Organization Schema",
+      "structured_data.organization.incomplete":      "Organization Schema Recommendations",
+    },
+  },
   article_schema:                 "Article Schema Missing or Incomplete",
   breadcrumblist_schema:          "BreadcrumbList Schema Missing",
   product_schema:                 "Product Schema Missing",

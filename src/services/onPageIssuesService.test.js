@@ -61,6 +61,97 @@ describe('onPageIssuesService — ignores resolved issues (P3-002)', () => {
 
     const urls = await getIssueUrls(projectId, 'TITLE_MISSING');
 
-    assert.deepEqual(urls, ['https://example.com/still-open']);
+    assert.deepEqual(urls.map((u) => u.url), ['https://example.com/still-open']);
+  });
+
+  test('getIssueUrls returns each URL\'s own issue_message and severity, not a shared one', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    await mongoose.connection.db.collection('seo_page_issues').insertMany([
+      {
+        projectId, issue_code: 'organization_schema', page_url: 'https://example.com/',
+        issue_message: 'Organization schema incomplete - missing recommended fields: address',
+        severity: 'low', data_path: 'structured_data.organization.incomplete',
+        status: 'open', dedup_key: `t5-${projectId}`,
+      },
+      {
+        projectId, issue_code: 'organization_schema', page_url: 'https://example.com/contact',
+        issue_message: 'Missing Organization or LocalBusiness schema',
+        severity: 'high', data_path: 'structured_data.localbusiness',
+        status: 'open', dedup_key: `t6-${projectId}`,
+      },
+    ]);
+
+    const urls = await getIssueUrls(projectId, 'organization_schema');
+    const byUrl = Object.fromEntries(urls.map((u) => [u.url, u]));
+
+    assert.equal(byUrl['https://example.com/'].severity, 'low');
+    assert.match(byUrl['https://example.com/'].issue_message, /missing recommended fields: address/);
+    assert.equal(byUrl['https://example.com/contact'].severity, 'high');
+    assert.match(byUrl['https://example.com/contact'].issue_message, /Missing Organization/);
+  });
+
+  test('getIssueUrls keeps the most severe finding when a page has two documents under one issue_code', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    await mongoose.connection.db.collection('seo_page_issues').insertMany([
+      {
+        projectId, issue_code: 'organization_schema', page_url: 'https://example.com/',
+        issue_message: 'Organization schema incomplete - missing recommended fields: address',
+        severity: 'low', data_path: 'structured_data.organization.incomplete',
+        status: 'open', dedup_key: `t7-${projectId}`,
+      },
+      {
+        projectId, issue_code: 'organization_schema', page_url: 'https://example.com/',
+        issue_message: 'Organization schema missing required fields: name',
+        severity: 'high', data_path: 'structured_data.organization.missing_fields',
+        status: 'open', dedup_key: `t8-${projectId}`,
+      },
+    ]);
+
+    const urls = await getIssueUrls(projectId, 'organization_schema');
+
+    assert.equal(urls.length, 1);
+    assert.equal(urls[0].severity, 'high');
+    assert.match(urls[0].issue_message, /missing required fields/);
+  });
+
+  test('getOnPageIssues splits one rule into per-data_path rows with correct title/severity', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    await mongoose.connection.db.collection('seo_page_summary').insertMany([
+      { projectId, page_url: 'https://example.com/' },
+      { projectId, page_url: 'https://example.com/contact' },
+    ]);
+    await mongoose.connection.db.collection('seo_page_issues').insertMany([
+      {
+        projectId, issue_code: 'organization_schema', page_url: 'https://example.com/',
+        issue_message: 'Organization schema incomplete - missing recommended fields: address',
+        severity: 'low', category: 'Schema', data_path: 'structured_data.organization.incomplete',
+        status: 'open', dedup_key: `t9-${projectId}`,
+      },
+      {
+        projectId, issue_code: 'organization_schema', page_url: 'https://example.com/contact',
+        issue_message: 'Missing Organization or LocalBusiness schema',
+        severity: 'high', category: 'Schema', data_path: 'structured_data.localbusiness',
+        status: 'open', dedup_key: `t10-${projectId}`,
+      },
+    ]);
+
+    const result = await getOnPageIssues(projectId);
+    const rows = result.issues.filter((i) => i.issue_code === 'organization_schema');
+
+    assert.equal(rows.length, 2, 'one row per data_path, not one blended row');
+
+    const soft = rows.find((r) => r.data_path === 'structured_data.organization.incomplete');
+    assert.equal(soft.severity, 'low');
+    assert.equal(soft.title, 'Organization Schema Recommendations');
+    assert.equal(soft.difficulty, 'easy');
+    assert.doesNotMatch(soft.title, /Missing Organization/);
+
+    const hard = rows.find((r) => r.data_path === 'structured_data.localbusiness');
+    assert.equal(hard.severity, 'high');
+    assert.equal(hard.title, 'Missing Organization or LocalBusiness Schema');
+    assert.equal(hard.difficulty, 'hard');
   });
 });
