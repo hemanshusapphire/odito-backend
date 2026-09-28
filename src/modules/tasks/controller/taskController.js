@@ -1,7 +1,11 @@
 import mongoose from 'mongoose';
 import Task from '../model/Task.js';
+import Recommendation from '../../recommendations/model/Recommendation.js';
 import taskHistoryService from '../service/TaskHistoryService.js';
 import { assertTaskOwnership } from './taskAuthz.js';
+import { captureIssueContext } from '../service/taskIssueContext.js';
+import wordPressSeoFixService from '../../external_integration/service/wordPressSeoFixService.js';
+import { WordPressConnectionError } from '../../external_integration/service/wordPressService.js';
 
 function toObjectId(id) {
   try { return new mongoose.Types.ObjectId(id); } catch { return null; }
@@ -60,7 +64,16 @@ export async function createTask(req, res) {
       createdBy:        req.user?._id    || null,
     };
 
+    // Element-level issues (keyboard_accessibility) keep their own frozen copy of the
+    // affected elements, so the task never depends on a recommendation that can expire.
+    const issueContext = await captureIssueContext(pid, issueKey, pageUrl);
+    if (issueContext) taskData.issueContext = issueContext;
+
     if (taskData.status === 'implemented') {
+      // Build the fixHistory entry the same way as the PATCH .../status
+      // path below (applyImplementedTransition), just against a plain
+      // pre-save object here rather than a loaded Task document — no
+      // Task document exists yet at creation time.
       const attempt = await taskHistoryService.buildFixAttempt({
         projectId: pid,
         issueKey,
@@ -68,6 +81,7 @@ export async function createTask(req, res) {
         origin: taskData.origin,
         recommendationId: taskData.recommendationId,
         attemptNumber: 1,
+        issueContext,
       });
       taskData.fixHistory = [attempt];
       taskData.implementedAt = attempt.implementedAt;
@@ -152,21 +166,17 @@ export async function updateTaskStatus(req, res) {
         const recId = recommendationId
           ? (mongoose.isValidObjectId(recommendationId) ? recommendationId : null)
           : task.recommendationId;
-        if (recommendationId && recId) {
-          task.recommendationId = recId;
-        }
 
-        const attempt = await taskHistoryService.buildFixAttempt({
-          projectId: task.projectId,
-          issueKey: task.issueKey,
-          pageUrl: task.pageUrl,
+        // A task created before issueContext existed (or whose audit was not available then)
+        // captures it now, from the latest audit — the best evidence of what was affected.
+        if (!task.issueContext) {
+          const captured = await captureIssueContext(task.projectId, task.issueKey, task.pageUrl);
+          if (captured) task.issueContext = captured;
+        }
+        await taskHistoryService.applyImplementedTransition(task, {
           origin: task.origin,
           recommendationId: recId,
-          attemptNumber: (task.fixHistory?.length || 0) + 1,
         });
-        task.fixHistory = task.fixHistory || [];
-        task.fixHistory.push(attempt);
-        task.implementedAt = attempt.implementedAt;
         break;
       }
       case 'verified_fixed':
@@ -436,9 +446,17 @@ export async function getActiveTaskUrls(req, res) {
     }
 
     // Return all tasks for this issue (any status, excluding deleted) so the frontend can show badges
+    // recommendationId included (bug fix): the WordPress apply flow gates
+    // "Apply via WordPress" on whether THIS field is actually set on the
+    // persisted Task — omitting it here meant the frontend could never
+    // correctly check the real, server-side link, and instead fell back to
+    // trusting its own local recommendation-generation state (a completely
+    // different, ephemeral value not tied to this task at all), which is
+    // exactly what let "Apply Fix" render enabled while the backend still
+    // rejected with "no recommendation linked."
     const tasks = await Task.find(
       { projectId: pid, issueKey, isDeleted: { $ne: true } },
-      { pageUrl: 1, status: 1, createdAt: 1, implementedAt: 1, verifiedAt: 1, reopenedAt: 1 }
+      { pageUrl: 1, status: 1, createdAt: 1, implementedAt: 1, verifiedAt: 1, reopenedAt: 1, recommendationId: 1 }
     ).lean();
 
     // Build a map: pageUrl → task info
@@ -451,6 +469,7 @@ export async function getActiveTaskUrls(req, res) {
         implementedAt: t.implementedAt,
         verifiedAt: t.verifiedAt,
         reopenedAt: t.reopenedAt,
+        recommendationId: t.recommendationId || null,
       };
     }
 
@@ -472,6 +491,202 @@ export async function getActiveTaskUrls(req, res) {
   } catch (error) {
     console.error(`[TASK] getActiveTaskUrls error | projectId=${req.query?.projectId} | issueKey=${req.query?.issueKey}: ${error.message}`);
     return res.status(500).json({ success: false, message: 'Failed to fetch active task URLs' });
+  }
+}
+
+/**
+ * PATCH /tasks/:taskId/link-recommendation
+ *
+ * Links an existing Task to a Recommendation, without touching the task's
+ * status. Exists specifically for the case createTask()'s own idempotent
+ * "return the existing task" path leaves unhandled: a task created BEFORE
+ * any AI recommendation existed (e.g. via the DIY flow) never gets its
+ * recommendationId backfilled just because the user later generates one —
+ * createTask() only ever sets recommendationId at INSERT time, never on an
+ * already-existing row. Without this endpoint, that task's
+ * recommendationId stays null forever, silently diverging from whatever
+ * recommendation the UI displays locally — the WordPress apply flow must
+ * never trust that local-only state (see wordPressSeoFixService.js's
+ * RECOMMENDATION_REQUIRED check), so this is the one legitimate way to
+ * actually complete the link server-side.
+ *
+ * Deliberately narrow: only allowed from task_created/reopened (a task
+ * that has already progressed past that has its own recommendationId
+ * history via TaskHistoryService.applyImplementedTransition() instead —
+ * this must never silently rewrite a completed task's fix history), and
+ * the recommendation's own projectId must match the task's, same
+ * cross-project check wordPressSeoFixService.validateFix() enforces before
+ * ever writing to WordPress — this endpoint is a second, independent gate
+ * on that invariant, not a bypass of it.
+ */
+export async function linkTaskRecommendation(req, res) {
+  try {
+    const { taskId } = req.params;
+    const { recommendationId } = req.body;
+
+    const tid = toObjectId(taskId);
+    if (!tid) {
+      return res.status(400).json({ success: false, message: 'Invalid taskId' });
+    }
+    const rid = toObjectId(recommendationId);
+    if (!rid) {
+      return res.status(400).json({ success: false, message: 'A valid recommendationId is required' });
+    }
+
+    const task = await Task.findById(tid);
+    if (!task) {
+      return res.status(404).json({ success: false, message: 'Task not found' });
+    }
+    if (!(await assertTaskOwnership(req, res, task))) return;
+
+    if (!['task_created', 'reopened'].includes(task.status)) {
+      return res.status(409).json({
+        success: false,
+        message: `Cannot link a recommendation to a task in status "${task.status}" — only task_created/reopened tasks can be linked this way.`,
+        currentStatus: task.status,
+      });
+    }
+
+    const recommendation = await Recommendation.findById(rid).select('projectId').lean();
+    if (!recommendation || recommendation.projectId.toString() !== task.projectId.toString()) {
+      return res.status(422).json({
+        success: false,
+        message: 'This recommendation does not exist or does not belong to the same project as this task.',
+        code: 'RECOMMENDATION_REQUIRED',
+      });
+    }
+
+    task.recommendationId = rid;
+    await task.save();
+
+    console.log(`[TASK] Recommendation linked | taskId=${task._id} | projectId=${task.projectId} | recommendationId=${rid}`);
+
+    return res.status(200).json({
+      success: true,
+      data: { _id: task._id, recommendationId: task.recommendationId },
+    });
+  } catch (error) {
+    console.error(`[TASK] linkTaskRecommendation error | taskId=${req.params?.taskId}: ${error.message}`);
+    return res.status(500).json({ success: false, message: 'Failed to link recommendation to task' });
+  }
+}
+
+/**
+ * POST /tasks/:taskId/apply-wordpress
+ *
+ * Applies this task's linked AI recommendation directly to the connected
+ * WordPress site, then transitions the task to 'implemented' — the
+ * automated counterpart to the DIY Guide's "Mark as Implemented" button.
+ * Never marks the task 'verified_fixed'; the existing recrawl-based
+ * TaskVerificationService remains the sole authority for that.
+ *
+ * The request body carries ONLY `expectedCurrentValue` (what the UI showed
+ * the user, for staleness detection) and `approved` (the user's explicit
+ * confirmation) — provider, meta key, WordPress endpoint, and the value to
+ * write are all derived server-side from the task/project/connection/
+ * recommendation, never accepted from the client (see
+ * wordPressSeoFixService.js).
+ *
+ * Body:
+ *   - expectedCurrentValue (optional): the value the user was shown before
+ *     approving. If the live WordPress value no longer matches, the write
+ *     is refused with 409 CONFLICT rather than silently overwriting a
+ *     change made elsewhere.
+ *   - approved (required): must be exactly `true`.
+ *
+ * sameAs (Organization social profiles) is the one fix whose value is entered
+ * by the site owner, so it additionally accepts — and REQUIRES the first of:
+ *   - additionalProfiles: string[] — the URLs to add (validated in full by
+ *     wordPressSeoFixService; the frontend's own validation is not trusted)
+ *   - removeProfiles: string[] (optional) — existing additional profiles to remove
+ *   - expectedAdditionalProfiles: string[] (optional) — the additional profiles
+ *     the user was shown, for stale detection
+ * Any other body field (a WordPress option name, meta key, Rank Math field,
+ * schema object, ...) is never read: the storage location is fixed server-side.
+ */
+export async function applyWordPressFix(req, res) {
+  try {
+    const { taskId } = req.params;
+    const { expectedCurrentValue, approved, additionalProfiles, removeProfiles, expectedAdditionalProfiles, expectedContentFingerprint } = req.body;
+
+    const tid = toObjectId(taskId);
+    if (!tid) {
+      return res.status(400).json({ success: false, message: 'Invalid taskId' });
+    }
+    if (typeof approved !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'approved (boolean) is required' });
+    }
+    if (expectedCurrentValue !== undefined && expectedCurrentValue !== null) {
+      if (typeof expectedCurrentValue !== 'string' || expectedCurrentValue.length > 5000) {
+        return res.status(400).json({ success: false, message: 'expectedCurrentValue must be a string of at most 5000 characters' });
+      }
+    }
+
+    // The page-content (H1) fix takes exactly one thing from the client: the fingerprint of the page
+    // state the user reviewed. Never content, a post ID, a field name or a value.
+    if (expectedContentFingerprint !== undefined && expectedContentFingerprint !== null
+      && (typeof expectedContentFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(expectedContentFingerprint))) {
+      return res.status(400).json({ success: false, message: 'expectedContentFingerprint must be a 64-character hex string', code: 'EXPECTED_STATE_REQUIRED' });
+    }
+
+    // Shape only (arrays of strings, bounded) — the content of every URL is
+    // validated by wordPressSeoFixService.
+    for (const [name, value] of Object.entries({ additionalProfiles, removeProfiles, expectedAdditionalProfiles })) {
+      if (value === undefined || value === null) continue;
+      if (!Array.isArray(value) || value.length > 200 || value.some((v) => typeof v !== 'string')) {
+        return res.status(400).json({ success: false, message: `${name} must be an array of strings`, code: 'INVALID_PROFILES' });
+      }
+    }
+
+    const task = await Task.findById(tid);
+    if (!task) {
+      return res.status(404).json({ success: false, message: 'Task not found' });
+    }
+    if (!(await assertTaskOwnership(req, res, task))) return;
+
+    // wordPressSeoFixService.applyFix() emits the full structured
+    // wordpress_fix_* event lifecycle itself (started/applied/skipped/
+    // failed/conflict/verified) — no separate summary line needed here.
+    const result = await wordPressSeoFixService.applyFix(task, {
+      expectedCurrentValue,
+      approved,
+      additionalProfiles: additionalProfiles ?? undefined,
+      removeProfiles: removeProfiles ?? undefined,
+      expectedAdditionalProfiles: expectedAdditionalProfiles ?? undefined,
+      expectedContentFingerprint: expectedContentFingerprint ?? undefined,
+    });
+
+    emitTaskEvent(task.projectId.toString(), 'task:implemented', {
+      taskId: task._id,
+      issueKey: task.issueKey,
+      pageUrl: task.pageUrl,
+      status: 'implemented',
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        task: result.task,
+        field: result.field,
+        provider: result.provider,
+        alreadyApplied: result.alreadyApplied,
+        immediateVerification: result.immediateVerification,
+        ...(result.sameAs ? { sameAs: result.sameAs } : {}),
+        ...(result.content ? { content: result.content } : {}),
+      },
+    });
+  } catch (error) {
+    if (error instanceof WordPressConnectionError) {
+      console.warn(`[TASK] applyWordPressFix rejected | taskId=${req.params?.taskId} | code=${error.code}: ${error.message}`);
+      return res.status(error.statusCode || 502).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+        ...(error.details ? { details: error.details } : {}),
+      });
+    }
+    console.error(`[TASK] applyWordPressFix error | taskId=${req.params?.taskId}: ${error.message}`, error.stack);
+    return res.status(500).json({ success: false, message: 'Failed to apply WordPress fix' });
   }
 }
 

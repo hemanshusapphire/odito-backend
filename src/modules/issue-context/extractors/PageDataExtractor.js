@@ -60,6 +60,12 @@ export class PageDataExtractor {
             iframe_src: 1,
             // Structured context enrichment (populated by Python context_enrichment.py)
             page_context: 1,
+            // FAQ Q/A pairs + detection counters (enhanced_seo_extraction.py) —
+            // read by SchemaResolver's faq_schema case via faqSchema.getFaqDetection.
+            faq_howto_signals: 1,
+            // Visible rating figures (rating_extraction.py) — read by SchemaResolver's
+            // aggregate_rating_schema case via aggregateRatingSchema.getRatingDetection.
+            rating_signals: 1,
           },
         }
       ),

@@ -432,6 +432,7 @@ router.post('/domain-technical-report', async (req, res) => {
       projectId, domain, robotsStatus, robotsExists, robotsContent,
       sitemapStatus, sitemapExists, sitemapContent, parsedSitemapUrlCount,
       llmsTxt, aiCrawlerSignals, sslValid, sslExpiryDate, sslDaysRemaining,
+      sslStatus, sslMessage, sslDetails,
       httpsRedirect, redirectChain, finalUrl, frameworkType,
       discoveredUrls, qualifiedUrls, lowPriorityUrls, rejectedUrls
     } = req.body;
@@ -502,6 +503,9 @@ router.post('/domain-technical-report', async (req, res) => {
         sslValid: sslValid || false,
         sslExpiryDate: sslExpiryDate || null,
         sslDaysRemaining: sslDaysRemaining || null,
+        sslStatus: sslStatus || null,
+        sslMessage: sslMessage || null,
+        sslDetails: sslDetails || null,
         httpsRedirect: httpsRedirect || false,
         redirectChain: redirectChain || [],
         finalUrl: finalUrl || null,
@@ -511,7 +515,7 @@ router.post('/domain-technical-report', async (req, res) => {
       { upsert: true, new: true }
     );
 
-    console.log(`[API] Domain technical report stored | projectId=${projectId} | domain=${domain} | robotsExists=${robotsExists} | sitemapExists=${sitemapExists} | sslValid=${sslValid} | httpsRedirect=${httpsRedirect} | framework=${frameworkType?.name || 'unknown'}`);
+    console.log(`[API] Domain technical report stored | projectId=${projectId} | domain=${domain} | robotsExists=${robotsExists} | sitemapExists=${sitemapExists} | sslValid=${sslValid} (${sslStatus}) | httpsRedirect=${httpsRedirect} | framework=${frameworkType?.name || 'unknown'}`);
 
     return res.json({
       success: true,
@@ -548,35 +552,10 @@ router.post('/headless-accessibility-report', async (req, res) => {
 
     console.log(`[API] Storing headless accessibility report | projectId=${projectId} | seo_jobId=${seo_jobId} | resultsCount=${results.length}`);
 
-    // Import model dynamically to avoid circular dependencies
-    const HeadlessData = (await import('../model/HeadlessData.js')).default;
-
-    // Prepare documents for bulk insert
-    const documents = results.map(result => ({
-      projectId,
-      jobId: seo_jobId,
-      url: result.url,
-      render_status: result.render_status,
-      statusCode: result.statusCode,
-      axeViolations: result.axeViolations || [],
-      axeViolationCount: result.axeViolationCount || 0,
-      axePassedCount: result.axePassedCount || 0,
-      domMetrics: result.domMetrics || {},
-      error: result.error || null,
-      keyboard_analysis: result.keyboard_analysis || null,
-      scannedAt: result.scannedAt ? new Date(result.scannedAt) : new Date()
-    }));
-
-    // Use bulkWrite for better performance and duplicate handling
-    const bulkOps = documents.map(doc => ({
-      updateOne: {
-        filter: { projectId: doc.projectId, url: doc.url },
-        update: { $set: doc },
-        upsert: true
-      }
-    }));
-
-    const bulkResult = await HeadlessData.bulkWrite(bulkOps);
+    // Import dynamically to avoid circular dependencies. The document mapping and the
+    // upsert live in headlessReportService so the real write path is testable.
+    const { storeHeadlessReport } = await import('../service/headlessReportService.js');
+    const bulkResult = await storeHeadlessReport({ projectId, seo_jobId, results });
 
     console.log(`[API] Headless accessibility report stored | projectId=${projectId} | inserted=${bulkResult.upsertedCount} | modified=${bulkResult.modifiedCount} | matched=${bulkResult.matchedCount}`);
 

@@ -60,6 +60,26 @@ const domainTechnicalReportSchema = new mongoose.Schema({
     type: Number,
     default: null
   },
+  // Fine-grained result of the TLS validation (VALID, EXPIRED_CERTIFICATE,
+  // HOSTNAME_MISMATCH, CERTIFICATE_CHAIN_ERROR, INVALID_CERTIFICATE,
+  // NO_HTTPS, TLS_CONNECTION_ERROR, DNS_ERROR, TIMEOUT, BLOCKED, UNKNOWN).
+  // See python_workers ssl_checker.py for the source of truth and
+  // technicalChecks.service.js for how this maps to OK/Warning/Critical.
+  sslStatus: {
+    type: String,
+    default: null
+  },
+  // Human-readable reason for the sslStatus above (e.g. "Certificate
+  // expired on 2024-01-01"), surfaced verbatim in the UI when present.
+  sslMessage: {
+    type: String,
+    default: null
+  },
+  // subject/issuer/san/fingerprints/tls_version/authorized/authorization_error
+  sslDetails: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null
+  },
   httpsRedirect: {
     type: Boolean,
     default: false

@@ -16,6 +16,7 @@ import {
   getPluginStatus,
   listForms,
   downloadPlugin,
+  downloadSeoBridgePlugin,
   pairPlugin,
   heartbeat,
   syncForms,
@@ -118,6 +119,7 @@ router.post('/pairing-token', auth, pairingTokenLimiter, projectIdBodyValidator,
 router.get('/status', auth, projectIdQueryValidator, validateProjectAccess(), getPluginStatus);
 router.get('/forms', auth, projectIdQueryValidator, validateProjectAccess(), listForms);
 router.get('/download', auth, downloadPlugin);
+router.get('/seo-bridge/download', auth, downloadSeoBridgePlugin);
 
 // ── Plugin -> Odito routes. NOT JWT-gated — identity comes from the
 // pairing token (pair) or the plugin credential (heartbeat, forms/sync via

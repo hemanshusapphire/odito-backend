@@ -62,7 +62,7 @@ const recommendationSchema = new mongoose.Schema({
     implementationExample: {
       type: {
         type: String,
-        enum: ['html', 'jsx', 'json', 'text'],
+        enum: ['html', 'jsx', 'json', 'text', 'css'],
         default: 'html',
       },
       content: { type: String, required: true },

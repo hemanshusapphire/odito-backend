@@ -11,6 +11,25 @@ import ValidatorRegistry     from '../validators/ValidatorRegistry.js';
 import ConfidenceCalculator  from '../normalizers/ConfidenceCalculator.js';
 import IssueContextEngine    from '../../issue-context/service/IssueContextEngine.js';
 import { isKnownIssue }      from '../../issue-context/service/ResolverRegistry.js';
+import {
+  RatingRecommendationError,
+  assertRatingDetectionUsable,
+  buildRatingSchemaSections,
+  generatedFromDetection,
+  ratingSchemaFingerprint,
+} from './ratingSchemaRecommendation.js';
+import {
+  FaqRecommendationError,
+  assertFaqDetectionUsable,
+  buildFaqSchemaSections,
+  faqSchemaFingerprint,
+} from './faqSchemaRecommendation.js';
+import {
+  AccessibilityRecommendationError,
+  accessibilityFingerprint,
+  assertAccessibilityAuditUsable,
+  buildAccessibilitySections,
+} from './accessibilityRecommendation.js';
 
 /**
  * Recommendation Service — Orchestrator
@@ -113,20 +132,57 @@ class RecommendationService {
     console.log(`[RECOMMENDATION] Context extracted | pageType=${context.pageType} | framework=${context.framework} | schemas=${(context.detectedSchemas || []).join(',')}`);
     console.log(`[RECOMMENDATION] Sample URLs: ${sampleUrls.length} found`);
 
+    // ── faq_schema: deterministic, never LLM-generated ───────────────────────
+    // The schema is built only from the FAQ Q/A pairs the crawler detected on
+    // this exact page. Any caller-supplied issueContext is ignored on purpose —
+    // the pairs must come from the server's own crawl data, not the request body.
+    if (issueId === 'faq_schema') {
+      return this._generateFaqSchemaRecommendation({
+        projectId, pageUrl, context, sampleUrls, resolvedSource, ruleMetadata, startTime,
+      });
+    }
+
+    // ── aggregate_rating_schema: deterministic, never LLM-generated ──────────
+    // Built only from the rating the page displays and an entity already present
+    // in its structured data. Caller-supplied issueContext is ignored for the
+    // same reason as faq_schema above.
+    if (issueId === 'aggregate_rating_schema') {
+      return this._generateRatingSchemaRecommendation({
+        projectId, pageUrl, context, sampleUrls, resolvedSource, ruleMetadata, startTime,
+      });
+    }
+
+    // ── keyboard_accessibility: built from the audited elements, never LLM-guessed ──
+    // The recommendation names the exact elements/selectors/stack the audit recorded.
+    // Caller-supplied issueContext is ignored: the elements must come from the
+    // server's own audit data, not the request body.
+    if (issueId === 'keyboard_accessibility') {
+      return this._generateAccessibilityRecommendation({
+        projectId, pageUrl, context, sampleUrls, resolvedSource, ruleMetadata, startTime,
+      });
+    }
+
     // ── Step 1b: Resolve IssueContext if not provided by caller ──────────────
     // When the frontend doesn't send issueContext (the common case), we resolve
     // it server-side using IssueContextEngine.  This gives ConfidenceCalculator
     // and PromptBuilder the full currentState / expectedState / pageContext data
     // they need to produce grounded, context-aware recommendations.
     let resolvedIssueContext = issueContext;
-    if (!resolvedIssueContext && pageUrl) {
+    // The frontend forwards only { currentState, expectedState, pageContext } — no
+    // identity and no metadata (readiness). Using that as-is meant every
+    // recommendation ran with readiness=0% and an empty identity (patched below).
+    // A partial context is therefore treated as "not provided": the server's own
+    // resolution of the same crawl data is authoritative and complete.
+    const isPartialClientContext = !!issueContext && !issueContext.identity?.issueId && !issueContext.metadata;
+    if ((!resolvedIssueContext || isPartialClientContext) && pageUrl) {
       try {
         console.log(`[RECOMMENDATION] Auto-resolving IssueContext | issueId=${issueId} | pageUrl=${pageUrl}`);
         resolvedIssueContext = await IssueContextEngine.resolve(projectId, issueId, pageUrl);
         console.log(`[RECOMMENDATION] IssueContext resolved | readiness=${resolvedIssueContext?.metadata?.readinessScore ?? 0}% | displayType=${resolvedIssueContext?.currentState?.displayType}`);
       } catch (iceErr) {
         console.warn(`[RECOMMENDATION] IssueContextEngine failed (non-fatal): ${iceErr.message}`);
-        resolvedIssueContext = null;
+        // Keep whatever the client sent (patched below) rather than dropping to nothing.
+        resolvedIssueContext = isPartialClientContext ? issueContext : null;
       }
     }
 
@@ -276,6 +332,116 @@ class RecommendationService {
       projectId, fingerprint, recommendationHash, issueId,
       context, sampleUrls, ruleMetadata, resolvedSource, startTime, pageUrl,
     });
+  }
+
+  /**
+   * faq_schema recommendation: FAQPage JSON-LD built from detected pairs only.
+   * Throws FaqRecommendationError (nothing stored) when the page has no
+   * reliably-extracted FAQ, so a fabricated schema can never be produced.
+   * @private
+   */
+  async _generateFaqSchemaRecommendation({ projectId, pageUrl, context, sampleUrls, resolvedSource, ruleMetadata, startTime }) {
+    if (!pageUrl) {
+      throw new FaqRecommendationError('FAQ_PAGE_REQUIRED', 'A page URL is required to generate FAQPage schema from that page\'s FAQ content.', 400);
+    }
+
+    const issueContext = await IssueContextEngine.resolve(projectId, 'faq_schema', pageUrl);
+    const detection = issueContext?.faqDetection;
+    assertFaqDetectionUsable(detection);
+
+    const sections = buildFaqSchemaSections(detection);
+    const fingerprint = faqSchemaFingerprint(projectId, pageUrl, detection.content.pairs);
+    const recommendationHash = fingerprintService.computeRecommendationHash(
+      fingerprint, 1, RECOMMENDATION_VERSION, null
+    );
+
+    const stored = await this._store({
+      projectId, fingerprint, recommendationHash, issueId: 'faq_schema', context,
+      sampleUrls, sections, generatedBy: GENERATION_SOURCE.TEMPLATE,
+      templateVersion: 1, ruleMetadata, resolvedSource, pageUrl,
+    });
+
+    console.log(`[RECOMMENDATION] ✓ FAQ schema built deterministically | pairs=${detection.content.pairs.length} | page=${pageUrl}`);
+    return {
+      recommendation: this._formatOutput(stored),
+      source: GENERATION_SOURCE.TEMPLATE,
+      cached: false,
+      generationTimeMs: Date.now() - startTime,
+    };
+  }
+
+  /**
+   * aggregate_rating_schema recommendation: AggregateRating JSON-LD built from
+   * verified page data only. Throws RatingRecommendationError (nothing stored)
+   * when reliable rating data or a mergeable target entity is unavailable.
+   * @private
+   */
+  async _generateRatingSchemaRecommendation({ projectId, pageUrl, context, sampleUrls, resolvedSource, ruleMetadata, startTime }) {
+    if (!pageUrl) {
+      throw new RatingRecommendationError('RATING_PAGE_REQUIRED', 'A page URL is required to generate AggregateRating schema from that page\'s rating.', 400);
+    }
+
+    const issueContext = await IssueContextEngine.resolve(projectId, 'aggregate_rating_schema', pageUrl);
+    const detection = issueContext?.ratingDetection;
+    assertRatingDetectionUsable(detection);
+
+    const sections = buildRatingSchemaSections(detection);
+    const fingerprint = ratingSchemaFingerprint(projectId, pageUrl, generatedFromDetection(detection));
+    const recommendationHash = fingerprintService.computeRecommendationHash(
+      fingerprint, 1, RECOMMENDATION_VERSION, null
+    );
+
+    const stored = await this._store({
+      projectId, fingerprint, recommendationHash, issueId: 'aggregate_rating_schema', context,
+      sampleUrls, sections, generatedBy: GENERATION_SOURCE.TEMPLATE,
+      templateVersion: 1, ruleMetadata, resolvedSource, pageUrl,
+    });
+
+    console.log(`[RECOMMENDATION] ✓ AggregateRating schema built deterministically | target=${detection.targetSchemaType} | page=${pageUrl}`);
+    return {
+      recommendation: this._formatOutput(stored),
+      source: GENERATION_SOURCE.TEMPLATE,
+      cached: false,
+      generationTimeMs: Date.now() - startTime,
+    };
+  }
+
+  /**
+   * keyboard_accessibility recommendation: built from the exact elements, selectors
+   * and technology the keyboard/focus audit recorded. Throws
+   * AccessibilityRecommendationError (nothing stored) when the audit is missing,
+   * outdated (counts only) or found nothing to fix — with a message that says
+   * precisely what is missing, never a generic "no example available".
+   * @private
+   */
+  async _generateAccessibilityRecommendation({ projectId, pageUrl, context, sampleUrls, resolvedSource, ruleMetadata, startTime }) {
+    if (!pageUrl) {
+      throw new AccessibilityRecommendationError('ACCESSIBILITY_PAGE_REQUIRED', 'A page URL is required to generate a keyboard accessibility recommendation from that page\'s audit.', 400);
+    }
+
+    const issueContext = await IssueContextEngine.resolve(projectId, 'keyboard_accessibility', pageUrl);
+    const audit = issueContext?.accessibilityAudit;
+    assertAccessibilityAuditUsable(audit);
+
+    const sections = buildAccessibilitySections(audit);
+    const fingerprint = accessibilityFingerprint(projectId, pageUrl, audit);
+    const recommendationHash = fingerprintService.computeRecommendationHash(
+      fingerprint, 1, RECOMMENDATION_VERSION, null
+    );
+
+    const stored = await this._store({
+      projectId, fingerprint, recommendationHash, issueId: 'keyboard_accessibility', context,
+      sampleUrls, sections, generatedBy: GENERATION_SOURCE.TEMPLATE,
+      templateVersion: 1, ruleMetadata, resolvedSource, pageUrl,
+    });
+
+    console.log(`[RECOMMENDATION] ✓ Accessibility recommendation built from audit | elements=${sections.sourceAttribution.contextSources.auditedElements} | tech=${audit.technology?.kind} | page=${pageUrl}`);
+    return {
+      recommendation: this._formatOutput(stored),
+      source: GENERATION_SOURCE.TEMPLATE,
+      cached: false,
+      generationTimeMs: Date.now() - startTime,
+    };
   }
 
   /**

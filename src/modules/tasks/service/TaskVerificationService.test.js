@@ -316,3 +316,352 @@ describe('TaskVerificationService — concurrent verification safety', () => {
     assert.ok(final.fixHistory[0].verification.verifiedAt > new Date('2026-01-01'), 'the existing record IS refreshed with the new check timestamp');
   });
 });
+
+// Phase 3 verification audit — proves the valueNormalization.js fix (curly
+// quotes / trailing slashes) through the REAL verifyImplementedTasks() path,
+// not just the isolated utility (see valueNormalization.test.js for that).
+describe('TaskVerificationService — value_diff normalization (WordPress round-trip realism)', () => {
+  let projectId;
+
+  beforeEach(async () => {
+    if (!mongoAvailable) return;
+    projectId = new mongoose.Types.ObjectId();
+    await Task.deleteMany({ projectId });
+    await mongoose.connection.db.collection('seo_page_data').deleteMany({ projectId });
+    await mongoose.connection.db.collection('seo_page_issues').deleteMany({ projectId });
+  });
+
+  test('title verifies via value_diff despite WordPress rendering a curly apostrophe where the recommendation used a straight one', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    const pageUrl = 'https://example.com/normalization-title';
+    await mongoose.connection.db.collection('seo_page_data').insertOne({
+      projectId, url: pageUrl,
+      // As BeautifulSoup would extract it after WordPress's wptexturize
+      // rendered a straight apostrophe as a curly one.
+      title: 'Company’s Best Widgets',
+    });
+
+    const task = await Task.create({
+      projectId, issueKey: 'title_missing', pageUrl, status: 'implemented', origin: 'wordpress_auto',
+      fixHistory: [{
+        attemptNumber: 1, attemptKind: 'fix_attempt', origin: 'wordpress_auto', status: 'pending_verification',
+        before: { capturedAt: new Date(), source: 'unavailable', dataPath: null, value: null },
+        fixApplied: {
+          capturedAt: new Date(), recommendationId: null, recommendationVersion: null, snapshot: null,
+          // The AI-recommended value, plain ASCII apostrophe.
+          expectedAfterValue: { type: 'title', title: "Company's Best Widgets" },
+        },
+        implementedAt: new Date(),
+        verification: { verifiedAt: null, method: null, result: null, matched: null, after: { source: 'unavailable', value: null }, triggerJobId: null },
+      }],
+    });
+
+    const result = await taskVerificationService.verifyImplementedTasks(projectId, 'NORM-TITLE');
+    assert.equal(result.verified, 1);
+    assert.equal(result.reopened, 0);
+
+    const saved = await Task.findById(task._id);
+    assert.equal(saved.status, 'verified_fixed');
+    const latest = saved.fixHistory[saved.fixHistory.length - 1];
+    assert.equal(latest.verification.method, 'value_diff');
+    assert.equal(latest.verification.matched, true);
+  });
+
+  test('canonical verifies via value_diff despite WordPress adding a trailing slash the recommendation did not include', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    const pageUrl = 'https://example.com/normalization-canonical';
+    await mongoose.connection.db.collection('seo_page_data').insertOne({
+      projectId, url: pageUrl,
+      canonical: 'https://example.com/normalization-canonical/',
+    });
+
+    const task = await Task.create({
+      projectId, issueKey: 'canonical_tag_errors', pageUrl, status: 'implemented', origin: 'wordpress_auto',
+      fixHistory: [{
+        attemptNumber: 1, attemptKind: 'fix_attempt', origin: 'wordpress_auto', status: 'pending_verification',
+        before: { capturedAt: new Date(), source: 'unavailable', dataPath: null, value: null },
+        fixApplied: {
+          capturedAt: new Date(), recommendationId: null, recommendationVersion: null, snapshot: null,
+          expectedAfterValue: { type: 'canonical', canonical: 'https://example.com/normalization-canonical' },
+        },
+        implementedAt: new Date(),
+        verification: { verifiedAt: null, method: null, result: null, matched: null, after: { source: 'unavailable', value: null }, triggerJobId: null },
+      }],
+    });
+
+    const result = await taskVerificationService.verifyImplementedTasks(projectId, 'NORM-CANONICAL');
+    assert.equal(result.verified, 1);
+
+    const saved = await Task.findById(task._id);
+    assert.equal(saved.status, 'verified_fixed');
+    const latest = saved.fixHistory[saved.fixHistory.length - 1];
+    assert.equal(latest.verification.method, 'value_diff');
+    assert.equal(latest.verification.matched, true);
+  });
+
+  test('a genuinely incorrect after-value: presence (issue still open) drives reopened, AND value_diff correctly reports matched:false — normalization never masks a real content mismatch', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    // Per TaskVerificationService's own documented design ("presence always
+    // wins for 'still reopened' — value-diff only refines HOW CONFIDENTLY a
+    // verified_fixed result is reported"), an issue still open in
+    // seo_page_issues drives `reopened` regardless of value_diff — this test
+    // confirms that stays true AND that value_diff's own matched flag is
+    // correctly false (not accidentally folded into a match by the new
+    // normalization), giving two independent, correct signals rather than
+    // one masking the other.
+    const pageUrl = 'https://example.com/normalization-mismatch';
+    await mongoose.connection.db.collection('seo_page_data').insertOne({
+      projectId, url: pageUrl, title: 'Completely Different Title',
+    });
+    // dedup_key must be explicitly set and unique — seo_page_issues has a
+    // GLOBAL unique index on it (not scoped by projectId), so an omitted
+    // (null) value collides with any other test's leftover null-key
+    // document across the whole shared dev database, not just this run's
+    // own projectId-scoped cleanup. Matches the existing tests above
+    // (lines ~76/~104) — missed here in the first pass, causing a real
+    // E11000 collision against test residue from an earlier run.
+    await mongoose.connection.db.collection('seo_page_issues').insertOne({
+      projectId, issue_code: 'title_missing', page_url: pageUrl, status: 'open',
+      dedup_key: `test-dedup-normalization-mismatch-${projectId}`,
+    });
+
+    const task = await Task.create({
+      projectId, issueKey: 'title_missing', pageUrl, status: 'implemented', origin: 'wordpress_auto',
+      fixHistory: [{
+        attemptNumber: 1, attemptKind: 'fix_attempt', origin: 'wordpress_auto', status: 'pending_verification',
+        before: { capturedAt: new Date(), source: 'unavailable', dataPath: null, value: null },
+        fixApplied: {
+          capturedAt: new Date(), recommendationId: null, recommendationVersion: null, snapshot: null,
+          expectedAfterValue: { type: 'title', title: 'The Recommended Title' },
+        },
+        implementedAt: new Date(),
+        verification: { verifiedAt: null, method: null, result: null, matched: null, after: { source: 'unavailable', value: null }, triggerJobId: null },
+      }],
+    });
+
+    const result = await taskVerificationService.verifyImplementedTasks(projectId, 'NORM-MISMATCH');
+    assert.equal(result.reopened, 1);
+
+    const saved = await Task.findById(task._id);
+    assert.equal(saved.status, 'reopened');
+    const latest = saved.fixHistory[saved.fixHistory.length - 1];
+    assert.equal(latest.verification.method, 'value_diff');
+    assert.equal(latest.verification.matched, false);
+  });
+
+  test('robots verifies via value_diff when the crawler sees a real rendered <meta name="robots"> with no restriction, even though it spells out "index, follow" explicitly rather than omitting the tag', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    // meta_tags.robots is an array of raw content-attribute strings (same
+    // convention as meta_tags.description) — [0] is what a real theme
+    // rendered, which may spell out "index, follow" explicitly rather than
+    // omitting the tag when there's no restriction.
+    const pageUrl = 'https://example.com/normalization-robots-fixed';
+    await mongoose.connection.db.collection('seo_page_data').insertOne({
+      projectId, url: pageUrl, meta_tags: { robots: ['index, follow'] },
+    });
+
+    const task = await Task.create({
+      projectId, issueKey: 'noindex_key_pages', pageUrl, status: 'implemented', origin: 'wordpress_auto',
+      fixHistory: [{
+        attemptNumber: 1, attemptKind: 'fix_attempt', origin: 'wordpress_auto', status: 'pending_verification',
+        before: { capturedAt: new Date(), source: 'unavailable', dataPath: null, value: null },
+        fixApplied: {
+          capturedAt: new Date(), recommendationId: null, recommendationVersion: null, snapshot: null,
+          expectedAfterValue: { type: 'robots', index: true, follow: true },
+        },
+        implementedAt: new Date(),
+        verification: { verifiedAt: null, method: null, result: null, matched: null, after: { source: 'unavailable', value: null }, triggerJobId: null },
+      }],
+    });
+
+    const result = await taskVerificationService.verifyImplementedTasks(projectId, 'NORM-ROBOTS-FIXED');
+    assert.equal(result.verified, 1);
+
+    const saved = await Task.findById(task._id);
+    assert.equal(saved.status, 'verified_fixed');
+    const latest = saved.fixHistory[saved.fixHistory.length - 1];
+    assert.equal(latest.verification.method, 'value_diff');
+    assert.equal(latest.verification.matched, true);
+  });
+
+  test('robots: a page still rendering noindex is reopened, and value_diff correctly reports matched:false', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    const pageUrl = 'https://example.com/normalization-robots-still-noindex';
+    await mongoose.connection.db.collection('seo_page_data').insertOne({
+      projectId, url: pageUrl, meta_tags: { robots: ['noindex, follow'] },
+    });
+    await mongoose.connection.db.collection('seo_page_issues').insertOne({
+      projectId, issue_code: 'noindex_key_pages', page_url: pageUrl, status: 'open',
+      dedup_key: `test-dedup-normalization-robots-still-noindex-${projectId}`,
+    });
+
+    const task = await Task.create({
+      projectId, issueKey: 'noindex_key_pages', pageUrl, status: 'implemented', origin: 'wordpress_auto',
+      fixHistory: [{
+        attemptNumber: 1, attemptKind: 'fix_attempt', origin: 'wordpress_auto', status: 'pending_verification',
+        before: { capturedAt: new Date(), source: 'unavailable', dataPath: null, value: null },
+        fixApplied: {
+          capturedAt: new Date(), recommendationId: null, recommendationVersion: null, snapshot: null,
+          expectedAfterValue: { type: 'robots', index: true, follow: true },
+        },
+        implementedAt: new Date(),
+        verification: { verifiedAt: null, method: null, result: null, matched: null, after: { source: 'unavailable', value: null }, triggerJobId: null },
+      }],
+    });
+
+    const result = await taskVerificationService.verifyImplementedTasks(projectId, 'NORM-ROBOTS-STILL-NOINDEX');
+    assert.equal(result.reopened, 1);
+
+    const saved = await Task.findById(task._id);
+    assert.equal(saved.status, 'reopened');
+    const latest = saved.fixHistory[saved.fixHistory.length - 1];
+    assert.equal(latest.verification.method, 'value_diff');
+    assert.equal(latest.verification.matched, false);
+  });
+
+  test('same_as verifies via value_diff once the crawler sees the added URL in the rendered Organization schema sameAs list', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    const pageUrl = 'https://example.com/normalization-sameas-fixed';
+    await mongoose.connection.db.collection('seo_page_data').insertOne({
+      projectId, url: pageUrl,
+      structured_data: [
+        { '@type': 'Organization', name: 'Example', sameAs: ['https://twitter.com/example', 'https://linkedin.com/company/example'] },
+      ],
+    });
+
+    const task = await Task.create({
+      projectId, issueKey: 'sameas_array', pageUrl, status: 'implemented', origin: 'wordpress_auto',
+      fixHistory: [{
+        attemptNumber: 1, attemptKind: 'fix_attempt', origin: 'wordpress_auto', status: 'pending_verification',
+        before: { capturedAt: new Date(), source: 'unavailable', dataPath: null, value: null },
+        fixApplied: {
+          capturedAt: new Date(), recommendationId: null, recommendationVersion: null, snapshot: null,
+          expectedAfterValue: { type: 'same_as', url: 'https://linkedin.com/company/example' },
+        },
+        implementedAt: new Date(),
+        verification: { verifiedAt: null, method: null, result: null, matched: null, after: { source: 'unavailable', value: null }, triggerJobId: null },
+      }],
+    });
+
+    const result = await taskVerificationService.verifyImplementedTasks(projectId, 'NORM-SAMEAS-FIXED');
+    assert.equal(result.verified, 1);
+
+    const saved = await Task.findById(task._id);
+    assert.equal(saved.status, 'verified_fixed');
+    const latest = saved.fixHistory[saved.fixHistory.length - 1];
+    assert.equal(latest.verification.method, 'value_diff');
+    assert.equal(latest.verification.matched, true);
+  });
+
+  test('same_as: the URL is genuinely absent from the rendered schema, reopened with matched:false', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    const pageUrl = 'https://example.com/normalization-sameas-missing';
+    await mongoose.connection.db.collection('seo_page_data').insertOne({
+      projectId, url: pageUrl,
+      structured_data: [ { '@type': 'Organization', name: 'Example', sameAs: ['https://twitter.com/example'] } ],
+    });
+    await mongoose.connection.db.collection('seo_page_issues').insertOne({
+      projectId, issue_code: 'sameas_array', page_url: pageUrl, status: 'open',
+      dedup_key: `test-dedup-normalization-sameas-missing-${projectId}`,
+    });
+
+    const task = await Task.create({
+      projectId, issueKey: 'sameas_array', pageUrl, status: 'implemented', origin: 'wordpress_auto',
+      fixHistory: [{
+        attemptNumber: 1, attemptKind: 'fix_attempt', origin: 'wordpress_auto', status: 'pending_verification',
+        before: { capturedAt: new Date(), source: 'unavailable', dataPath: null, value: null },
+        fixApplied: {
+          capturedAt: new Date(), recommendationId: null, recommendationVersion: null, snapshot: null,
+          expectedAfterValue: { type: 'same_as', url: 'https://linkedin.com/company/example' },
+        },
+        implementedAt: new Date(),
+        verification: { verifiedAt: null, method: null, result: null, matched: null, after: { source: 'unavailable', value: null }, triggerJobId: null },
+      }],
+    });
+
+    const result = await taskVerificationService.verifyImplementedTasks(projectId, 'NORM-SAMEAS-MISSING');
+    assert.equal(result.reopened, 1);
+
+    const saved = await Task.findById(task._id);
+    assert.equal(saved.status, 'reopened');
+    const latest = saved.fixHistory[saved.fixHistory.length - 1];
+    assert.equal(latest.verification.method, 'value_diff');
+    assert.equal(latest.verification.matched, false);
+  });
+
+  test('breadcrumb verifies via value_diff once the crawler sees a rendered BreadcrumbList entity', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    const pageUrl = 'https://example.com/normalization-breadcrumb-fixed';
+    await mongoose.connection.db.collection('seo_page_data').insertOne({
+      projectId, url: pageUrl,
+      structured_data: [ { '@type': 'BreadcrumbList', itemListElement: [] } ],
+    });
+
+    const task = await Task.create({
+      projectId, issueKey: 'breadcrumblist_schema', pageUrl, status: 'implemented', origin: 'wordpress_auto',
+      fixHistory: [{
+        attemptNumber: 1, attemptKind: 'fix_attempt', origin: 'wordpress_auto', status: 'pending_verification',
+        before: { capturedAt: new Date(), source: 'unavailable', dataPath: null, value: null },
+        fixApplied: {
+          capturedAt: new Date(), recommendationId: null, recommendationVersion: null, snapshot: null,
+          expectedAfterValue: { type: 'breadcrumb', enabled: true },
+        },
+        implementedAt: new Date(),
+        verification: { verifiedAt: null, method: null, result: null, matched: null, after: { source: 'unavailable', value: null }, triggerJobId: null },
+      }],
+    });
+
+    const result = await taskVerificationService.verifyImplementedTasks(projectId, 'NORM-BREADCRUMB-FIXED');
+    assert.equal(result.verified, 1);
+
+    const saved = await Task.findById(task._id);
+    assert.equal(saved.status, 'verified_fixed');
+    const latest = saved.fixHistory[saved.fixHistory.length - 1];
+    assert.equal(latest.verification.method, 'value_diff');
+    assert.equal(latest.verification.matched, true);
+  });
+
+  test('breadcrumb: still absent from rendered schema, reopened with matched:false', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    const pageUrl = 'https://example.com/normalization-breadcrumb-missing';
+    await mongoose.connection.db.collection('seo_page_data').insertOne({
+      projectId, url: pageUrl, structured_data: [],
+    });
+    await mongoose.connection.db.collection('seo_page_issues').insertOne({
+      projectId, issue_code: 'breadcrumblist_schema', page_url: pageUrl, status: 'open',
+      dedup_key: `test-dedup-normalization-breadcrumb-missing-${projectId}`,
+    });
+
+    const task = await Task.create({
+      projectId, issueKey: 'breadcrumblist_schema', pageUrl, status: 'implemented', origin: 'wordpress_auto',
+      fixHistory: [{
+        attemptNumber: 1, attemptKind: 'fix_attempt', origin: 'wordpress_auto', status: 'pending_verification',
+        before: { capturedAt: new Date(), source: 'unavailable', dataPath: null, value: null },
+        fixApplied: {
+          capturedAt: new Date(), recommendationId: null, recommendationVersion: null, snapshot: null,
+          expectedAfterValue: { type: 'breadcrumb', enabled: true },
+        },
+        implementedAt: new Date(),
+        verification: { verifiedAt: null, method: null, result: null, matched: null, after: { source: 'unavailable', value: null }, triggerJobId: null },
+      }],
+    });
+
+    const result = await taskVerificationService.verifyImplementedTasks(projectId, 'NORM-BREADCRUMB-MISSING');
+    assert.equal(result.reopened, 1);
+
+    const saved = await Task.findById(task._id);
+    assert.equal(saved.status, 'reopened');
+    const latest = saved.fixHistory[saved.fixHistory.length - 1];
+    assert.equal(latest.verification.method, 'value_diff');
+    assert.equal(latest.verification.matched, false);
+  });
+});

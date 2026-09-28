@@ -449,12 +449,17 @@ export class TechnicalResolver extends BaseResolver {
       }
 
       case 'ssl_certificate': {
-        const isValid = technicalReport?.sslValid ?? null;
+        const sslStatus = technicalReport?.sslStatus ?? (technicalReport?.sslValid ? 'VALID' : null);
         const days = technicalReport?.sslDaysRemaining ?? null;
-        const status = isValid === false ? 'Invalid or missing SSL certificate'
-          : days != null && days < 30 ? `Expires in ${days} days`
-          : isValid ? `Valid — ${days != null ? `${days} days remaining` : 'active'}`
-          : 'SSL status not detected';
+        const CONFIRMED_BROKEN = new Set([
+          'EXPIRED_CERTIFICATE', 'HOSTNAME_MISMATCH', 'CERTIFICATE_CHAIN_ERROR',
+          'INVALID_CERTIFICATE', 'NO_HTTPS'
+        ]);
+        const status = technicalReport?.sslMessage ? technicalReport.sslMessage
+          : sslStatus === 'VALID' && days != null && days < 30 ? `Expires in ${days} days`
+          : sslStatus === 'VALID' ? `Valid — ${days != null ? `${days} days remaining` : 'active'}`
+          : CONFIRMED_BROKEN.has(sslStatus) ? 'Invalid or missing SSL certificate'
+          : 'SSL certificate could not be verified on the last scan';
         return {
           currentState: this._textState(status, null, null, null),
           expectedState: this._expectedState('Valid SSL certificate with 30+ days remaining'),

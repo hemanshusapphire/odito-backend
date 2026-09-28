@@ -1,6 +1,10 @@
 import mongoose from 'mongoose';
 import Task from '../model/Task.js';
 import { isAiVisibilityIssueKey } from './aiVisibilityIssueIdentity.js';
+import { normalizeTextValue, canonicalValuesMatch, parseRobotsDirectives, robotsValuesMatch } from './valueNormalization.js';
+import { extractAggregateRatings, flattenSchemaNodes, ratingsEqual } from './aggregateRatingSchema.js';
+import { sameAsComparisonKey } from './socialProfileUrls.js';
+import { extractFaqPairsFromStructuredData, faqPairsMatch, faqPairsAreSubset, sanitizeFaqPairs } from './faqSchema.js';
 
 /**
  * TaskVerificationService
@@ -20,7 +24,8 @@ import { isAiVisibilityIssueKey } from './aiVisibilityIssueIdentity.js';
  * canonical — see TaskHistoryService/issueSnapshotTypes), verification also
  * re-resolves the actual current value from seo_page_data and records
  * whether it matched — a `method: 'value_diff'` result the UI can show with
- * real confidence, vs. `'presence_fallback'` everywhere else.
+ * real confidence, vs. `'presence_fallback'` everywhere else. See
+ * issueSnapshotTypes.js for the full, current list of snapshot types.
  *
  * Lifecycle:
  *   IMPLEMENTED    → recheck → issue gone?  → VERIFIED_FIXED
@@ -134,6 +139,24 @@ class TaskVerificationService {
               method = 'value_diff';
               matched = this._valuesMatch(expected, resolvedAfter);
               afterSnapshot = { source: 'structured_snapshot', value: resolvedAfter };
+
+              // faq_schema is the one type where the issue merely DISAPPEARING
+              // is not enough: the rule stops firing as soon as ANY FAQPage
+              // schema exists, so a schema that does not match the visible FAQ
+              // (wrong, partial, or edited afterwards) would otherwise be
+              // reported as fixed. The value comparison is what decides it.
+              //
+              // aggregate_rating is the same: the rule only checks that SOME
+              // aggregateRating key exists, so a missing count, a different value
+              // or a rating on the wrong entity must not be reported as fixed.
+              //
+              // same_as is the same again: sameas_array stops firing as soon as
+              // the Organization has ANY sameAs entry (a Facebook-derived one
+              // counts), so the URLs the site owner added must actually be in
+              // the rendered JSON-LD — "WordPress saved it" is not enough.
+              if ((expected.type === 'faq_schema' || expected.type === 'aggregate_rating' || expected.type === 'same_as' || expected.type === 'keyboard_accessibility') && !issueStillExists && matched === false) {
+                result = 'reopened';
+              }
             }
           }
         }
@@ -158,12 +181,16 @@ class TaskVerificationService {
           console.log(`[VERIFY:${requestId}] REOPENED | projectId=${pid} | taskId=${task._id} | issueKey=${task.issueKey} | url=${task.pageUrl} | method=${method} | triggerJobId=${triggerJobId || 'none'}`);
           this._emitEvent(pid.toString(), 'task:reopened', {
             taskId: task._id, issueKey: task.issueKey, pageUrl: task.pageUrl, status: 'reopened',
+            // Lets the UI word the outcome truthfully ("WordPress saved it, but the
+            // rendered output could not be verified" only applies to an automated fix).
+            origin: latestAttempt?.origin || null,
           });
         } else {
           verified++;
           console.log(`[VERIFY:${requestId}] VERIFIED_FIXED | projectId=${pid} | taskId=${task._id} | issueKey=${task.issueKey} | url=${task.pageUrl} | method=${method} | matched=${matched} | triggerJobId=${triggerJobId || 'none'}`);
           this._emitEvent(pid.toString(), 'task:verified', {
             taskId: task._id, issueKey: task.issueKey, pageUrl: task.pageUrl, status: 'verified_fixed',
+            origin: latestAttempt?.origin || null,
           });
         }
       } catch (err) {
@@ -370,12 +397,14 @@ class TaskVerificationService {
    */
   async _loadPageDataForValueDiff(db, projectId, tasks, requestId = 'VERIFY') {
     const urls = new Set();
+    const keyboardUrls = new Set();
     for (const task of tasks) {
       const latest = task.fixHistory && task.fixHistory.length
         ? task.fixHistory[task.fixHistory.length - 1]
         : null;
       if (latest?.fixApplied?.expectedAfterValue) {
         urls.add(task.pageUrl);
+        if (latest.fixApplied.expectedAfterValue.type === 'keyboard_accessibility') keyboardUrls.add(task.pageUrl);
       }
     }
 
@@ -385,10 +414,24 @@ class TaskVerificationService {
     try {
       const pages = await db.collection('seo_page_data').find(
         { projectId, url: { $in: Array.from(urls) } },
-        { projection: { url: 1, title: 1, meta_tags: 1, headings: 1, canonical: 1, images: 1 } }
+        { projection: { url: 1, title: 1, meta_tags: 1, headings: 1, canonical: 1, images: 1, structured_data: 1, 'faq_howto_signals.faq_pairs': 1 } }
       ).toArray();
       for (const page of pages) {
         pageDataByUrl.set(page.url, page);
+      }
+
+      // The keyboard/focus audit lives in seo_headless_data (not seo_page_data). It is merged
+      // onto the page document so _resolveAfterValue reads it like any other crawled field.
+      if (keyboardUrls.size) {
+        const audits = await db.collection('seo_headless_data').find(
+          { projectId, url: { $in: Array.from(keyboardUrls) } },
+          { projection: { url: 1, keyboard_analysis: 1 } }
+        ).toArray();
+        for (const audit of audits) {
+          const page = pageDataByUrl.get(audit.url) || { url: audit.url };
+          page.keyboard_analysis = audit.keyboard_analysis;
+          pageDataByUrl.set(audit.url, page);
+        }
       }
     } catch (err) {
       console.error(`[VERIFY:${requestId}] Error loading seo_page_data for value-diff | projectId=${projectId}: ${err.message}`);
@@ -417,10 +460,77 @@ class TaskVerificationService {
       }
       case 'canonical':
         return { type, canonical: (pageDoc.canonical || '').trim() || null };
+      case 'robots': {
+        // meta_tags.robots is the crawler's array-of-raw-content-attribute
+        // strings for every <meta name="robots"> tag found on the page
+        // (same shape convention as meta_tags.description, read as [0]
+        // above) — parsed leniently since real themes render this content
+        // attribute in varying styles (see parseRobotsDirectives's own
+        // docblock). Absence of the tag entirely is treated as the
+        // permissive default (index, follow), same as WordPress's own
+        // behavior when no robots meta is rendered at all.
+        const raw = pageDoc.meta_tags?.robots?.[0];
+        const parsed = parseRobotsDirectives(typeof raw === 'string' ? raw : '');
+        return { type, index: parsed.index, follow: parsed.follow };
+      }
       case 'image_alt': {
         // Alt-text fixes don't change src, so the target image is matched by
         // its (unchanged) src rather than by array position.
         return { type, images: (pageDoc.images || []).map(img => ({ src: img.src, alt: img.alt || null })) };
+      }
+      case 'same_as': {
+        // pageDoc.structured_data is the crawler's array of parsed JSON-LD
+        // objects for this page (same field SchemaResolver.js reads) — find
+        // the Organization/LocalBusiness entity and read its CURRENT sameAs
+        // list as actually rendered, not assumed from the write.
+        //
+        // Rank Math (and most SEO plugins) emit the Organization inside an
+        // "@graph" rather than as a top-level entry, so the graph is flattened
+        // first. The sameAs of EVERY Organization/LocalBusiness node is unioned:
+        // a page can carry more than one such node, and what matters here is
+        // whether the URL the site owner added is in the rendered output at all.
+        const orgTypes = ['Organization', 'LocalBusiness'];
+        const sameAs = flattenSchemaNodes(pageDoc.structured_data)
+          .filter((node) => (Array.isArray(node['@type']) ? node['@type'] : [node['@type']]).some((t) => orgTypes.includes(t)))
+          .flatMap((node) => (node.sameAs ? (Array.isArray(node.sameAs) ? node.sameAs : [node.sameAs]) : []));
+        return { type, sameAs };
+      }
+      case 'breadcrumb': {
+        const hasBreadcrumb = !!this._findSchemaByType(pageDoc.structured_data, ['BreadcrumbList']);
+        return { type, enabled: hasBreadcrumb };
+      }
+      case 'faq_schema': {
+        // Pairs as the crawler now sees them in the rendered page's FAQPage
+        // JSON-LD (any FAQPage block, @graph-aware), plus the FAQ pairs that
+        // are visible in the page itself — both are needed to decide that the
+        // schema matches what visitors can read (see _valuesMatch).
+        return {
+          type,
+          pairs: extractFaqPairsFromStructuredData(pageDoc.structured_data),
+          visiblePairs: sanitizeFaqPairs(pageDoc.faq_howto_signals?.faq_pairs),
+        };
+      }
+      case 'keyboard_accessibility': {
+        // The latest keyboard/focus audit for this page. Only a v2 audit knows per-element
+        // results; a v1 (counts only) audit cannot confirm anything about specific elements.
+        const k = pageDoc.keyboard_analysis;
+        if (!k || !k.keyboard_navigation_checked || (k.audit_version || 1) < 2) return { type, auditable: false };
+        return {
+          type,
+          auditable: true,
+          auditVersion: k.audit_version,
+          testedAt: k.tested_at ? new Date(k.tested_at).toISOString() : null,
+          completed: !!k.traversal?.completed,
+          missingCount: k.affected_elements?.missing_focus_indicator_total ?? k.missing_focus_outline ?? 0,
+          trapDetected: !!k.focus_trap_detected,
+          unreachableCount: k.unreachable_elements ?? 0,
+          results: (Array.isArray(k.element_results) ? k.element_results : []).map((r) => ({ selector: r.selector, status: r.status })),
+        };
+      }
+      case 'aggregate_rating': {
+        // Every AggregateRating the rendered page now exposes (any node, @graph
+        // aware), already sanitized — small enough to store as the after-snapshot.
+        return { type, ratings: extractAggregateRatings(pageDoc.structured_data) };
       }
       default:
         return null;
@@ -428,14 +538,43 @@ class TaskVerificationService {
   }
 
   /**
+   * Find the first structured-data entry whose @type matches one of
+   * `types` — @type may be a single string or an array of strings (a
+   * schema entity can legitimately declare multiple types), so both shapes
+   * are checked. Returns null (never throws) if structuredData is missing,
+   * not an array, or nothing matches.
+   */
+  _findSchemaByType(structuredData, types) {
+    if (!Array.isArray(structuredData)) return null;
+    return structuredData.find((entry) => {
+      const entryTypes = Array.isArray(entry?.['@type']) ? entry['@type'] : [entry?.['@type']];
+      return entryTypes.some((t) => types.includes(t));
+    }) || null;
+  }
+
+  /**
    * Compare an expected value (from the AI fix / recommendation) against the
    * actual current value resolved from the latest scan. Case/whitespace
    * insensitive — the fix is "matched" if the meaningful content lines up,
    * not byte-identical.
+   *
+   * Bug fix (Phase 3 verification audit): `norm` now goes through
+   * valueNormalization.js's normalizeTextValue() instead of a bare
+   * trim+lowercase — WordPress's wptexturize (applied when rendering
+   * the_title()/content) converts plain ASCII quotes/dashes to their
+   * typographic equivalents, and the crawler decodes HTML entities back to
+   * natural Unicode when parsing the rendered page, so a value that
+   * round-tripped through a real WordPress write+recrawl could previously
+   * register as a false "reopened" even though nothing meaningful changed.
+   * This is strictly ADDITIVE (folds more values together, never fewer) —
+   * every comparison that matched under the old bare trim+lowercase still
+   * matches now. Canonical additionally tolerates a trailing-slash
+   * difference via canonicalValuesMatch(), since WordPress frequently
+   * normalizes permalinks that way regardless of what was written.
    */
   _valuesMatch(expected, actual) {
     if (!expected || !actual) return false;
-    const norm = (s) => (typeof s === 'string' ? s.trim().toLowerCase() : s);
+    const norm = normalizeTextValue;
 
     switch (expected.type) {
       case 'title':
@@ -443,16 +582,77 @@ class TaskVerificationService {
       case 'meta_description':
         return !!actual.metaDescription && norm(expected.metaDescription) === norm(actual.metaDescription);
       case 'canonical':
-        return !!actual.canonical && norm(expected.canonical) === norm(actual.canonical);
+        return canonicalValuesMatch(expected.canonical, actual.canonical);
+      case 'robots':
+        return robotsValuesMatch(expected, actual);
       case 'h1': {
         const expectedText = norm(expected.h1Text);
         const actualTexts = (actual.h1Text || []).map(norm);
-        return !!expectedText && actualTexts.includes(expectedText);
+        if (!expectedText || !actualTexts.includes(expectedText)) return false;
+        // h1_missing records h1Count: 1 — the page must end up with exactly one H1, not the
+        // right text alongside a second heading.
+        return expected.h1Count == null || actualTexts.length === expected.h1Count;
       }
       case 'image_alt': {
         const expectedAlt = norm(expected.alt);
         const match = (actual.images || []).find(img => (img.alt || null) != null && norm(img.alt) === expectedAlt);
         return !!expectedAlt && !!match;
+      }
+      case 'same_as': {
+        // "Matched" means EVERY URL the site owner asked Odito to add now
+        // appears in the RENDERED Organization schema's sameAs list — not that
+        // the whole list equals some expected array (which would falsely
+        // reopen the moment an unrelated profile is added/removed by the site
+        // owner directly in Rank Math). `urls` is the current shape; a single
+        // legacy `url` (older fix attempts) is still honoured. URLs are compared
+        // by sameAsComparisonKey so a trailing slash or http/https difference
+        // introduced by the theme/plugin doesn't cause a false reopen.
+        const wanted = Array.isArray(expected.urls) ? expected.urls : (expected.url ? [expected.url] : []);
+        if (!wanted.length) return false;
+        const rendered = new Set((actual.sameAs || []).map(sameAsComparisonKey).filter(Boolean));
+        return wanted.every((url) => {
+          const key = sameAsComparisonKey(url);
+          return !!key && rendered.has(key);
+        });
+      }
+      case 'keyboard_accessibility': {
+        // Re-tests the EXACT elements the fix targeted against a fresh audit — never by
+        // looking for "outline" in CSS. Each selector must have been tabbed to and show a
+        // visible, distinguishable indicator ('weak' low-contrast does not count).
+        if (!actual.auditable) return false;
+        // Only an audit run after the fix was recorded can confirm it.
+        if (expected.notBefore && (!actual.testedAt || new Date(actual.testedAt) < new Date(expected.notBefore))) return false;
+        const status = new Map((actual.results || []).map((r) => [r.selector, r.status]));
+        const selectors = expected.selectors || [];
+        for (const selector of selectors) {
+          const s = status.get(selector);
+          if (s === 'present') continue;
+          // A selector the new audit no longer contains (renamed/removed element) is only
+          // accepted when the audit completed and found no missing indicator anywhere.
+          if (s === undefined && actual.completed && actual.missingCount === 0) continue;
+          return false;
+        }
+        if (expected.requireNoUnintendedTrap && actual.trapDetected) return false;
+        if (expected.requireReachable && actual.unreachableCount > 0) return false;
+        return selectors.length > 0 || !!expected.requireNoUnintendedTrap || !!expected.requireReachable;
+      }
+      case 'breadcrumb':
+        return expected.enabled === actual.enabled;
+      case 'faq_schema': {
+        // Fixed only if (1) the rendered FAQPage carries exactly the pairs the
+        // fix generated — every question and answer, nothing extra — AND (2)
+        // those pairs are still what the page visibly shows, so a schema that
+        // matches the recommendation but no longer matches the page (content
+        // edited since) is not reported as fixed either.
+        return faqPairsMatch(expected.pairs, actual.pairs) && faqPairsAreSubset(actual.pairs, actual.visiblePairs);
+      }
+      case 'aggregate_rating': {
+        // Fixed only if a VALID AggregateRating (real ratingValue inside its scale
+        // + a real count) sits on the SAME entity (@id) the fix targeted and
+        // carries exactly the generated figures.
+        return !!expected.target?.id && (actual.ratings || []).some(
+          (item) => item.valid && item.nodeId === expected.target.id && ratingsEqual(item.rating, expected.rating)
+        );
       }
       default:
         return false;

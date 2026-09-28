@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { getRegistryEntry, RESOLVER } from './ResolverRegistry.js';
 import { DATA_SOURCE } from './ResolverRegistry.js';
 import IssueContextValidator from './IssueContextValidator.js';
@@ -68,7 +69,7 @@ class IssueContextEngine {
     // For unknown issues: return a minimal context so the UI can still render
     if (!entry) {
       console.warn(`[ISSUE_CONTEXT] Unknown issueId: ${issueId} — returning minimal context`);
-      return this._unknownContext(projectId, issueId, pageUrl, startMs);
+      return await this._unknownContext(projectId, issueId, pageUrl, startMs);
     }
 
     const { resolver: resolverKey, dataSources, displayType, issueType } = entry;
@@ -81,12 +82,15 @@ class IssueContextEngine {
 
     // ── Step 3: Resolve currentState + expectedState ─────────────────────
     const resolver = RESOLVER_MAP[resolverKey];
-    let currentState, expectedState;
+    let currentState, expectedState, contextExtras = {};
 
     try {
       const result = resolver.resolve(issueId, displayType, extractedData, issueDoc);
       currentState = result.currentState;
       expectedState = result.expectedState;
+      // Optional issue-specific structured payload (e.g. faqDetection for
+      // faq_schema). Merged below without ever overriding a core context key.
+      contextExtras = result.contextExtras || {};
     } catch (err) {
       console.error(`[ISSUE_CONTEXT] Resolver error for ${issueId}:`, err.message);
       currentState = {
@@ -127,6 +131,9 @@ class IssueContextEngine {
       },
       recommendationReady: false,
     };
+    for (const [key, value] of Object.entries(contextExtras)) {
+      if (!(key in context)) context[key] = value;
+    }
 
     // ── Step 6: Validate ─────────────────────────────────────────────────
     const validation = IssueContextValidator.validate(context);
@@ -307,28 +314,63 @@ class IssueContextEngine {
 
   // ─── Unknown / fallback ────────────────────────────────────────────────────
 
-  _unknownContext(projectId, issueId, pageUrl, startMs) {
+  /**
+   * An issue whose id has no resolver in the registry. It used to render as a red
+   * "Not detected — No <id> was found on this page / Expected: Unknown issue type" card even
+   * though the analyzer HAD found it. Show the finding that is actually stored (message,
+   * detected and expected value) and say plainly that no detailed resolver exists.
+   */
+  async _unknownContext(projectId, issueId, pageUrl, startMs) {
+    let stored = [];
+    try {
+      stored = await mongoose.connection.db.collection('seo_page_issues')
+        .find({ projectId: new mongoose.Types.ObjectId(projectId), page_url: pageUrl, $or: [{ issue_code: issueId }, { rule_id: issueId }] })
+        .project({ issue_message: 1, detected_value: 1, expected_value: 1, category: 1, severity: 1 })
+        .limit(10)
+        .toArray();
+    } catch (err) {
+      console.warn(`[ISSUE_CONTEXT] Could not read stored finding for unregistered ${issueId}: ${err.message}`);
+    }
+
+    const items = stored.flatMap((d) => {
+      const detected = [].concat(d.detected_value ?? []).filter((v) => typeof v === 'string' && v).slice(0, 5);
+      return [d.issue_message, ...detected].filter(Boolean);
+    });
+    const unique = [...new Set(items)];
+    const first = stored[0] || null;
+
+    const currentState = unique.length
+      ? {
+          displayType: 'list',
+          rawValue: unique,
+          formattedValue: unique,
+          measurement: { value: unique.length, unit: 'items', threshold: null },
+          affectedItems: unique,
+          isAbsent: false,
+        }
+      : {
+          displayType: 'absent',
+          rawValue: null,
+          formattedValue: null,
+          measurement: { value: null, unit: null, threshold: null },
+          affectedItems: [],
+          isAbsent: true,
+          checkedFor: issueId,
+        };
+
     return {
-      identity: { issueId, issueType: 'unknown', category: '', severity: '', pipeline: 'unknown' },
-      currentState: {
-        displayType: 'absent',
-        rawValue: null,
-        formattedValue: null,
-        measurement: { value: null, unit: null, threshold: null },
-        affectedItems: [],
-        isAbsent: true,
-        checkedFor: issueId,
-      },
-      expectedState: { description: 'Unknown issue type', measurement: {} },
+      identity: { issueId, issueType: 'unknown', category: first?.category || '', severity: first?.severity || '', pipeline: 'unknown' },
+      currentState,
+      expectedState: { description: first?.expected_value ? String(first.expected_value) : 'See the issue description', measurement: {} },
       pageContext: { pageUrl, pageType: 'Unknown', framework: 'unknown', cms: null, canonicalUrl: null },
       metadata: {
         projectId,
         resolvedAt: new Date().toISOString(),
         resolutionMs: Date.now() - startMs,
-        dataSources: [],
+        dataSources: unique.length ? ['seo_page_issues'] : [],
         readinessScore: 0,
         missingSignals: ['issueId not in registry'],
-        warnings: ['Unknown issue — add to ResolverRegistry'],
+        warnings: ['No detailed resolver exists for this issue type yet — showing the stored finding only'],
       },
       recommendationReady: false,
     };

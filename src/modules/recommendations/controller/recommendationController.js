@@ -64,6 +64,16 @@ export async function generateRecommendation(req, res) {
       },
     });
   } catch (error) {
+    // Deliberate, safe-to-show refusals (e.g. FAQ content found but its Q/A pairs
+    // couldn't be reliably extracted) — relayed as-is instead of a generic 500.
+    if (error?.userFacing) {
+      console.warn(`[RECOMMENDATION_CTRL] Generate refused | code=${error.code}: ${error.message}`);
+      return res.status(error.statusCode || 422).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+      });
+    }
     console.error('[RECOMMENDATION_CTRL] Generate error:', error.message, error.stack);
     return res.status(500).json({
       success: false,
@@ -154,8 +164,45 @@ export async function invalidateByProject(req, res) {
 }
 
 /**
+ * GET /recommendations/:id?projectId=
+ *
+ * Fetches one recommendation by id, scoped to the requesting project —
+ * used by the WordPress apply-fix confirmation dialog to show the EXACT
+ * recommendation content a Task is linked to (Task.recommendationId),
+ * rather than trusting whatever the recommendation-generation mutation's
+ * own local, ephemeral UI state happens to hold (which may not be the same
+ * recommendation the task actually points to, or may not exist at all
+ * after a page reload). validateProjectAccess() already confirms the
+ * requesting user owns `projectId`; the projectId match below additionally
+ * confirms this SPECIFIC recommendation belongs to that project, the same
+ * cross-project check wordPressSeoFixService.validateFix() enforces
+ * server-side before ever writing to WordPress — this is a read path, but
+ * it must never leak a recommendation's content across projects either.
+ */
+export async function getRecommendationById(req, res) {
+  try {
+    const { recommendationId } = req.params;
+    const { projectId } = req.query;
+
+    if (!projectId) {
+      return res.status(400).json({ success: false, message: 'projectId is required' });
+    }
+
+    const recommendation = await Recommendation.findById(recommendationId).lean();
+    if (!recommendation || recommendation.projectId.toString() !== projectId.toString()) {
+      return res.status(404).json({ success: false, message: 'Recommendation not found' });
+    }
+
+    return res.status(200).json({ success: true, data: recommendation });
+  } catch (error) {
+    console.error('[RECOMMENDATION_CTRL] getRecommendationById error:', error.message);
+    return res.status(500).json({ success: false, message: 'Failed to fetch recommendation' });
+  }
+}
+
+/**
  * GET /recommendations/stats/:projectId
- * 
+ *
  * Get recommendation generation stats for a project.
  */
 export async function getStats(req, res) {

@@ -173,6 +173,40 @@ const wordPressConnectionSchema = new mongoose.Schema({
   last_error: {
     type: String,
     default: null
+  },
+
+  // 🔎 SEO provider detection (Phase 4 — read + capability detection only,
+  // no writes yet). Derived from plugin_summary.plugins[].slug at
+  // connect/verify time (see wordPressService.js's detectSeoProvider) plus,
+  // when the slug list is ambiguous or unavailable, a best-effort REST
+  // namespace probe. 'none' (not 'null') is the deliberate default so every
+  // pre-existing connection — created before this field existed — reads as
+  // "no SEO plugin detected yet" rather than an unset/nullable state that
+  // callers would have to special-case; the next verify() call populates it
+  // like any other best-effort field on this model (wordpress_version,
+  // plugin_summary).
+  detected_seo_provider: {
+    type: String,
+    enum: ['rank_math', 'yoast', 'aioseo', 'seopress', 'none', 'multiple'],
+    default: 'none'
+  },
+
+  // Every SEO-plugin slug actually matched — length 0 (none), 1 (the normal
+  // case, mirrored 1:1 into detected_seo_provider), or 2+ (ambiguous, in
+  // which case detected_seo_provider is forced to 'multiple' and the
+  // frontend must show the ambiguity rather than this field silently
+  // picking one — see wordPressService.js's detectSeoProvider).
+  detected_seo_providers: {
+    type: [{
+      type: String,
+      enum: ['rank_math', 'yoast', 'aioseo', 'seopress']
+    }],
+    default: []
+  },
+
+  seo_provider_detected_at: {
+    type: Date,
+    default: null
   }
 }, {
   timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }

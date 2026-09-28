@@ -4,6 +4,7 @@ import { validationResult } from 'express-validator';
 import { ResponseUtil } from '../../../utils/ResponseUtil.js';
 import wordPressPluginService from '../service/wordPressPluginService.js';
 import wordPressFormService from '../service/wordPressFormService.js';
+import { resolveSeoBridgeDownload } from '../service/seoBridgePackage.js';
 
 /** Same error-shape convention as leadController.js/wordPressController.js. */
 function handleError(res, error, fallbackMessage) {
@@ -81,6 +82,45 @@ export async function downloadPlugin(req, res) {
       return res.status(404).json(ResponseUtil.notFound('Plugin package is not currently available'));
     }
     return res.download(zipPath, 'odito-lead-capture.zip');
+  } catch (error) {
+    return handleError(res, error, 'Failed to download plugin package');
+  }
+}
+
+// GET /api/wordpress/plugin/seo-bridge/download
+// A separate, unrelated plugin from the Lead Capture one above (the Odito SEO
+// Bridge, see odito-seo-bridge/ for source). Unlike the Lead Capture download,
+// this does NOT stream a pre-built file: the ZIP is built from the plugin's
+// current source on every request (seoBridgePackage.js), so what a user
+// downloads can never lag behind the source. The pre-built artifact is only
+// the fallback when this backend is deployed without the plugin source.
+export async function downloadSeoBridgePlugin(req, res) {
+  try {
+    const download = await resolveSeoBridgeDownload();
+    if (!download) {
+      return res.status(404).json(ResponseUtil.notFound('Plugin package is not currently available'));
+    }
+
+    if (download.kind === 'prebuilt') {
+      console.warn(
+        `[WORDPRESS_PLUGIN] Serving the pre-built Odito SEO Bridge artifact (${download.version}) — ` +
+        'the plugin source directory was not found next to the backend, so it cannot be rebuilt on demand.'
+      );
+    }
+
+    // Never cacheable: a browser, proxy or CDN holding an older response is
+    // exactly the "download is stuck on an old version" failure this prevents.
+    res.set({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${download.fileName}"`,
+      'Content-Length': String(download.buffer.length),
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      Pragma: 'no-cache',
+      'X-Odito-Bridge-Version': download.version,
+      'X-Odito-Bridge-Package': download.kind,
+      'Access-Control-Expose-Headers': 'Content-Disposition, X-Odito-Bridge-Version, X-Odito-Bridge-Package',
+    });
+    return res.status(200).send(download.buffer);
   } catch (error) {
     return handleError(res, error, 'Failed to download plugin package');
   }

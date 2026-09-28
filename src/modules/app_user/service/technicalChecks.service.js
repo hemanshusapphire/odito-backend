@@ -240,22 +240,50 @@ export class TechnicalChecksService {
   // ==========================================
   // Check generation functions
   // ==========================================
-  static getSSLCertificateCheck(domainReport) {
-    const isValid = domainReport?.sslValid;
-    const daysRemaining = domainReport?.sslDaysRemaining || 0;
+  // SSL statuses that indicate an actual, verified certificate/HTTPS problem
+  // on the audited site -- these are the only ones that should ever be
+  // CRITICAL. Everything else (DNS/timeout/blocked/unknown) means the
+  // checker could not verify the certificate on this run, which is not
+  // evidence that the site's SSL is broken.
+  static SSL_CRITICAL_STATUSES = new Set([
+    'EXPIRED_CERTIFICATE',
+    'HOSTNAME_MISMATCH',
+    'CERTIFICATE_CHAIN_ERROR',
+    'INVALID_CERTIFICATE',
+    'NO_HTTPS'
+  ]);
 
-    let status = 'Critical';
-    let message = 'SSL certificate not found or invalid';
+  static getSSLCertificateCheck(domainReport) {
+    // sslStatus is the source of truth (set by the Python ssl_checker -- see
+    // scraper/workers/seo/technical_domain/ssl_checker.py). Older reports
+    // predating that field only have the sslValid boolean; derive a status
+    // from it so they still render correctly.
+    const sslStatus = domainReport?.sslStatus || (domainReport?.sslValid ? 'VALID' : 'UNKNOWN');
+    const daysRemaining = domainReport?.sslDaysRemaining;
+    const storedMessage = domainReport?.sslMessage;
+
+    let status;
+    let message;
     let affectedPages = 0;
 
-    if (isValid) {
-      if (daysRemaining < 30) {
+    if (sslStatus === 'VALID') {
+      if (typeof daysRemaining === 'number' && daysRemaining < 30) {
         status = 'Warning';
         message = `SSL certificate expires in ${daysRemaining} days`;
       } else {
         status = 'OK';
-        message = 'SSL certificate is valid and properly configured';
+        message = storedMessage || 'SSL certificate is valid and properly configured';
       }
+    } else if (this.SSL_CRITICAL_STATUSES.has(sslStatus)) {
+      status = 'Critical';
+      message = storedMessage || 'SSL certificate not found or invalid';
+    } else {
+      // DNS_ERROR / TIMEOUT / BLOCKED / TLS_CONNECTION_ERROR / UNKNOWN:
+      // the last audit run couldn't verify the certificate (network blip,
+      // crawler blocked, missing scan yet, etc). Flag it for a retry
+      // without accusing the site of having broken SSL.
+      status = 'Warning';
+      message = storedMessage || 'Unable to verify SSL certificate on the last scan — will retry';
     }
 
     // For domain-level checks, impact is based on status severity
@@ -284,7 +312,8 @@ export class TechnicalChecksService {
       affected_pages: affectedPages,
       impact_percentage,
       difficulty,
-      message
+      message,
+      sslStatus
     };
   }
 

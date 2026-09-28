@@ -149,6 +149,7 @@ const ISSUE_GROUP_MAP = {
   child_schemas_reference_main_id:  GROUP.SCHEMA,
 
   // ── GROUP 5: Accessibility ──────────────────────────────────────────────────
+  form_labels:                      GROUP.ACCESSIBILITY,
   form_inputs_labels:               GROUP.ACCESSIBILITY,
   keyboard_accessibility:           GROUP.ACCESSIBILITY,
   focus_indicators:                 GROUP.ACCESSIBILITY,

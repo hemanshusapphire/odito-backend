@@ -736,71 +736,75 @@ export const getProjectRankings = async (req, res) => {
       .lean();
 
     if (canonical) {
-      // "All null" used to mean "this canonical doc isn't really populated
-      // yet, prefer the legacy archive" — but current_rank can now
-      // legitimately stay null after a keyword's very first scan fails
-      // (see buildKeywordUpdate's scan_error branch in
-      // rankingHistoryService.js), while the canonical doc still carries
-      // real data that branch preserves (maps_rank, last_scan_status/
-      // last_scan_error). The legacy seo_rankings archive has none of
-      // those fields, so falling back to it would silently erase exactly
-      // the distinction this fix exists to make. A keyword counts as
-      // "real data" here if it has a rank, a maps rank, OR a recorded scan
-      // error — only a doc with truly nothing (a stale/incomplete write)
-      // still falls back.
-      const hasAtLeastOneRank = canonical.keywords?.some(
-        k => k.current_rank !== null || k.maps_rank != null || k.last_scan_status === 'error'
-      );
-      if (hasAtLeastOneRank) {
-        LoggerUtil.info('Rankings retrieved from canonical store', { projectId });
+      // The canonical doc is ALWAYS the source of truth for the currently
+      // tracked keyword set once it exists — every keyword written to it
+      // (via saveCanonicalRanking/addKeyword/mergeSingleKeywordRescan) has
+      // already been through a real DataForSEO scan (buildKeywordUpdate
+      // always sets scan_count >= 1 and an explicit last_scan_status of
+      // 'ok' or 'error'; there is no server-side path that leaves a
+      // placeholder/unscanned keyword on this document). So a keyword with
+      // current_rank === null here is a genuine, common, fully-valid
+      // "scanned successfully, not found in top 100" result — NOT a sign
+      // the doc is unpopulated.
+      //
+      // This used to be gated behind a `hasAtLeastOneRank` check that
+      // treated "no keyword currently ranks" as "doc isn't really
+      // populated yet" and fell back to the legacy seo_rankings archive
+      // instead. That archive has no `usage`/`scan_count`/`status` fields
+      // and isn't kept in sync with add/delete, so any project whose
+      // keywords simply hadn't ranked yet (e.g. a freshly onboarded
+      // project) silently lost its usage/limit header and other canonical
+      // fields — while a project with at least one ranked keyword worked
+      // fine. Falling back to the archive is now reserved for the one case
+      // where it's actually correct: no canonical doc exists at all.
+      LoggerUtil.info('Rankings retrieved from canonical store', { projectId });
 
-        // Overlay live-derived prev-week/prev-month ranks (relative to NOW,
-        // not to whenever the last scan happened to run) so infrequently
-        // scanned ("manual tracking") projects never show stale comparison
-        // values. Cached fields on the doc itself are left untouched — this
-        // only affects what's sent in the response.
-        try {
-          const { weekByKeyword, monthByKeyword } = await deriveHistoricalRanksForProject(projectId);
-          canonical.keywords = canonical.keywords.map(kw => {
-            const normalized = (kw.keyword || '').toLowerCase().trim();
-            return {
-              ...kw,
-              // last_scan_rank: the immediately-previous scan's rank, date-agnostic —
-              // an alias of prev_scan_rank (already computed correctly in
-              // buildKeywordUpdate as "current_rank before this update"). No new
-              // calculation here; prev_week_rank/prev_month_rank logic is untouched.
-              last_scan_rank:  kw.prev_scan_rank ?? null,
-              prev_week_rank:  weekByKeyword.has(normalized)  ? weekByKeyword.get(normalized)  : null,
-              prev_month_rank: monthByKeyword.has(normalized) ? monthByKeyword.get(normalized) : null
-            };
-          });
-        } catch (deriveErr) {
-          LoggerUtil.warn('Live prev-week/month derivation failed — serving cached values', {
-            projectId, error: deriveErr.message
-          });
-          // Live derivation failed, but last_scan_rank doesn't depend on it —
-          // still alias it so the field is never missing from the response.
-          canonical.keywords = canonical.keywords.map(kw => ({ ...kw, last_scan_rank: kw.prev_scan_rank ?? null }));
-        }
-
-        // Usage (used/limit/remaining) — additive field, existing consumers
-        // reading canonical.keywords/etc. are unaffected. Needed so the
-        // Keywords page can show "1/5 Used" on first load, not only after
-        // an add/delete mutation (whose own responses already include this).
-        const keywordLimit = getKeywordLimit(req.user.subscription.plan);
-        canonical.usage = computeKeywordUsage(canonical.keywords.length, keywordLimit);
-
-        // Explicit status ('ranked'|'not_ranked'|'scan_error') alongside the
-        // existing current_rank/last_scan_status fields — additive, nothing
-        // removed or renamed (Section E, UX/state-handling audit).
-        canonical.keywords = canonical.keywords.map(kw => ({ ...kw, status: deriveKeywordStatus(kw) }));
-
-        return res.status(200).json({ success: true, data: [canonical] });
+      // Overlay live-derived prev-week/prev-month ranks (relative to NOW,
+      // not to whenever the last scan happened to run) so infrequently
+      // scanned ("manual tracking") projects never show stale comparison
+      // values. Cached fields on the doc itself are left untouched — this
+      // only affects what's sent in the response.
+      try {
+        const { weekByKeyword, monthByKeyword } = await deriveHistoricalRanksForProject(projectId);
+        canonical.keywords = canonical.keywords.map(kw => {
+          const normalized = (kw.keyword || '').toLowerCase().trim();
+          return {
+            ...kw,
+            // last_scan_rank: the immediately-previous scan's rank, date-agnostic —
+            // an alias of prev_scan_rank (already computed correctly in
+            // buildKeywordUpdate as "current_rank before this update"). No new
+            // calculation here; prev_week_rank/prev_month_rank logic is untouched.
+            last_scan_rank:  kw.prev_scan_rank ?? null,
+            prev_week_rank:  weekByKeyword.has(normalized)  ? weekByKeyword.get(normalized)  : null,
+            prev_month_rank: monthByKeyword.has(normalized) ? monthByKeyword.get(normalized) : null
+          };
+        });
+      } catch (deriveErr) {
+        LoggerUtil.warn('Live prev-week/month derivation failed — serving cached values', {
+          projectId, error: deriveErr.message
+        });
+        // Live derivation failed, but last_scan_rank doesn't depend on it —
+        // still alias it so the field is never missing from the response.
+        canonical.keywords = canonical.keywords.map(kw => ({ ...kw, last_scan_rank: kw.prev_scan_rank ?? null }));
       }
-      LoggerUtil.warn(
-        'Canonical doc exists but all keywords have null rank — falling back to archive',
-        { projectId, keywordsCount: canonical.keywords?.length ?? 0 }
-      );
+
+      // Usage (used/limit/remaining) — additive field, existing consumers
+      // reading canonical.keywords/etc. are unaffected. Needed so the
+      // Keywords page can show "1/5 Used" on first load, not only after
+      // an add/delete mutation (whose own responses already include this).
+      // Same computeKeywordUsage/getKeywordLimit pair addKeywordController
+      // and deleteKeywordController already use — one source of truth for
+      // the limit, keyed off canonical.keywords.length (THIS project's
+      // actual tracked-keyword count), never a second hardcoded value.
+      const keywordLimit = getKeywordLimit(req.user.subscription.plan);
+      canonical.usage = computeKeywordUsage(canonical.keywords.length, keywordLimit);
+
+      // Explicit status ('ranked'|'not_ranked'|'scan_error') alongside the
+      // existing current_rank/last_scan_status fields — additive, nothing
+      // removed or renamed (Section E, UX/state-handling audit).
+      canonical.keywords = canonical.keywords.map(kw => ({ ...kw, status: deriveKeywordStatus(kw) }));
+
+      return res.status(200).json({ success: true, data: [canonical] });
     }
 
     // Fallback: legacy seo_rankings archive

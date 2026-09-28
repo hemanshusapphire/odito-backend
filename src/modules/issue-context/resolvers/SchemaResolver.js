@@ -1,4 +1,6 @@
 import { BaseResolver } from './BaseResolver.js';
+import { getFaqDetection } from '../../tasks/service/faqSchema.js';
+import { getRatingDetection } from '../../tasks/service/aggregateRatingSchema.js';
 
 /**
  * SchemaResolver
@@ -89,6 +91,14 @@ export class SchemaResolver extends BaseResolver {
       case 'faq_schema':
       case 'faq_schema_matches_content': {
         const faqSchema = _findSchemaByType(structuredData, ['FAQPage']);
+        // faq_schema only: the issue fires because FAQ CONTENT was found without
+        // FAQPage schema, so "schema not detected" alone is misleading. Surface
+        // the detected Q/A pairs (or the extraction failure) alongside it so the
+        // UI can show both facts separately and the recommendation service can
+        // build the schema from exactly these pairs.
+        const faqExtras = issueId === 'faq_schema'
+          ? { contextExtras: { faqDetection: getFaqDetection({ pageData, issueDoc: onPageIssue }) } }
+          : {};
         if (issueId === 'faq_schema_matches_content' && faqSchema) {
           // Show table of schema questions vs. detected heading questions
           const schemaQs = (faqSchema.mainEntity || []).map(q => q.name || '');
@@ -113,11 +123,13 @@ export class SchemaResolver extends BaseResolver {
           return {
             currentState: this._codeState(_prettyJson(faqSchema), 'json'),
             expectedState: this._expectedState('FAQPage schema with mainEntity array of Question/Answer pairs'),
+            ...faqExtras,
           };
         }
         return {
           currentState: this._absentState('FAQPage schema'),
           expectedState: this._expectedState('FAQPage JSON-LD schema matching visible FAQ content'),
+          ...faqExtras,
         };
       }
 
@@ -249,6 +261,10 @@ export class SchemaResolver extends BaseResolver {
         return {
           currentState: this._absentState('AggregateRating schema'),
           expectedState: this._expectedState('AggregateRating inside Product or Service schema (ratingValue, reviewCount)'),
+          // The rating figures actually shown on the page, the schema already on
+          // it, the entity the rating belongs to, and the schema that would be
+          // generated — all derived from crawl data, none hardcoded.
+          contextExtras: { ratingDetection: getRatingDetection({ pageData, issueDoc: onPageIssue }) },
         };
       }
 

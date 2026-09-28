@@ -7,7 +7,7 @@ dotenv.config();
 
 import Task from '../model/Task.js';
 import SeoProject from '../../app_user/model/SeoProject.js';
-import { getTaskById, getTaskHistory, updateTaskStatus, deleteTask } from './taskController.js';
+import { getTaskById, getTaskHistory, updateTaskStatus, deleteTask, applyWordPressFix } from './taskController.js';
 
 /**
  * Phase 3 — authorization end-to-end, through the real controller functions
@@ -155,6 +155,24 @@ describe('Task authorization — cross-user access via the real controller + Aut
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.success, true);
     assert.equal(res.body.data._id.toString(), taskA._id.toString());
+  });
+
+  test('User B cannot POST /tasks/:taskId/apply-wordpress (Phase 4) on a task belonging to User A\'s project', async (t) => {
+    if (!mongoAvailable) return t.skip('local MongoDB not reachable');
+
+    // Ownership is checked before wordPressSeoFixService is ever invoked —
+    // no WordPress connection/mocking needed for this to correctly 403.
+    const req = { params: { taskId: taskA._id.toString() }, body: { approved: true, expectedCurrentValue: 'anything' }, user: { _id: userB } };
+    const res = mockRes();
+    await applyWordPressFix(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.body.data, undefined);
+
+    // Confirm the mutation genuinely did not happen and origin was never touched.
+    const reloaded = await Task.findById(taskA._id);
+    assert.equal(reloaded.status, 'implemented');
+    assert.notEqual(reloaded.origin, 'wordpress_auto');
   });
 
   test('a request for a nonexistent taskId returns 404 without leaking whether the ID exists under another project', async (t) => {

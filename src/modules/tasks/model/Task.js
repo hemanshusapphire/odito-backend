@@ -15,7 +15,13 @@ import mongoose from 'mongoose';
  */
 
 const TASK_STATUSES = ['task_created', 'implemented', 'verified_fixed', 'reopened'];
-const TASK_ORIGINS  = ['ai_fix', 'diy_guide', 'auditiq', 'manual'];
+// 'wordpress_auto' (Phase 4): Odito itself performed the write via the
+// WordPress integration, distinct from every other origin above — all of
+// which mean a HUMAN did the implementation work (by hand, via the DIY
+// guide, or via AuditIQ) and is merely telling Odito it's done. Nothing
+// else about the lifecycle changes: a wordpress_auto task is still
+// verified exactly like any other by TaskVerificationService.
+const TASK_ORIGINS  = ['ai_fix', 'diy_guide', 'auditiq', 'manual', 'wordpress_auto'];
 const SNAPSHOT_SOURCES = ['structured_snapshot', 'diagnostic_string', 'unavailable'];
 
 /**
@@ -59,6 +65,34 @@ const fixAttemptSchema = new mongoose.Schema(
       // would let an old attempt's displayed fix silently change or vanish.
       snapshot: { type: mongoose.Schema.Types.Mixed, default: null },
       expectedAfterValue: { type: mongoose.Schema.Types.Mixed, default: null },
+
+      // Populated only when origin === 'wordpress_auto' — the literal
+      // outcome of the write Odito itself performed, kept for audit/
+      // debugging alongside the existing before/expectedAfterValue.
+      // Deliberately flat and small (no raw WordPress response body, no
+      // credentials) — see wordPressSeoFixService.js.
+      externalWrite: {
+        system: { type: String, enum: ['wordpress', null], default: null },
+        provider: { type: String, enum: ['rank_math', 'yoast', 'aioseo', 'seopress', 'none', null], default: null },
+        field: { type: String, default: null },
+        wordpressPostId: { type: mongoose.Schema.Types.Mixed, default: null },
+        httpStatus: { type: Number, default: null },
+        writtenAt: { type: Date, default: null },
+        // 'site' for fixes that change one site-wide WordPress setting (Organization
+        // sameAs, breadcrumbs) rather than a single post. null = page-scoped/unknown.
+        scope: { type: String, enum: ['post', 'site', null], default: null },
+        // sameAs only: the Rank Math `social_additional_profiles` list read from
+        // WordPress immediately before and after the write (normalized URLs).
+        // Facebook/Twitter-derived profiles are never part of this.
+        profilesBefore: { type: [String], default: undefined },
+        profilesAfter: { type: [String], default: undefined },
+        // Content fixes (page H1): the builder adapter that made the edit and the sha256
+        // fingerprints of the page's stored content before/after — enough to audit or roll
+        // back the change from WordPress revisions. Never the content itself.
+        contentAdapter: { type: String, default: undefined },
+        contentFingerprintBefore: { type: String, default: undefined },
+        contentFingerprintAfter: { type: String, default: undefined },
+      },
     },
 
     implementedAt: { type: Date, default: null },
@@ -138,6 +172,12 @@ const taskSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       default: null,
     },
+
+    // ── Element-level context ───────────────────────────────────────────
+    // Frozen at creation for issues whose fix is about SPECIFIC elements (see
+    // service/taskIssueContext.js): which elements were affected and what must be true
+    // afterwards. null for every other issue type.
+    issueContext: { type: mongoose.Schema.Types.Mixed, default: null },
 
     // ── Source ───────────────────────────────────────────────────────────
     origin: {

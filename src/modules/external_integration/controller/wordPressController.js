@@ -1,6 +1,8 @@
 import { validationResult } from 'express-validator';
 import { ResponseUtil } from '../../../utils/ResponseUtil.js';
 import wordPressService, { WordPressConnectionError } from '../service/wordPressService.js';
+import wordPressSeoDataService from '../service/wordPressSeoDataService.js';
+import wordPressSeoFixService from '../service/wordPressSeoFixService.js';
 
 /**
  * Maps a thrown error to an HTTP response without ever including
@@ -98,5 +100,89 @@ export async function disconnectConnection(req, res) {
     return res.status(200).json(ResponseUtil.deleted('WordPress disconnected successfully'));
   } catch (error) {
     return handleError(res, error, 'Failed to disconnect WordPress');
+  }
+}
+
+// GET /api/wordpress/capabilities?projectId=
+// Never touches WordPress directly — reads the connection's own
+// last-detected provider (refreshed on every connect/verify call) and
+// returns a static per-provider capability table. Credentials are never
+// part of the response (wordPressService.getConnectionStatus already omits
+// application_password from the underlying read).
+export async function getCapabilities(req, res) {
+  try {
+    if (firstValidationError(req, res)) return;
+
+    const capabilities = await wordPressSeoDataService.getCapabilities(req.query.projectId);
+    return res.status(200).json(ResponseUtil.success(capabilities, 'WordPress SEO capabilities retrieved'));
+  } catch (error) {
+    return handleError(res, error, 'Failed to fetch WordPress SEO capabilities');
+  }
+}
+
+// GET /api/wordpress/seo-data?projectId=&pageUrl=
+// Live, on-demand read from the customer's WordPress site — never written
+// into seo_page_data (the crawler's own audit snapshot remains
+// authoritative for scoring/verification; this is integration data only).
+export async function getPageSeoData(req, res) {
+  try {
+    if (firstValidationError(req, res)) return;
+
+    const data = await wordPressSeoDataService.getPageSeoData(req.query.projectId, req.query.pageUrl);
+    if (!data) {
+      return res.status(200).json(ResponseUtil.success(null, 'This URL could not be resolved to a WordPress post or page'));
+    }
+    return res.status(200).json(ResponseUtil.success(data, 'Live WordPress SEO data retrieved'));
+  } catch (error) {
+    return handleError(res, error, 'Failed to fetch live WordPress SEO data');
+  }
+}
+
+// GET /api/wordpress/page-resolution?projectId=&pageUrl=
+// Read-only: does this URL resolve to a WordPress page/post Odito can act on, and if not, why
+// (different site, blog-index homepage, unsupported content type, not exposed by REST). Always 200.
+export async function getPageResolution(req, res) {
+  try {
+    if (firstValidationError(req, res)) return;
+
+    const data = await wordPressSeoDataService.getPageResolution(req.query.projectId, req.query.pageUrl);
+    return res.status(200).json(ResponseUtil.success(data, 'WordPress page resolution retrieved'));
+  } catch (error) {
+    return handleError(res, error, 'Failed to resolve the page in WordPress');
+  }
+}
+
+// GET /api/wordpress/h1-context?projectId=&pageUrl=[&recommended=]
+// Read-only: whether this page's H1 can be fixed automatically (builder adapter decision), what
+// the page currently has, and the fingerprint of the state the user is reviewing. Always 200 —
+// `supported:false` carries the reason instead of an error.
+export async function getH1Context(req, res) {
+  try {
+    if (firstValidationError(req, res)) return;
+
+    const data = await wordPressSeoFixService.readH1Context({
+      projectId: req.query.projectId,
+      pageUrl: req.query.pageUrl,
+      recommended: req.query.recommended,
+    });
+    return res.status(200).json(ResponseUtil.success(data, 'Page H1 context retrieved'));
+  } catch (error) {
+    return handleError(res, error, 'Failed to read the page H1 context');
+  }
+}
+
+// GET /api/wordpress/site-schema?projectId=
+// Live, on-demand read of SITE-LEVEL schema (Organization sameAs,
+// breadcrumbs) — always 200 with `supported:false` (never a 4xx/5xx) when
+// the connected site's Bridge doesn't support this yet, so the frontend can
+// cleanly decide whether to show the sameAs/breadcrumb UI at all.
+export async function getSiteSchema(req, res) {
+  try {
+    if (firstValidationError(req, res)) return;
+
+    const data = await wordPressSeoDataService.getSiteSchema(req.query.projectId);
+    return res.status(200).json(ResponseUtil.success(data, 'Live WordPress site schema retrieved'));
+  } catch (error) {
+    return handleError(res, error, 'Failed to fetch live WordPress site schema');
   }
 }

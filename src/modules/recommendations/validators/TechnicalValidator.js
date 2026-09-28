@@ -14,6 +14,7 @@
  */
 
 import { BaseValidator } from './BaseValidator.js';
+import { normalizeRobotsValue } from '../../tasks/service/valueNormalization.js';
 
 // Issues where recommendedVersion must be a valid URL
 const URL_REQUIRED_ISSUES = new Set([
@@ -53,10 +54,27 @@ export class TechnicalValidator extends BaseValidator {
 
     // ── Canonical: recommended must be a valid absolute URL, same domain as page ─
     if (issueId === 'canonical_tag_errors') {
-      if (recommended) {
-        // Extract URL from HTML if it's a tag like <link rel="canonical" href="...">
-        const urlMatch = recommended.match(/href="([^"]+)"/i) || recommended.match(/href='([^']+)'/i);
-        const urlToCheck = urlMatch ? urlMatch[1] : recommended.trim();
+      if (!recommended) {
+        warnings.push('canonical_tag_errors: recommendedVersion is empty — URL fix not provided');
+        satisfiesConstraint = false;
+      } else if (/<[a-z][\s\S]*>/i.test(recommended)) {
+        // Bug fix (production): this used to EXTRACT the href out of an
+        // HTML tag like <link rel="canonical" href="..."> and validate
+        // just that — silently treating a full HTML tag as an acceptable
+        // recommendedVersion. recommendedVersion is stored and used
+        // DIRECTLY as the value written to WordPress (see
+        // TaskHistoryService._deriveExpectedAfterValue), never rendered as
+        // HTML — so accepting a wrapped tag here let a literal HTML string
+        // reach Rank Math's canonical meta field, which Rank Math silently
+        // declined to render (no error, just no <link> tag on the public
+        // page). recommendedVersion must be a bare URL; markup belongs
+        // only in implementationCode. Flagging this here (rather than
+        // unwrapping and accepting) engages the SAME repair-prompt retry
+        // the cross-domain check below already uses.
+        warnings.push(`canonical recommendedVersion must be a plain URL, not HTML markup: "${recommended}"`);
+        satisfiesConstraint = false;
+      } else {
+        const urlToCheck = recommended.trim();
         const result = this._checkAbsoluteUrl(urlToCheck, 'canonical recommendedVersion');
         if (!result.ok) {
           warnings.push(result.message);
@@ -75,8 +93,24 @@ export class TechnicalValidator extends BaseValidator {
             }
           }
         }
-      } else {
-        warnings.push('canonical_tag_errors: recommendedVersion is empty — URL fix not provided');
+      }
+    }
+
+    // ── Robots: recommended must be exactly one of the 4 allowed directive
+    // strings — reuses valueNormalization.js's normalizeRobotsValue() so
+    // this validator's pass/fail decision and TaskHistoryService's later
+    // derivation of the actual write value can never disagree about what
+    // counts as a valid robots recommendation (the exact same class of bug
+    // the canonical HTML production incident was caused by: a validator
+    // that tolerated a shape the write path could not safely use).
+    if (issueId === 'noindex_key_pages' || issueId === 'noindex_tags') {
+      if (!recommended) {
+        warnings.push(`${issueId}: recommendedVersion is empty — robots directive fix not provided`);
+        satisfiesConstraint = false;
+      } else if (!normalizeRobotsValue(recommended)) {
+        warnings.push(
+          `${issueId}: recommendedVersion must be an exact robots directive string ("index, follow" | "noindex, follow" | "index, nofollow" | "noindex, nofollow"), not: "${recommended}"`
+        );
         satisfiesConstraint = false;
       }
     }

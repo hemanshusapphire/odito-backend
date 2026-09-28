@@ -89,8 +89,8 @@ export class AccessibilityValidator extends BaseValidator {
       }
     }
 
-    // ── form_inputs_labels: must reference for= or aria-labelledby ────────
-    if (issueId === 'form_inputs_labels') {
+    // ── form_labels (alias form_inputs_labels): must reference for= or aria-labelledby ────────
+    if (issueId === 'form_labels' || issueId === 'form_inputs_labels') {
       if (implCode && !implCode.includes('for=') && !implCode.includes('aria-labelledby') && !implCode.includes('aria-label')) {
         warnings.push('Form label fix should use for=, aria-labelledby, or aria-label');
       }

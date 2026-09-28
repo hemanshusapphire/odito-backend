@@ -83,6 +83,10 @@ const REGISTRY = {
   // ─────────────────────────────────────────────────────────
   // ON-PAGE — ACCESSIBILITY
   // ─────────────────────────────────────────────────────────
+  // The Python rule (FormLabelsRule) emits `form_labels`. `form_inputs_labels` was the name
+  // registered here, so the real issue was "not in registry" (Unknown issue type / Not detected /
+  // no recommendation). Both are kept: the old name is an alias, never emitted.
+  form_labels:                { resolver: RESOLVER.ACCESSIBILITY, dataSources: [DATA_SOURCE.HEADLESS],                                    displayType: DISPLAY_TYPE.TABLE,  issueType: 'on_page' },
   form_inputs_labels:         { resolver: RESOLVER.ACCESSIBILITY, dataSources: [DATA_SOURCE.HEADLESS],                                    displayType: DISPLAY_TYPE.TABLE,  issueType: 'on_page' },
   keyboard_accessibility:     { resolver: RESOLVER.ACCESSIBILITY, dataSources: [DATA_SOURCE.HEADLESS],                                    displayType: DISPLAY_TYPE.LIST,   issueType: 'on_page' },
   focus_indicators:           { resolver: RESOLVER.ACCESSIBILITY, dataSources: [DATA_SOURCE.HEADLESS],                                    displayType: DISPLAY_TYPE.LIST,   issueType: 'on_page' },

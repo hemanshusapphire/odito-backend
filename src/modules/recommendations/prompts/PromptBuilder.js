@@ -168,6 +168,16 @@ ${repairBlock}`;
       if (min) lines.push(`  It MUST be at least ${min} characters.`);
       lines.push('  Expand it by adding a genuine supporting detail, qualifying phrase, or CTA.');
       lines.push('  Do NOT add filler words or generic padding.');
+    } else if (reasonText.includes('robots directive')) {
+      lines.push(`REQUIRED FIX: Your recommendedVersion was not one of the 4 exact allowed robots directive strings.`);
+      lines.push(`  recommendedVersion MUST be EXACTLY one of: "index, follow", "noindex, follow", "index, nofollow", "noindex, nofollow" — no other wording, no HTML.`);
+      lines.push(`  For this issue, the correct value is almost always "index, follow" (remove both restrictions).`);
+      lines.push(`  Put the full HTML <meta name="robots" content="..."> tag in "implementationCode" instead — never in "recommendedVersion".`);
+    } else if (reasonText.includes('markup') || reasonText.includes('html')) {
+      const pageUrl = rc?.pageContext?.pageUrl || '';
+      lines.push(`REQUIRED FIX: Your recommendedVersion contained an HTML tag instead of a plain URL.`);
+      lines.push(`  recommendedVersion MUST be ONLY the bare URL string${pageUrl ? ` (e.g. "${pageUrl}")` : ''} — no <link>, no quotes, no markup of any kind.`);
+      lines.push(`  Put the full HTML <link rel="canonical" href="..."> tag in "implementationCode" instead — never in "recommendedVersion".`);
     } else if (reasonText.includes('cross-domain') || reasonText.includes('canonical')) {
       const pageUrl = rc?.pageContext?.pageUrl || '';
       try {
@@ -573,16 +583,25 @@ ${OUTPUT_FORMAT}`;
         `  - What canonicalization is and why it matters`,
         `  - How it prevents duplicate URL indexing issues and consolidates link signals`,
         `Provide the exact canonical implementation tag example.`,
-        `For "recommendedVersion": the self-referencing canonical URL tag.`,
-        `For "implementationCode": the HTML <link rel="canonical" href="..."> snippet.`
+        `For "recommendedVersion": ONLY the plain, absolute self-referencing canonical URL as a bare string`,
+        `  (e.g. "${pageContext.pageUrl}") — NEVER wrap it in HTML, NEVER include`,
+        `  <link rel="canonical" ...> or any markup. This field is stored and used directly as a`,
+        `  URL value, not rendered as HTML.`,
+        `For "implementationCode": the full HTML <link rel="canonical" href="..."> snippet — this is the`,
+        `  ONLY field where the HTML tag belongs.`
       ].join('\n');
     } else if (issueId === 'noindex_key_pages' || issueId === 'noindex_tags') {
       task = [
         `Remove the incorrect noindex directive from this key page.`,
         `You MUST explain why blocking important key pages from search indexing hurts organic visibility and crawlers.`,
         `Provide the robots.txt or meta tag fix to make the page indexable.`,
-        `For "recommendedVersion": the corrected indexable robots meta tag (e.g., "index, follow").`,
-        `For "implementationCode": the HTML meta tag or robots.txt line.`
+        `For "recommendedVersion": ONLY one of these exact 4 strings, chosen to reflect the corrected`,
+        `  directive state — no other wording, no HTML, no explanation:`,
+        `  "index, follow" | "noindex, follow" | "index, nofollow" | "noindex, nofollow".`,
+        `  This field is stored and used directly as a machine-parsed directive value, not rendered as HTML —`,
+        `  in almost every case for THIS issue the correct value is "index, follow" (remove both restrictions).`,
+        `For "implementationCode": the full HTML <meta name="robots" content="..."> tag or robots.txt line —`,
+        `  this is the ONLY field where that markup belongs.`
       ].join('\n');
     } else if (
       issueId === 'og_tags' ||
@@ -662,6 +681,21 @@ ${OUTPUT_FORMAT}`;
     const fw       = pageContext.framework;
     const mec      = isAbsent ? missingElementContext : null;
 
+    // ── sameas_array / breadcrumblist_schema: single-VALUE fixes, never full
+    // JSON-LD — these are the two Schema-group issues wired to Odito's
+    // site-scoped Rank Math capabilities (see providerCapabilityRegistry.js).
+    // recommendedVersion here is written DIRECTLY via the Bridge's
+    // /seo/site route — it must never be a JSON-LD block (that belongs only
+    // in implementationCode, for the DIY/manual-fix path — see every other
+    // field in this codebase that draws the same distinction: canonical,
+    // robots).
+    if (issueId === 'sameas_array') {
+      return this._sameAsPrompt(rc);
+    }
+    if (issueId === 'breadcrumblist_schema') {
+      return this._breadcrumbPrompt(rc);
+    }
+
     const lines = [];
     lines.push(`ISSUE: ${issueId}`);
     lines.push(`ACTION: ${obj.action} ${obj.target}`);
@@ -670,7 +704,9 @@ ${OUTPUT_FORMAT}`;
 
     // Existing schema code
     if (currentState.codeContent && !isAbsent) {
-      lines.push(`CURRENT SCHEMA CODE:\n${currentState.codeContent.slice(0, 800)}`);
+      // 4000, not 800: a real Organization/LocalBusiness graph is longer than 800
+      // chars, and a truncated (invalid) snippet gives the model nothing to merge into.
+      lines.push(`CURRENT SCHEMA CODE:\n${currentState.codeContent.slice(0, 4000)}`);
     } else {
       lines.push(`CURRENT SCHEMA: ${isAbsent ? `${currentState.checkedFor || 'schema'} is absent` : 'Not detected'}`);
     }
@@ -712,11 +748,17 @@ ${OUTPUT_FORMAT}`;
 
     const context = lines.join('\n');
 
-    const schemaImplInstr = fw === 'nextjs'
-      ? 'Use Next.js Script component with type="application/ld+json" inside the page component'
-      : fw === 'wordpress'
-        ? 'Add via wp_head() hook in functions.php, or use Rank Math / Yoast SEO schema field'
-        : 'Add <script type="application/ld+json"> block in the <head> section';
+    // Placement guidance only — it belongs in implementationNotes. The
+    // implementationCode field itself is ALWAYS the JSON-LD <script> block, never
+    // PHP/JSX (a CMS name in the FRAMEWORK line used to make the model write a
+    // PHP wp_head() snippet there, which is not JSON-LD and got the whole
+    // recommendation rejected).
+    const platform = fw !== 'unknown' ? fw : (pageContext.cms || '');
+    const schemaImplInstr = platform === 'nextjs'
+      ? 'In "implementationNotes" say to render it with the Next.js Script component (type="application/ld+json") in the page component'
+      : /wordpress/i.test(platform)
+        ? 'In "implementationNotes" say to paste it into the page\'s <head> via the SEO plugin\'s custom-schema / header-scripts field (Rank Math, Yoast) — do NOT write PHP'
+        : 'In "implementationNotes" say to place the <script type="application/ld+json"> block in the <head> section';
 
     const absentSchemaInstr = isAbsent && mec ? [
       ``,
@@ -745,13 +787,80 @@ RULES FOR SCHEMA GENERATION:
 2. @context must be "https://schema.org"
 3. Use real values from the CONTEXT block — never placeholder values like "Your Brand Name" or "https://example.com"
 4. If brand/business details are not provided, derive from page URL and page title
-5. Required fields for the schema type must ALL be present
+5. Include every field of the schema type whose real value is in the CONTEXT block. If a required or recommended field's value is NOT in the CONTEXT (for example a street address or phone number), OMIT it from the JSON-LD — never invent a value or use a placeholder — and name it in "implementationNotes" as "needs your input: <field>"
 6. JSON must be valid — properly escaped, no trailing commas
 7. Implementation: ${schemaImplInstr}
 8. For "recommendedVersion": write the actual JSON-LD object (not instructions)
 9. For "beforeAfter": before = current state description, after = the new schema type added
-10. For "implementationCode": the complete, ready-to-paste <script> block
+10. For "implementationCode": ONLY the complete JSON-LD inside a <script type="application/ld+json"> ... </script> block — never PHP, JavaScript or any other language
+11. If CURRENT SCHEMA CODE is given, start from it: keep every existing property unchanged and only add what is missing
 ${antiHallBlock}
+
+${OUTPUT_FORMAT}`;
+  }
+
+  /**
+   * sameas_array — the one real hallucination trap in this whole feature:
+   * a REAL business's social media profile URLs are a FACT Claude cannot
+   * possibly know just from a business/brand name — "twitter.com/<name>"
+   * looks plausible but is exactly the kind of confident-sounding, unverified
+   * guess ANTI_HALLUCINATION_STRICT exists to forbid. A wrong URL here is
+   * actively worse than no URL: it links the site's own structured data to
+   * a URL that may 404 or belong to someone else entirely.
+   *
+   * Odito's context pipeline currently has NO on-page social-link detection
+   * (no footer/header icon extraction) to ground a real URL from, so the
+   * honest, correct output in the overwhelming majority of cases is the
+   * existing "not provided in context" convention — a real, non-URL string
+   * that valueNormalization.normalizeSchemaUrlValue() naturally rejects
+   * (fails URL parsing) exactly like any other malformed value, safely
+   * refusing to ever write it. This is a valid, complete, non-retryable
+   * answer, not a failure — see SchemaValidator's own sameas_array branch.
+   */
+  _sameAsPrompt(rc) {
+    const { pageContext, missingElementContext, contentContext } = rc;
+    const businessName = missingElementContext?.businessName || contentContext?.pageTitle || '';
+
+    return `You are reviewing this site's Organization schema "sameAs" property (the array of links to this business's official social media / profile pages).
+
+CONTEXT:
+PAGE URL: ${pageContext?.pageUrl || ''}
+${businessName ? `BUSINESS/BRAND NAME (from page content): "${businessName}"\n` : ''}
+ISSUE: sameas_array — the Organization schema's sameAs property is missing or incomplete.
+
+${ANTI_HALLUCINATION_STRICT}
+
+TASK:
+For "recommendedVersion": if — and ONLY if — a REAL, explicitly confirmed social media profile URL for this exact business appears somewhere in the CONTEXT above, output that one bare URL (e.g. "https://linkedin.com/company/example") and nothing else — no quotes, no HTML, no explanation.
+If no such confirmed URL is present in the CONTEXT (this will be the normal case today), output the exact literal string: not provided in context
+  Do NOT guess a URL from the business name — "https://twitter.com/${businessName || '<name>'}" is exactly the kind of unverified guess that is forbidden, even though it looks plausible.
+For "whyThisMatters": explain why sameAs matters for entity/brand recognition in search. If you output "not provided in context", explicitly state that the site owner must supply their own real, verified social profile URLs — Odito does not invent one.
+For "implementationCode": a full, illustrative example Organization JSON-LD snippet showing a sameAs array — this field alone may use realistic-looking EXAMPLE profile URLs, clearly for illustration, since it is documentation and is never a value Odito writes automatically.
+
+${OUTPUT_FORMAT}`;
+  }
+
+  /**
+   * breadcrumblist_schema — unlike sameas_array, this has NO hallucination
+   * risk: every current finding means exactly one thing (breadcrumbs are
+   * off site-wide), and the fix is a configuration toggle, not a fact about
+   * the business. recommendedVersion is the SAME closed-allowlist pattern
+   * as robots (see PromptBuilder's noindex_key_pages branch) — one literal
+   * string, mirrored by valueNormalization.normalizeBreadcrumbEnableValue.
+   */
+  _breadcrumbPrompt(rc) {
+    const { pageContext } = rc;
+    return `You are reviewing this site's breadcrumb navigation schema (BreadcrumbList JSON-LD).
+
+CONTEXT:
+PAGE URL: ${pageContext?.pageUrl || ''}
+ISSUE: breadcrumblist_schema — BreadcrumbList structured data is missing from this page (and, most likely, the whole site — breadcrumbs are a site-wide setting).
+
+TASK:
+Explain why BreadcrumbList schema matters for search result display and site-hierarchy signals.
+For "recommendedVersion": output ONLY the exact literal string: enabled
+  This is a closed, single-answer field — every current finding for this issue means the same fix (turn breadcrumbs on site-wide). Do not write anything else in this field — no explanation, no JSON.
+For "implementationCode": an example rendered BreadcrumbList JSON-LD snippet for THIS page's own URL hierarchy, for illustration only.
 
 ${OUTPUT_FORMAT}`;
   }
@@ -1187,6 +1296,7 @@ function _codeInstruction(framework, cms, target) {
 
 function _wcagReference(issueId) {
   const refs = {
+    form_labels:          'WCAG 2.1 SC 1.3.1 (Info and Relationships) + SC 4.1.2 (Name, Role, Value)',
     form_inputs_labels:   'WCAG 2.1 SC 1.3.1 (Info and Relationships) + SC 4.1.2 (Name, Role, Value)',
     keyboard_accessibility:'WCAG 2.1 SC 2.1.1 (Keyboard)',
     focus_indicators:     'WCAG 2.1 SC 2.4.7 (Focus Visible)',
