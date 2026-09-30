@@ -68,6 +68,13 @@ const auditRunSchema = new mongoose.Schema(
     // Full audit wall-clock duration from seoprojects.audit_duration_ms
     auditDurationMs: { type: Number, min: 0, default: 0 },
 
+    // ── Run Source ─────────────────────────────────────────────────────────
+    // Who/what started this audit (jobs/runSources.js): 'manual_recrawl',
+    // 'initial_audit', 'admin_recrawl' (full audits), 'manual_recheck',
+    // 'weekly_recheck' (Quick Recheck). Null for runs recorded before this
+    // field existed — treat null as "unknown / legacy", never as a default source.
+    source: { type: String, default: null },
+
     // ── Version Metadata ───────────────────────────────────────────────────
     scoringVersion:   { type: String, default: null }, // e.g. "1.1"
     aiScoringVersion: { type: String, default: null }, // e.g. "v2"

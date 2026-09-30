@@ -48,7 +48,7 @@ export async function runOnce() {
  *
  * Deliberately OPT-IN (default OFF unless SOCIAL_SCHEDULER_ENABLED is
  * exactly "true"), unlike this codebase's other schedulers
- * (weeklyRecrawlScheduler.js, staleLockScheduler.js — both default ON,
+ * (weeklyRecheckScheduler.js, staleLockScheduler.js — both default ON,
  * `!== 'false'`). Those only ever touch Odito's own database. This one
  * makes REAL, irreversible posts to a real, external Facebook/Instagram
  * account the moment it runs — the user must explicitly set

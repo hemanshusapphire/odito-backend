@@ -24,6 +24,11 @@ export const PLANS = {
     billingInterval: 'month',
     credits: 1,
     pages: 100,
+    // Manual Recrawls per billing period (a user-level pool, like credits/pages;
+    // resets on renewal via allocateQuotaFromPlan()). Weekly Rechecks and a
+    // project's first audit never consume it. Starter 3 / Pro 10 / Premium 30 —
+    // edit here only; nothing else hardcodes them.
+    recrawls: 3,
     // Max keywords a single project may track at once (SeoRankingCurrent.keywords[]
     // length). null would mean unlimited — see getKeywordLimit() below. This is a
     // per-project cap, not account-wide: matches how the Keywords page itself is
@@ -38,7 +43,7 @@ export const PLANS = {
       urlSelection: true,
       failedUrlRetry: true,
       pdfReport: true,
-      weeklyRecrawl: false,
+      weeklyRecheck: false,
       teamMembers: 1,
       apiAccess: false,
       whiteLabel: false,
@@ -59,6 +64,7 @@ export const PLANS = {
     billingInterval: 'month',
     credits: 5,
     pages: 250,
+    recrawls: 10,
     keywords: 15,
     // Same feature set as Starter — Phase 1 is quota/pricing scaffolding only;
     // feature-gating differentiation across tiers is explicitly out of scope
@@ -72,7 +78,7 @@ export const PLANS = {
       urlSelection: true,
       failedUrlRetry: true,
       pdfReport: true,
-      weeklyRecrawl: false,
+      weeklyRecheck: false,
       teamMembers: 1,
       apiAccess: false,
       whiteLabel: false,
@@ -89,6 +95,7 @@ export const PLANS = {
     billingInterval: 'month',
     credits: 10,
     pages: 500,
+    recrawls: 30,
     keywords: 30,
     // Same feature set as Starter/Pro — see the note on `pro.features` above.
     features: {
@@ -100,7 +107,7 @@ export const PLANS = {
       urlSelection: true,
       failedUrlRetry: true,
       pdfReport: true,
-      weeklyRecrawl: false,
+      weeklyRecheck: false,
       teamMembers: 1,
       apiAccess: false,
       whiteLabel: false,
@@ -127,11 +134,11 @@ export function getPlan(planId) {
 
 /**
  * @param {string} planId
- * @returns {{credits:number, pages:number}}
+ * @returns {{credits:number, pages:number, recrawls:number}}
  */
 export function getPlanLimits(planId) {
-  const { credits, pages } = getPlan(planId);
-  return { credits, pages };
+  const { credits, pages, recrawls } = getPlan(planId);
+  return { credits, pages, recrawls: recrawls ?? 0 };
 }
 
 /**

@@ -6,11 +6,11 @@ import { runClaimedPolicy, rescheduleAfterRun } from './automationOrchestrator.j
 import { AUTOMATION_SCHEDULER_CRON, AUTOMATION_SYSTEM_ENABLED } from '../../constants/automationConfig.js';
 
 /**
- * automationScheduler — Phase 8. Mirrors weeklyRecrawlScheduler.js's own
+ * automationScheduler — Phase 8. Mirrors weeklyRecheckScheduler.js's own
  * shape exactly: ONE cron registration scans for every policy currently
  * due (`enabled:true, nextRunAt <= now`), not one timer per policy. A
  * single policy failing never aborts the scan — each is wrapped in its
- * own try/catch, same as weeklyRecrawlScheduler's per-project loop.
+ * own try/catch, same as weeklyRecheckScheduler's per-project loop.
  *
  * Double-processing protection is NOT node-cron's `noOverlap` alone (that
  * only protects one process's own scan from overlapping itself) — the real
@@ -18,7 +18,7 @@ import { AUTOMATION_SCHEDULER_CRON, AUTOMATION_SYSTEM_ENABLED } from '../../cons
  * `findOrCreateRun` (unique `{projectId,policyId,scheduledWindow}`) +
  * `claimRun` (atomic status transition), exactly like
  * projectAuditService.startProjectAudit's atomic crawl_status claim that
- * weeklyRecrawlScheduler itself relies on. Two app instances racing the
+ * weeklyRecheckScheduler itself relies on. Two app instances racing the
  * same due policy can both attempt this; only one ever wins the claim.
  */
 

@@ -132,6 +132,46 @@ export const CANONICAL_ISSUE_TITLES = {
 export const DEFAULT_DIFFICULTY = "medium";
 
 /**
+ * Severity → difficulty, used only when a rule has no explicit ISSUE_METADATA
+ * entry above. Difficulty and severity are independent concepts in the
+ * product model (e.g. a medium-severity missing meta description is an EASY
+ * fix; a high-severity broken canonical can be a MEDIUM fix) — this map is
+ * deliberately just a reasonable default for issue types nobody has
+ * classified yet, not a claim that severity determines difficulty.
+ */
+const SEVERITY_TO_DIFFICULTY = {
+  high: 'hard',
+  critical: 'hard',
+  medium: 'medium',
+  warning: 'medium',
+  low: 'easy',
+  info: 'easy',
+  none: 'easy', // Technical Checks' "OK" status carries severity 'none' — nothing to fix.
+};
+
+/**
+ * Single resolver for "how hard is this issue to fix" — used by both
+ * On-Page Issues (onPageIssuesService.js) and Technical Checks
+ * (technicalChecks.service.js). Previously each of technicalChecks.service.js's
+ * 10 check functions duplicated an identical inline severity→difficulty
+ * switch statement; this replaces all of them with one place to change.
+ *
+ * Resolution order: explicit per-rule ISSUE_METADATA[issue_code].difficulty
+ * (the actual, curated answer) → severity-based default (a reasonable
+ * guess for anything not yet curated) → DEFAULT_DIFFICULTY.
+ *
+ * @param {{ issue_code?: string, severity?: string }} params
+ * @returns {'easy'|'medium'|'hard'}
+ */
+export function resolveIssueDifficulty({ issue_code, severity } = {}) {
+  const meta = issue_code ? ISSUE_METADATA[issue_code] : null;
+  if (meta && meta.difficulty) return meta.difficulty;
+
+  const bySeverity = SEVERITY_TO_DIFFICULTY[severity?.toLowerCase()];
+  return bySeverity || DEFAULT_DIFFICULTY;
+}
+
+/**
  * AI confidence fallback values when not stored in the database.
  * Maps severity → confidence percentage.
  */

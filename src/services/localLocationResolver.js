@@ -36,8 +36,18 @@ function log(label, { city = null, lat = null, lng = null, resolvedCode = null, 
 
 // ── Country resolution ────────────────────────────────────────────────────────
 
-function resolveCountry(country, ...addressFallbacks) {
+// `verifiedBusinessCountryCode` must be handled as an already-resolved ISO-2
+// code, not run through extractCountryCode() — that function looks for a
+// full country NAME substring (e.g. "INDIA") inside free-text address
+// strings, so a 2-letter code like "IN" or "US" never matches and was
+// silently discarded here, even though it was a perfectly good, already-known
+// country. This is what let a local-scope project with a set
+// `verified_business.countryCode` but no top-level `country` field fall
+// through to "country unknown" (and, before the caller-side fix in
+// keywordRankingService.js, all the way to a silent US default).
+function resolveCountry(country, verifiedBusinessCountryCode, ...addressFallbacks) {
   if (country) return country.toUpperCase();
+  if (verifiedBusinessCountryCode) return verifiedBusinessCountryCode.toUpperCase();
   for (const addr of addressFallbacks) {
     const code = extractCountryCode(addr);
     if (code) return code;
@@ -100,13 +110,32 @@ export async function resolveLocalLocationCode({ verifiedBusiness, country, addr
   try {
     locations = await getDataForSEOLocations();
   } catch (err) {
-    const fallbackCode = COUNTRY_TO_LOCATION_CODE[countryCode] ?? COUNTRY_TO_LOCATION_CODE['US'];
-    log('FETCH_ERROR → country fallback', { city: null, lat, lng, resolvedCode: fallbackCode, mappingMethod: 'fetch_error_country_fallback' });
+    // The location list is unreachable, so city-name matching (Priority 1-3
+    // below) can't run. We can still return a *correct* result if the
+    // project's country is actually known — that is not a guess. What we
+    // must not do is invent US when the country is unknown too: that
+    // previously happened unconditionally here (`?? COUNTRY_TO_LOCATION_CODE['US']`),
+    // which is how a Mumbai-targeted project with no stored country code
+    // silently got ranked against Google US SERPs. See keywordRankingService.js,
+    // which now treats `locationCode: null` as a hard "configure location"
+    // error instead of proceeding with a guessed location.
+    const fallbackCode = countryCode ? COUNTRY_TO_LOCATION_CODE[countryCode] : null;
+    if (fallbackCode) {
+      log('FETCH_ERROR → known-country fallback', { city: null, lat, lng, resolvedCode: fallbackCode, mappingMethod: 'fetch_error_country_fallback' });
+      return {
+        locationCode:  fallbackCode,
+        mappingMethod: 'fetch_error_country_fallback',
+        city:          null,
+        confidence:    'low',
+        country:       countryCode,
+      };
+    }
+    log('FETCH_ERROR → UNRESOLVED (no known country, will not guess US)', { city: vbCity, lat, lng, resolvedCode: null, mappingMethod: 'unresolved_service_unavailable' });
     return {
-      locationCode:  fallbackCode,
-      mappingMethod: 'fetch_error_country_fallback',
-      city:          null,
-      confidence:    'low',
+      locationCode:  null,
+      mappingMethod: 'unresolved_service_unavailable',
+      city:          vbCity,
+      confidence:    'none',
       country:       countryCode,
     };
   }
@@ -170,13 +199,30 @@ export async function resolveLocalLocationCode({ verifiedBusiness, country, addr
   }
 
   // ── Priority 4: country-level fallback ───────────────────────────────────────
-  const fallbackCode = COUNTRY_TO_LOCATION_CODE[countryCode] ?? COUNTRY_TO_LOCATION_CODE['US'];
-  log('P4 country fallback', { city: null, lat, lng, resolvedCode: fallbackCode, mappingMethod: 'country_fallback' });
+  // Only use this when the country is actually known and supported — never
+  // guess US as a last resort. An unresolved result here means "this
+  // project's location genuinely cannot be determined from the data we
+  // have," which the caller must treat as a configuration problem, not
+  // silently rank against whatever COUNTRY_TO_LOCATION_CODE['US'] happens
+  // to be.
+  const fallbackCode = countryCode ? COUNTRY_TO_LOCATION_CODE[countryCode] : null;
+  if (fallbackCode) {
+    log('P4 country fallback', { city: null, lat, lng, resolvedCode: fallbackCode, mappingMethod: 'country_fallback' });
+    return {
+      locationCode:  fallbackCode,
+      mappingMethod: 'country_fallback',
+      city:          null,
+      confidence:    'low',
+      country:       countryCode,
+    };
+  }
+
+  log('P4 UNRESOLVED — no city match and no known/supported country (will not guess US)', { city: vbCity, lat, lng, resolvedCode: null, mappingMethod: 'unresolved_no_country' });
   return {
-    locationCode:  fallbackCode,
-    mappingMethod: 'country_fallback',
-    city:          null,
-    confidence:    'low',
+    locationCode:  null,
+    mappingMethod: 'unresolved_no_country',
+    city:          vbCity,
+    confidence:    'none',
     country:       countryCode,
   };
 }

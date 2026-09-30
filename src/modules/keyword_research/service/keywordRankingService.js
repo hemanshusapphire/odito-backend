@@ -11,6 +11,7 @@ import SeoRanking        from '../../app_user/model/SeoRanking.js';
 import SeoProject        from '../../app_user/model/SeoProject.js';
 import { COUNTRY_TO_LOCATION_CODE } from '../../../services/dataforseoLocationService.js';
 import { resolveLocalLocationCode } from '../../../services/localLocationResolver.js';
+import { ValidationError } from '../../../utils/ErrorUtil.js';
 
 class KeywordRankingService {
   /**
@@ -20,33 +21,14 @@ class KeywordRankingService {
    */
   async checkKeywordRankings({ userId, projectId, domain, keywords, language = 'en' }) {
     try {
-      let locationCode    = 2840;
-      let resolvedCountry = 'US';
-
-      if (projectId) {
-        try {
-          const project = await SeoProject.findById(projectId)
-            .select('country seo_scope verified_business location')
-            .lean();
-
-          if (project) {
-            if (project.seo_scope === 'local') {
-              const resolution    = await resolveLocalLocationCode({
-                verifiedBusiness: project.verified_business || null,
-                country:          project.country           || null,
-                address:          project.location          || null,
-              });
-              locationCode    = resolution.locationCode;
-              resolvedCountry = resolution.country || project.country || 'US';
-            } else {
-              locationCode    = COUNTRY_TO_LOCATION_CODE[project.country?.toUpperCase()] || 2840;
-              resolvedCountry = project.country || 'US';
-            }
-          }
-        } catch (projectErr) {
-          console.error(`[KEYWORD_RANKING] Failed to resolve location from project, using default | reason="${projectErr.message}"`);
-        }
-      }
+      // No blind US default here — see resolveLocationForProject() below.
+      // A project whose location genuinely cannot be resolved must fail
+      // with a clear, actionable error, never silently rank against
+      // Google US SERPs (the bug this replaces: a 'local' scope project
+      // targeting Mumbai, with no `country` stored and the DataForSEO
+      // locations API unreachable, previously fell all the way through to
+      // locationCode 2840 / 'US' without any indication anything was wrong).
+      const { locationCode, resolvedCountry } = await this.resolveLocationForProject(projectId);
 
       console.log(`[KEYWORD_RANKING] Starting ranking check | projectId=${projectId} | domain="${domain}" | keywords=${keywords.length} | locationCode=${locationCode}`);
 
@@ -70,6 +52,66 @@ class KeywordRankingService {
       console.error(`[KEYWORD_RANKING] Ranking check failed | projectId=${projectId} | reason="${error.message}"`);
       throw error;
     }
+  }
+
+  /**
+   * Resolve the DataForSEO location_code to rank against for a project.
+   *
+   * Throws ValidationError (HTTP 400) — never silently defaults to US —
+   * when the project's location genuinely cannot be determined. Callers
+   * must surface this as "please configure this project's location" to
+   * the user, not swallow it and rank against an arbitrary country.
+   *
+   * @returns {{ locationCode: number, resolvedCountry: string }}
+   */
+  async resolveLocationForProject(projectId) {
+    if (!projectId) {
+      throw new ValidationError('A projectId is required to resolve keyword ranking location.');
+    }
+
+    const project = await SeoProject.findById(projectId)
+      .select('country seo_scope verified_business location')
+      .lean();
+
+    if (!project) {
+      throw new ValidationError(`Project ${projectId} not found — cannot resolve keyword ranking location.`);
+    }
+
+    if (project.seo_scope === 'local') {
+      const resolution = await resolveLocalLocationCode({
+        verifiedBusiness: project.verified_business || null,
+        country:          project.country           || null,
+        address:          project.location          || null,
+      });
+
+      if (resolution.locationCode == null) {
+        throw new ValidationError(
+          'This project\'s location could not be determined (no country on file and the ' +
+          'location-lookup service is unavailable). Configure a country or verified business ' +
+          'location for this project before checking keyword rankings.'
+        );
+      }
+
+      return { locationCode: resolution.locationCode, resolvedCountry: resolution.country || project.country || null };
+    }
+
+    // National scope: country must be an explicit, supported ISO-2 code.
+    // Previously `|| 2840` meant a project with no country configured (or
+    // one outside the small COUNTRY_TO_LOCATION_CODE map) silently ranked
+    // against Google US — same failure mode as the local-scope path above,
+    // just without a lookup service involved.
+    const countryCode = project.country?.toUpperCase();
+    const locationCode = countryCode ? COUNTRY_TO_LOCATION_CODE[countryCode] : null;
+
+    if (!locationCode) {
+      throw new ValidationError(
+        countryCode
+          ? `Project country "${countryCode}" is not yet supported for keyword ranking. Supported: ${Object.keys(COUNTRY_TO_LOCATION_CODE).join(', ')}.`
+          : 'This project has no country configured. Set a target country for this project before checking keyword rankings.'
+      );
+    }
+
+    return { locationCode, resolvedCountry: countryCode };
   }
 
   /**

@@ -81,7 +81,7 @@ import Job from './src/modules/jobs/model/Job.js';
 import jwt from 'jsonwebtoken';
 
 import SeoProject from './src/modules/app_user/model/SeoProject.js';
-import { startWeeklyRecrawlScheduler } from './src/modules/jobs/service/weeklyRecrawlScheduler.js';
+import { startWeeklyRecheckScheduler } from './src/modules/jobs/service/weeklyRecheckScheduler.js';
 import { startDeletedProjectPurgeScheduler } from './src/modules/jobs/service/deletedProjectPurgeScheduler.js';
 import { startStaleLockScheduler } from './src/modules/jobs/service/staleLockScheduler.js';
 import { startVerificationBatchRecoveryScheduler } from './src/modules/verification/service/verificationBatchRecoveryScheduler.js';
@@ -256,9 +256,10 @@ const startServer = async () => {
 
   await connectDB();
 
-  // Weekly Recrawl: daily cron tick that starts audits for projects due for
-  // their scheduled recrawl. Registered once the DB connection is ready.
-  startWeeklyRecrawlScheduler();
+  // Weekly Recheck: daily cron tick that starts the Quick Recheck pipeline for
+  // projects due for their scheduled refresh (never a full Recrawl, never
+  // billed). Registered once the DB connection is ready.
+  startWeeklyRecheckScheduler();
 
   // Project Trash & Restore, Phase 3: daily cron tick that permanently
   // purges projects whose 7-day trash retention window has elapsed.

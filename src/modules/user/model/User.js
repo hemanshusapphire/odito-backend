@@ -225,6 +225,22 @@ const userSchema = new mongoose.Schema({
         default: 0,
         min: 0
       }
+    },
+    // Manual Recrawl allowance — same {limit, used} shape as credits/pages,
+    // allocated and reset by allocateQuotaFromPlan() (creditService.js).
+    // Consumed only by a user-triggered full Recrawl (run source
+    // 'manual_recrawl'); Weekly Rechecks and Quick Rechecks never touch it.
+    recrawls: {
+      limit: {
+        type: Number,
+        default: 0,
+        min: 0
+      },
+      used: {
+        type: Number,
+        default: 0,
+        min: 0
+      }
     }
   },
 }, {

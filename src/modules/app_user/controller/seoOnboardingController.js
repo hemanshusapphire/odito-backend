@@ -391,12 +391,24 @@ export const generateKeywords = async (req, res) => {
           console.log(`[KW_CITY_SOURCE] source=addr_resolve | city=${resolvedCity}`);
         }
       } catch (err) {
-        locationCode = COUNTRY_TO_LOCATION_CODE[country?.toUpperCase()] ?? COUNTRY_TO_LOCATION_CODE['US'];
-        console.log(`[LOCATION_TRACE] GENERATE_KW_ADDR_FAIL | fallback_locationCode=${locationCode} | ${err.message}`);
+        locationCode = country ? (COUNTRY_TO_LOCATION_CODE[country.toUpperCase()] ?? null) : null;
+        console.log(`[LOCATION_TRACE] GENERATE_KW_ADDR_FAIL | locationCode=${locationCode ?? 'UNRESOLVED'} | ${err.message}`);
       }
     } else {
-      locationCode = COUNTRY_TO_LOCATION_CODE[country?.toUpperCase()] ?? COUNTRY_TO_LOCATION_CODE['US'];
-      console.log(`[LOCATION_TRACE] GENERATE_KW_COUNTRY | locationCode=${locationCode} | country=${country}`);
+      locationCode = country ? (COUNTRY_TO_LOCATION_CODE[country.toUpperCase()] ?? null) : null;
+      console.log(`[LOCATION_TRACE] GENERATE_KW_COUNTRY | locationCode=${locationCode ?? 'UNRESOLVED'} | country=${country}`);
+    }
+
+    // Never silently default to US — suggested keywords targeted at the
+    // wrong country market are still a real product bug (a Mumbai business
+    // being suggested US-centric search terms), not a cosmetic one.
+    if (!locationCode || typeof locationCode !== 'number') {
+      return res.status(400).json({
+        success: false,
+        message: country
+          ? `Country "${country}" is not yet supported for keyword suggestions. Supported: ${Object.keys(COUNTRY_TO_LOCATION_CODE).join(', ')}.`
+          : 'A location could not be determined for keyword suggestions. Provide a city, address, or country.',
+      });
     }
 
     // Priority 4: direct address parse — last resort, only when all above failed
@@ -423,8 +435,24 @@ export const generateKeywords = async (req, res) => {
     // keyword_suggestions/live requires a country-level code (e.g. 2356 for India)
     // to return meaningful search volume data — city-level codes return sparse/zero
     // results from that endpoint. These two codes are always kept completely separate.
-    const onboardingKeywordLocationCode =
-      COUNTRY_TO_LOCATION_CODE[(resolvedCountry || country)?.toUpperCase()] ?? COUNTRY_TO_LOCATION_CODE['US'];
+    //
+    // No US fallback here either (this used to be the one remaining silent
+    // US default in this file — a city can resolve successfully via
+    // DataForSEO's global city-name search, with no country filter, leaving
+    // `resolvedCountry`/`country` both unknown). When the country genuinely
+    // can't be determined, `onboardingKeywordLocationCode` is left `null`:
+    // getOnboardingKeywordSuggestions()'s own contract is "never throws,
+    // returns [] on failure" (see keywordSuggestion.service.js), so a null
+    // location_code degrades to "no volume-enriched suggestions this call"
+    // rather than ever attaching US search-volume numbers to a suggestion
+    // for a business whose actual market is unknown.
+    const onboardingCountryCode = (resolvedCountry || country)?.toUpperCase();
+    const onboardingKeywordLocationCode = onboardingCountryCode
+      ? (COUNTRY_TO_LOCATION_CODE[onboardingCountryCode] ?? null)
+      : null;
+    if (!onboardingKeywordLocationCode) {
+      console.warn(`[LOCATION_TRACE] onboardingKeywordLocationCode UNRESOLVED — keyword suggestions will return without volume enrichment, never a US-market guess | resolvedCountry=${resolvedCountry ?? 'null'} | country=${country ?? 'null'} | city=${resolvedCity ?? 'null'}`);
+    }
 
     console.log('[KW_LOCATION_STRATEGY]', JSON.stringify({
       country:                      country ?? null,
@@ -500,16 +528,28 @@ export const checkRanking = async (req, res) => {
       finalCountry  = resolution.country || country;
       console.log(`[LOCATION_TRACE] RESOLUTION_RESULT | locationCode=${locationCode} | method=${mappingMethod} | confidence=${resolution.confidence} | city=${resolution.city ?? 'null'}`);
     } else {
-      locationCode  = COUNTRY_TO_LOCATION_CODE[country?.toUpperCase()] ?? COUNTRY_TO_LOCATION_CODE['US'];
+      locationCode  = country ? (COUNTRY_TO_LOCATION_CODE[country.toUpperCase()] ?? null) : null;
       mappingMethod = 'national_country_code';
       finalCountry  = country;
-      console.log(`[LOCATION_TRACE] RESOLUTION_RESULT | locationCode=${locationCode} | method=${mappingMethod} | confidence=high`);
+      console.log(`[LOCATION_TRACE] RESOLUTION_RESULT | locationCode=${locationCode ?? 'UNRESOLVED'} | method=${mappingMethod} | confidence=${locationCode ? 'high' : 'none'}`);
     }
 
+    // Never silently default to US here — this endpoint directly produces
+    // the ranking position shown to the user, so an unresolved location
+    // must be a clear error, not a guess. Previously: any of "no country on
+    // file", "local scope with only a bare city name and the DataForSEO
+    // locations API unreachable", or "country not in COUNTRY_TO_LOCATION_CODE"
+    // fell all the way through to `COUNTRY_TO_LOCATION_CODE['US']` here (and
+    // a second time in the "emergency fallback" below), producing a real,
+    // wrong-market ranking number with no indication anything was off.
     if (!locationCode || typeof locationCode !== 'number') {
-      locationCode  = COUNTRY_TO_LOCATION_CODE[country?.toUpperCase()] ?? COUNTRY_TO_LOCATION_CODE['US'];
-      mappingMethod = 'emergency_fallback';
-      console.log(`[LOCATION_TRACE] EMERGENCY_FALLBACK | locationCode=${locationCode} | country=${country}`);
+      console.log(`[LOCATION_TRACE] UNRESOLVED — refusing to guess a location | seoScope=${seoScope} | country=${country}`);
+      return res.status(400).json({
+        success: false,
+        message: country
+          ? `Country "${country}" is not yet supported for keyword ranking. Supported: ${Object.keys(COUNTRY_TO_LOCATION_CODE).join(', ')}.`
+          : 'This project\'s location could not be determined. Configure a country or verified business location before checking keyword rankings.',
+      });
     }
 
     LoggerUtil.info('Check ranking request', { domain, keywords, country: finalCountry, locationCode, seoScope });
@@ -921,7 +961,18 @@ export const rescanKeyword = async (req, res) => {
     const rescanBusinessName = await resolveMapsBusinessName(projectId, userId, canonical.seo_scope, 'rescanKeyword');
 
     const cleanDomain  = RankingParserService.normalizeDomain(canonical.domain);
-    const locationCode = canonical.location_code || 2840;
+    // No `|| 2840` here — a rescan must use the SAME market the keyword was
+    // originally tracked against, or make it obvious that can't be done.
+    // Only legacy documents predating the location-resolution fix in
+    // checkRanking/addKeyword should ever be missing this field going
+    // forward.
+    if (!canonical.location_code) {
+      return res.status(422).json({
+        success: false,
+        message: 'This project\'s tracked location is missing or invalid. Remove and re-add this keyword to re-resolve its location before rescanning.',
+      });
+    }
+    const locationCode = canonical.location_code;
     const langCode     = canonical.language       || 'en';
     const seoScope     = canonical.seo_scope      || null;
 
@@ -1087,7 +1138,14 @@ export const addKeywordController = async (req, res) => {
     const addBusinessName = await resolveMapsBusinessName(projectId, userId, canonical.seo_scope, 'addKeywordController');
 
     const cleanDomain  = RankingParserService.normalizeDomain(canonical.domain);
-    const locationCode = canonical.location_code || 2840;
+    // No `|| 2840` — see the identical check in rescanKeyword above.
+    if (!canonical.location_code) {
+      return res.status(422).json({
+        success: false,
+        message: 'This project\'s tracked location is missing or invalid. Please reconfigure the project\'s location before adding keywords.',
+      });
+    }
+    const locationCode = canonical.location_code;
     const langCode     = canonical.language       || 'en';
     const seoScope     = canonical.seo_scope      || null;
 

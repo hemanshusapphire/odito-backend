@@ -570,7 +570,7 @@ const MAX_DUE_PER_RUN = 100;
  * arrived and actually publishes it. Called by socialSchedulerService.js
  * (a cron tick) — exported separately here so it can also be invoked
  * directly (tests, an ops "run now" trigger) without waiting for a tick,
- * matching weeklyRecrawlScheduler.js's own runOnce()/startScheduler()
+ * matching weeklyRecheckScheduler.js's own runOnce()/startScheduler()
  * split. One publication failing never aborts the run for the others.
  */
 export async function executeDuePublications() {

@@ -1,9 +1,8 @@
 import mongoose from 'mongoose';
 import {
-  ISSUE_METADATA,
   CANONICAL_ISSUE_TITLES,
-  DEFAULT_DIFFICULTY,
   AI_CONFIDENCE_FALLBACK,
+  resolveIssueDifficulty,
 } from '../config/issueMetadata.js';
 
 const { ObjectId } = mongoose.Types;
@@ -107,31 +106,7 @@ export async function getOnPageIssues(projectId) {
 
   // 4. Enrich each issue
   const issues = rawIssues.map((issue) => {
-    const meta = ISSUE_METADATA[issue.issue_code];
-    let difficulty;
-    
-    // Use metadata difficulty if available, otherwise map from severity
-    if (meta && meta.difficulty) {
-      difficulty = meta.difficulty;
-    } else {
-      // Map severity to difficulty when metadata is not available
-      switch (issue.severity?.toLowerCase()) {
-        case 'high':
-        case 'critical':
-          difficulty = 'hard';
-          break;
-        case 'medium':
-        case 'warning':
-          difficulty = 'medium';
-          break;
-        case 'low':
-        case 'info':
-          difficulty = 'easy';
-          break;
-        default:
-          difficulty = DEFAULT_DIFFICULTY;
-      }
-    }
+    const difficulty = resolveIssueDifficulty({ issue_code: issue.issue_code, severity: issue.severity });
 
     const impact_percentage =
       totalPages > 0

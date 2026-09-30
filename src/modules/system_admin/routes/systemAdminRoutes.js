@@ -262,9 +262,9 @@ router.get('/system-admin/projects/:id', auth, requireSystemAdmin(), getProjectD
 
 /**
  * @route   POST /api/system-admin/projects/:id/start-audit
- * @desc    Reuses startProjectAudit(projectId, {source:'scheduled'}) —
- *          the exact call weeklyRecrawlScheduler.js already makes in
- *          production. No new pipeline logic. Audit-logged.
+ * @desc    Reuses startProjectAudit(projectId, {source:'admin_recrawl'}) —
+ *          the full-audit pipeline, unbilled to the owner. No new
+ *          pipeline logic. Audit-logged.
  * @access  Private (roleId === 1 only)
  */
 router.post('/system-admin/projects/:id/start-audit', auth, requireSystemAdmin(), startAudit);

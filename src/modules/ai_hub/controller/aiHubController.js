@@ -17,6 +17,42 @@ function deriveBotStatuses(crawlability) {
   };
 }
 
+/**
+ * Guard against an impossible (pages_affected > applicable_pages) state
+ * before it reaches the API response.
+ *
+ * Root cause this catches: `GEO_RULE_APPLICABLE_TYPES` below is a Node-side
+ * approximation of which pages a rule applies to (by `page_type`), built
+ * independently of the Python rule evaluator that actually decided which
+ * pages get an `ai_issues` document. For the single-page-type rules
+ * (GEO-S1..S5) these two classifications disagree in production — e.g. on
+ * a real audited project, GEO-S4 ("product" page rule) had 118 pages
+ * flagged as failing while the page_type census found 0 pages typed
+ * "product", producing a nonsensical "118 / 0" in the UI. The `lb`-mapped
+ * rules (GEO-059..GEO-G3) do not exhibit this — their applicable-page
+ * classification does agree with the real data — so this only ever fires
+ * for the rules where it's actually needed.
+ *
+ * Never clamps `pages_affected` (the real, correct count) or inflates
+ * `applicable_pages` to make them agree — an unreliable denominator is
+ * reported as `null` (the same value already used for domain-scope rules,
+ * which the frontend already renders as "just the affected count, no
+ * fraction" — see GeoOptimizationPipeline.jsx), and the mismatch is logged
+ * so it's visible for the underlying page-type classification to be fixed
+ * at the source, rather than silently hidden.
+ */
+function guardApplicablePages(pagesAffected, applicablePages, context) {
+  if (applicablePages != null && pagesAffected > applicablePages) {
+    console.warn(
+      `[aiHubController] Impossible state: pages_affected (${pagesAffected}) > applicable_pages (${applicablePages}) — ` +
+      `treating applicable_pages as unreliable for this rule instead of displaying a nonsensical fraction.`,
+      context
+    );
+    return null;
+  }
+  return applicablePages;
+}
+
 function buildCard(raw) {
   return {
     score:           Math.round(raw?.score           ?? 0),
@@ -193,23 +229,37 @@ export const getAEOHubData = async (req, res) => {
     const cards       = aeo.cards ?? {};
     const pagesScored = aiProjectDoc.pages_scored ?? 1;
 
-    const [severityRows, signalRows, structureAgg, faqOpportunityDocs] = await Promise.all([
+    const [severityRows, pageScoreDocs, structureAgg, faqOpportunityDocs] = await Promise.all([
       // Q1: AEO-only severity distribution
       db.collection('ai_issues').aggregate([
         { $match: { project_id: pid, job_id: jobId, hub: 'aeo' } },
         { $group: { _id: '$severity', count: { $sum: 1 } } },
       ]).toArray(),
 
-      // Q2: per-rule fail counts for 5 readiness signals
-      db.collection('ai_issues').aggregate([
-        { $match: {
-            project_id: pid,
-            job_id:     jobId,
-            hub:        'aeo',
-            rule_id:    { $in: ['AEO-046', 'AEO-047', 'AEO-048', 'AEO-049', 'AEO-055'] },
-        }},
-        { $group: { _id: '$rule_id', pages_failing: { $sum: 1 } } },
-      ]).toArray(),
+      // Q2: per-page, per-rule PASS/FAIL/SKIPPED results for the 5 readiness
+      // signals — read from ai_scores (project_id-scoped, same convention
+      // project_aggregator.py itself uses for card scores; NOT job_id-scoped,
+      // since ai_scores holds current-per-URL state, not one doc per run).
+      //
+      // Root-cause fix: this used to count only `ai_issues` FAIL documents
+      // and divide by `pagesScored` (every page). But several of these rules
+      // are page-type-gated (see page_type_matrix.py's SKIP_MATRIX) and
+      // SKIPPED pages never get an ai_issues document — so a page the rule
+      // never applied to was silently counted as "passing" in the old
+      // denominator, inflating every gated rule's score. Confirmed on a
+      // real project: AEO-048 (FAQ Schema) actually fails on 6/6 of the
+      // pages it applies to (100% fail — the site's FAQ schema has zero
+      // matching visible content anywhere), while the old formula reported
+      // "78% pass" because 21 of 27 pages were SKIPPED (wrong page type for
+      // this rule) and got counted as passes. `ai_scores.hubs.aeo.cards.*.rules.<rule_id>.result`
+      // is written by the same registry.evaluate_page() call that produces
+      // ai_issues, so reading it here can never disagree with Python's own
+      // applicability determination — unlike reimplementing page-type
+      // matching independently in Node (the exact mistake already fixed for
+      // GEO-S1..S5's applicable_pages).
+      db.collection('ai_scores')
+        .find({ project_id: pid }, { projection: { 'hubs.aeo.cards': 1 } })
+        .toArray(),
 
       // Q3: ai_pages aggregation for content structure + FAQ metrics
       db.collection('ai_pages').aggregate([
@@ -250,19 +300,36 @@ export const getAEOHubData = async (req, res) => {
     }
 
     // ── Answer Readiness Signals ─────────────────────────────────────────────
-    const failMap = {};
-    for (const { _id, pages_failing } of signalRows) failMap[_id] = pages_failing;
+    // Tally applicable (non-SKIPPED) vs. passed pages per rule_id by scanning
+    // every card's `rules` block on every page's ai_scores doc — rule_id is
+    // unique, so this doesn't need to know which card a given rule lives
+    // under (that mapping lives only in Python's HUB_CARD_MAP; duplicating
+    // it here would reintroduce the same class of drift this fix removes).
+    const ruleStats = {}; // rule_id -> { applicable, passed, failing }
+    for (const scoreDoc of pageScoreDocs) {
+      const cardBlocks = scoreDoc.hubs?.aeo?.cards ?? {};
+      for (const card of Object.values(cardBlocks)) {
+        for (const [ruleId, rule] of Object.entries(card.rules ?? {})) {
+          if (rule.result === 'SKIPPED') continue;
+          const stats = (ruleStats[ruleId] ??= { applicable: 0, passed: 0, failing: 0 });
+          stats.applicable += 1;
+          if (rule.result === 'PASS') stats.passed += 1;
+          else stats.failing += 1;
+        }
+      }
+    }
 
     function buildSignal(ruleId) {
-      const pagesFailing = failMap[ruleId] ?? 0;
-      const score = pagesScored > 0
-        ? Math.round(((pagesScored - pagesFailing) / pagesScored) * 100)
+      const stats = ruleStats[ruleId] ?? { applicable: 0, passed: 0, failing: 0 };
+      const score = stats.applicable > 0
+        ? Math.round((stats.passed / stats.applicable) * 100)
         : 0;
       return {
-        rule_id:       ruleId,
-        pages_failing: pagesFailing,
+        rule_id:          ruleId,
+        pages_failing:    stats.failing,
+        applicable_pages: stats.applicable,
         score,
-        status: score >= 70 ? 'pass' : score >= 40 ? 'warning' : 'fail',
+        status: stats.applicable === 0 ? 'not_applicable' : score >= 70 ? 'pass' : score >= 40 ? 'warning' : 'fail',
       };
     }
 
@@ -774,6 +841,18 @@ export const getGEOHubData = async (req, res) => {
 
     const validation = Object.entries(GEO_SIGNAL_META).map(([ruleId, meta]) => {
       const pagesFailing = failMap[ruleId] ?? 0;
+      // Verified against all 18 real ai_projects in the dev DB: this never
+      // fires for the 'lb'-mapped signal rules today (unlike GEO-S1..S5
+      // below, which do). Kept as a guard rail rather than removed, since
+      // Math.max(0, ...) would otherwise silently absorb a future
+      // inconsistency into a plausible-looking but wrong 0-pages-passed
+      // result with no trace of why.
+      if (pagesFailing > lbApplicablePages) {
+        console.warn(
+          `[aiHubController] Impossible state: pages_failing (${pagesFailing}) > lbApplicablePages (${lbApplicablePages}) for signal rule ${ruleId}`,
+          { projectId }
+        );
+      }
       const passedPages  = Math.max(0, lbApplicablePages - pagesFailing);
       const score = lbApplicablePages > 0
         ? Math.round((passedPages / lbApplicablePages) * 100)
@@ -930,7 +1009,7 @@ export const getGEOHubIssues = async (req, res) => {
       severity:          issue.severity,
       impact_score:      IMPACT_SCORES[issue.severity] ?? 5,
       pages_affected:    issue.pages_affected,
-      applicable_pages:  getApplicable(issue._id),
+      applicable_pages:  guardApplicablePages(issue.pages_affected, getApplicable(issue._id), { projectId, rule_id: issue._id }),
       affected_urls:     issue.affected_urls.slice(0, 5),
     }));
 

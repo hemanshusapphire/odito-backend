@@ -1,78 +1,43 @@
 import { NotFoundError, AccessDeniedError, ValidationError } from '../../../utils/ErrorUtil.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 import mongoose from 'mongoose';
+import { IssueAggregationService } from '../../../services/issueAggregationService.js';
 
 /**
  * Project Issues Service
  * Extracted from projectDataController.js - Phase 2 Refactoring
- * 
+ *
  * Handles all project issues-related business logic
- * Maintains EXACT same behavior as original controller
  */
 export class ProjectIssuesService {
-  
+
   /**
-   * Get project issues grouped by page URL
-   * Extracted from getProjectIssuesByPage controller function
+   * Get project issues grouped by page URL.
+   *
+   * Scope: ALL categories, OPEN issues only — same canonical scope as
+   * IssueCountsService's Overview total, via the shared
+   * IssueAggregationService. Previously this queried every document with
+   * no status filter and no dedup at all, so it silently included
+   * already-`resolved` issues and could disagree with every other issue
+   * total in the app. Its `summary.totalIssues` is now guaranteed to equal
+   * IssueCountsService's `totalIssues` for the same project, since both
+   * derive from the same canonical aggregation.
    */
   static async getProjectIssuesByPage(project) {
     const projectId = project._id.toString();
     const userId = project.user_id.toString();
-    
+
     LoggerUtil.info('Issues by Page API called', { projectId, userId });
 
-    const db = mongoose.connection.db;
-    const { ObjectId } = mongoose.Types;
-    const projectIdObj = new ObjectId(projectId);
+    const result = await IssueAggregationService.getIssuesByPage(projectId, {
+      excludeCategories: [],
+    });
 
-    // Aggregate issues by page_url
-    const issuesByPage = await db.collection('seo_page_issues').aggregate([
-      { $match: { projectId: projectIdObj } },
-      {
-        $group: {
-          _id: '$page_url',
-          issueCount: { $sum: 1 },
-          issues: {
-            $push: {
-              id: { $toString: '$_id' },
-              issue_message: '$issue_message',
-              rule_id: '$rule_id',
-              severity: '$severity',
-              category: '$category',
-              issue_code: '$issue_code',
-              detected_value: '$detected_value',
-              expected_value: '$expected_value',
-              created_at: '$created_at'
-            }
-          }
-        }
-      },
-      {
-        $project: {
-          page_url: '$_id',
-          issueCount: 1,
-          issues: 1,
-          _id: 0
-        }
-      },
-      { $sort: { issueCount: -1, page_url: 1 } }
-    ]).toArray();
+    LoggerUtil.debug('Found pages with issues', { count: result.pages.length });
 
-    LoggerUtil.debug('Found pages with issues', { count: issuesByPage.length });
-
-    // Calculate total issues across all pages
-    const totalIssues = issuesByPage.reduce((sum, page) => sum + page.issueCount, 0);
-
-    // Return EXACT same response structure as controller
     return {
       success: true,
-      data: {
-        pages: issuesByPage,
-        summary: {
-          totalPages: issuesByPage.length,
-          totalIssues: totalIssues
-        }
-      }
+      data: result,
     };
   }
 

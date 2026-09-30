@@ -43,6 +43,7 @@ function serializePlan(plan) {
     limits: {
       credits: plan.credits,
       pages: plan.pages,
+      recrawls: plan.recrawls ?? 0,
       keywords: plan.keywords ?? null,
     },
     features: plan.features,
@@ -64,13 +65,16 @@ export const getMySubscription = async (req, res) => {
   try {
     const { plan: planId, status, stripeCustomerId } = req.user.subscription;
     const plan = planId ? getPlan(planId) : null;
-    const { credits, pages } = summarizeQuota(req.user);
+    const { credits, pages, recrawls } = summarizeQuota(req.user);
 
     return res.status(200).json(ResponseUtil.success({
       plan: plan ? serializePlan(plan) : null,
       status,
       credits,
       pages,
+      // Manual Recrawl allowance (full audits started with "Start Recrawl").
+      // Weekly Rechecks, Quick Rechecks and a project's first audit are free.
+      recrawls,
       // hasBillingAccount only — never the raw Stripe id. The frontend uses
       // this single boolean to decide whether to show "Manage Subscription";
       // it never learns the actual stripeCustomerId/stripeSubscriptionId.

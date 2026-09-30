@@ -57,7 +57,12 @@ class KeywordRankingController {
 
     } catch (error) {
       console.error('[KEYWORD_RANKING_CONTROLLER] Check rankings failed:', error);
-      res.status(500).json({
+      // A location-configuration error (statusCode 400, from
+      // KeywordRankingService.resolveLocationForProject) must reach the
+      // user as an actionable 4xx, not a generic 500 — the whole point of
+      // that error is "fix your project's location", not "something broke".
+      const statusCode = error.statusCode || 500;
+      res.status(statusCode).json({
         success: false,
         error: error.message
       });

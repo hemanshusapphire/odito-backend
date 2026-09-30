@@ -81,21 +81,24 @@ export class AiHubSnapshotService {
       const aeoCards  = aeoHub.cards  ?? {};
       const geoCards  = geoHub.cards  ?? {};
 
-      const [severityRows, aeoSignalRows, anyPage] = await Promise.all([
+      const [severityRows, pageScoreDocs, anyPage] = await Promise.all([
         db.collection('ai_issues').aggregate([
           { $match: { project_id: pid, job_id: jobId } },
           { $group: { _id: { hub: '$hub', severity: '$severity' }, count: { $sum: 1 } } },
         ]).toArray(),
 
-        db.collection('ai_issues').aggregate([
-          { $match: {
-            project_id: pid,
-            job_id:     jobId,
-            hub:        'aeo',
-            rule_id:    { $in: AEO_SIGNAL_RULES },
-          }},
-          { $group: { _id: '$rule_id', pages_failing: { $sum: 1 } } },
-        ]).toArray(),
+        // Root-cause fix (matches aiHubController.js getAEOHubData): this
+        // used to count only ai_issues FAIL documents and divide by every
+        // scored page, silently treating page-type-SKIPPED pages (which
+        // never get an ai_issues doc) as passes and inflating the score.
+        // Reads ai_scores' per-page, per-rule PASS/FAIL/SKIPPED result
+        // instead — the same data Python's own registry.evaluate_page()
+        // wrote, so it can't disagree with Python's applicability
+        // determination. Project-scoped (not job_id-scoped), matching
+        // project_aggregator.py's own convention for this data.
+        db.collection('ai_scores')
+          .find({ project_id: pid }, { projection: { 'hubs.aeo.cards': 1 } })
+          .toArray(),
 
         db.collection('ai_pages').findOne(
           { project_id: pid, job_id: jobId },
@@ -111,18 +114,30 @@ export class AiHubSnapshotService {
         hubSeverityMap[hub][severity] = (hubSeverityMap[hub][severity] ?? 0) + row.count;
       }
 
-      const aeoFailMap = {};
-      for (const row of aeoSignalRows) aeoFailMap[row._id] = row.pages_failing;
+      const aeoRuleStats = {}; // rule_id -> { applicable, passed, failing }
+      for (const scoreDoc of pageScoreDocs) {
+        const cardBlocks = scoreDoc.hubs?.aeo?.cards ?? {};
+        for (const card of Object.values(cardBlocks)) {
+          for (const [ruleId, rule] of Object.entries(card.rules ?? {})) {
+            if (rule.result === 'SKIPPED') continue;
+            const stats = (aeoRuleStats[ruleId] ??= { applicable: 0, passed: 0, failing: 0 });
+            stats.applicable += 1;
+            if (rule.result === 'PASS') stats.passed += 1;
+            else stats.failing += 1;
+          }
+        }
+      }
       const buildSignal = (ruleId) => {
-        const pagesFailing = aeoFailMap[ruleId] ?? 0;
-        const score = pagesScored > 0
-          ? Math.round(((pagesScored - pagesFailing) / pagesScored) * 100)
+        const stats = aeoRuleStats[ruleId] ?? { applicable: 0, passed: 0, failing: 0 };
+        const score = stats.applicable > 0
+          ? Math.round((stats.passed / stats.applicable) * 100)
           : 0;
         return {
-          rule_id:       ruleId,
-          pages_failing: pagesFailing,
+          rule_id:          ruleId,
+          pages_failing:    stats.failing,
+          applicable_pages: stats.applicable,
           score,
-          status: score >= 70 ? 'pass' : score >= 40 ? 'warning' : 'fail',
+          status: stats.applicable === 0 ? 'not_applicable' : score >= 70 ? 'pass' : score >= 40 ? 'warning' : 'fail',
         };
       };
 

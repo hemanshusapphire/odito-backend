@@ -263,6 +263,16 @@ const seoProjectSchema = new mongoose.Schema({
     default: null
   },
 
+  // current_run_source: who/what started the run identified by current_run_id
+  // (see jobs/runSources.js) — stamped atomically with the crawl_status claim.
+  // Read by audit-history capture so an AuditRun can say whether it was a
+  // manual full Recrawl or a weekly Quick Recheck.
+  current_run_source: {
+    type: String,
+    enum: ['manual_recrawl', 'initial_audit', 'admin_recrawl', 'manual_recheck', 'weekly_recheck', null],
+    default: null
+  },
+
   last_crawl_summary: {
     type: Object,
     default: null

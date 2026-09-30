@@ -40,6 +40,12 @@ const jobSchema = new mongoose.Schema({
   //                                is also the key of the per-URL locking
   //                                index (unique_url_verification_target).
   //
+  // Independently of mode, project-wide seed jobs also carry
+  // input_data.run_source (jobs/runSources.js: 'manual_recrawl',
+  // 'initial_audit', 'admin_recrawl', 'manual_recheck', 'weekly_recheck') —
+  // who/what started the run. Purely informational for tracking/logs/
+  // analytics; nothing in the chaining engine branches on it.
+  //
   // Any other mode value is rejected at validation time: chainingEngine's
   // dependency gate branches on this exact string, and an unrecognized value
   // silently falls into the full-audit branch — which for a verification-

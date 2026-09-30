@@ -5,17 +5,17 @@ import AuditRun from '../../audit_history/model/AuditRun.js';
 import Job from '../../jobs/model/Job.js';
 import SystemAdminAuditLog from '../../subscription/model/SystemAdminAuditLog.js';
 import { startProjectAudit, isAuditInProgress } from '../../app_user/service/projectAuditService.js';
+import { RUN_SOURCES } from '../../jobs/runSources.js';
 import { deleteProjectCascade } from '../../app_user/service/projectCascadeDeleteService.js';
 
 /**
  * Projects (Phase 2H) — read-only monitoring + two mutating actions that
  * reuse EXISTING service functions verbatim:
  *   - startAuditForProject() calls startProjectAudit(projectId,
- *     {source:'scheduled'}) — the exact same call shape
- *     weeklyRecrawlScheduler.js already uses in production. Choosing
- *     source:'scheduled' (not 'manual') is what already skips the
- *     per-request ownership check inside startProjectAudit() — no new
- *     bypass logic was added to the pipeline for this.
+ *     {source:'admin_recrawl'}). That source (unlike 'manual_recrawl')
+ *     skips the per-request ownership check inside startProjectAudit() and
+ *     is never billed against the owner's manual recrawls — no new bypass
+ *     logic was added to the pipeline for this.
  *   - deleteProjectSoft() reuses isAuditInProgress() (imported, not
  *     duplicated) and performs the same ~10-line soft-delete mutation
  *     seoProjectController.js's deleteSeoProject does, just without the
@@ -325,15 +325,16 @@ const getProjectDetail = async (projectId) => {
 
 /**
  * Reuses startProjectAudit() verbatim — see the file-level comment for why
- * source:'scheduled' is the correct, already-existing bypass of the
- * per-request ownership check (not a new one).
+ * source:'admin_recrawl' (formerly the 'scheduled' alias) is the correct,
+ * already-existing bypass of the per-request ownership check (not a new
+ * one). It is also never billed against the owner's manual recrawls.
  */
 const startAuditForProject = async (projectId, adminId, reason) => {
   const project = await SeoProject.findById(projectId).select('user_id crawl_status is_deleted');
   if (!project || project.is_deleted) return null;
 
   const before = { crawlStatus: project.crawl_status };
-  const result = await startProjectAudit(projectId, { source: 'scheduled' });
+  const result = await startProjectAudit(projectId, { source: RUN_SOURCES.ADMIN_RECRAWL });
 
   await SystemAdminAuditLog.create({
     admin: adminId,

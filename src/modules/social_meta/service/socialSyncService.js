@@ -19,7 +19,7 @@ import { LoggerUtil } from '../../../utils/LoggerUtil.js';
  * async function with no Express/job-queue dependency, callable directly
  * from the sync HTTP endpoint (feedController.js's Refresh handler)
  * today, and trivially wrappable by a future scheduler/queue exactly the
- * way weeklyRecrawlScheduler.js/staleLockScheduler.js already wrap other
+ * way weeklyRecheckScheduler.js/staleLockScheduler.js already wrap other
  * plain service functions in this codebase — without this file changing.
  * Deliberately NOT wired into the existing jobs/chainingEngine pipeline
  * (Job/JobGroup/pipelineConfig): that pipeline is purpose-built for the

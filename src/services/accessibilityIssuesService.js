@@ -5,11 +5,23 @@ const { ObjectId } = mongoose.Types;
 /**
  * Aggregate accessibility issues for a project.
  *
- * Uses the same two-stage $group logic as On-Page issues
+ * Uses the same two-stage $group logic as On-Page issues (onPageIssuesService.js)
  * to avoid building huge $addToSet arrays when a site has thousands of pages.
  *
- * Stage 1: deduplicate by (issue_code, page_url)
- * Stage 2: count distinct pages per issue_code
+ * Stage 1: deduplicate by (issue_code, page_url, data_path)
+ * Stage 2: count distinct (issue_code, data_path) groups' pages
+ *
+ * `data_path` was missing from both stages here until this fix — grouping
+ * by (issue_code, page_url) alone silently collapsed a page's multiple
+ * distinct accessibility findings under the same issue_code (e.g. two
+ * separate missing-alt-text images, tracked at different data_paths) into
+ * one counted issue. Verified against production data: this undercounted
+ * a real audited project's Accessibility total by 21 issues (134 shown vs.
+ * 155 actual distinct `dedup_key` values) — the exact same class of bug
+ * fixed project-wide in IssueAggregationService, applied here too since
+ * this service still owns its own rule-grouped breakdown for the
+ * Accessibility tab (IssueAggregationService's canonical total does not
+ * replace this — it only replaces the whole-project summary counts).
  */
 export async function getAccessibilityIssues(projectId) {
   const db = mongoose.connection.db;
@@ -24,19 +36,21 @@ export async function getAccessibilityIssues(projectId) {
   const rawIssues = await db
     .collection('seo_page_issues')
     .aggregate([
-      { 
-        $match: { 
+      {
+        $match: {
           projectId: projectIdObj,
-          category: 'Accessibility'
-        } 
+          category: 'Accessibility',
+          status: 'open',
+        }
       },
 
-      // Stage 1 — deduplicate by (issue_code, page_url)
+      // Stage 1 — deduplicate by (issue_code, page_url, data_path)
       {
         $group: {
           _id: {
             issue_code: '$issue_code',
             page_url: '$page_url',
+            data_path: '$data_path',
           },
           issue_message: { $first: '$issue_message' },
           severity: { $first: '$severity' },
@@ -44,10 +58,13 @@ export async function getAccessibilityIssues(projectId) {
         },
       },
 
-      // Stage 2 — group by issue_code, count distinct pages
+      // Stage 2 — group by (issue_code, data_path), count distinct pages
       {
         $group: {
-          _id: '$_id.issue_code',
+          _id: {
+            issue_code: '$_id.issue_code',
+            data_path: '$_id.data_path',
+          },
           issue_message: { $first: '$issue_message' },
           severity: { $first: '$severity' },
           category: { $first: '$category' },
@@ -61,7 +78,8 @@ export async function getAccessibilityIssues(projectId) {
       {
         $project: {
           _id: 0,
-          issue_code: '$_id',
+          issue_code: '$_id.issue_code',
+          data_path: '$_id.data_path',
           issue_message: 1,
           severity: 1,
           category: 1,
@@ -76,9 +94,10 @@ export async function getAccessibilityIssues(projectId) {
     .toArray();
 
   // 3. Derive total from aggregation — sum of pages_affected equals
-  // the count of distinct (issue_code, page_url) pairs, which matches
-  // the table display. Raw countDocuments was higher because per-element
-  // rules (alt text, contrast) generate multiple docs per page.
+  // the count of distinct (issue_code, page_url, data_path) triples,
+  // i.e. the canonical `dedup_key` count for this project's Accessibility
+  // category. Raw countDocuments was higher because per-element rules
+  // (alt text, contrast) generate multiple docs per page.
   const totalIssuesFound = rawIssues.reduce((sum, issue) => sum + (issue.pages_affected || 0), 0);
 
   // 4. Enrich each issue with difficulty and impact

@@ -7,6 +7,7 @@ import User from '../modules/user/model/User.js';
  *
  *  - Project credits: User.subscription.credits
  *  - Crawl pages:     User.subscription.pages
+ *  - Manual recrawls: User.subscription.recrawls
  */
 
 /**
@@ -178,7 +179,7 @@ export async function addPages(userId, amount) {
  * each independently constructing the same $set, so there is exactly one
  * place "what does allocating a plan's quota mean" is defined.
  * @param {string|import('mongoose').Types.ObjectId} userId
- * @param {{credits:number, pages:number}} planLimits - typically from getPlanLimits()
+ * @param {{credits:number, pages:number, recrawls?:number}} planLimits - typically from getPlanLimits()
  * @returns {Promise<Object>} updated User document
  */
 export async function allocateQuotaFromPlan(userId, planLimits) {
@@ -190,6 +191,8 @@ export async function allocateQuotaFromPlan(userId, planLimits) {
         'subscription.credits.used': 0,
         'subscription.pages.limit': planLimits.pages,
         'subscription.pages.used': 0,
+        'subscription.recrawls.limit': planLimits.recrawls ?? 0,
+        'subscription.recrawls.used': 0,
       },
     },
     { new: true }
@@ -212,7 +215,7 @@ export async function allocateQuotaFromPlan(userId, planLimits) {
  * naturally resets to 0 at the next renewal via allocateQuotaFromPlan(), the
  * same as it always has. No credit/page value is ever fabricated or lost.
  * @param {string|import('mongoose').Types.ObjectId} userId
- * @param {{credits:number, pages:number}} newPlanLimits - typically from getPlanLimits()
+ * @param {{credits:number, pages:number, recrawls?:number}} newPlanLimits - typically from getPlanLimits()
  * @returns {Promise<Object>} updated User document
  */
 export async function reallocateQuotaForPlanChange(userId, newPlanLimits) {
@@ -222,8 +225,79 @@ export async function reallocateQuotaForPlanChange(userId, newPlanLimits) {
       $set: {
         'subscription.credits.limit': newPlanLimits.credits,
         'subscription.pages.limit': newPlanLimits.pages,
+        'subscription.recrawls.limit': newPlanLimits.recrawls ?? 0,
       },
     },
+    { new: true }
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Manual recrawls
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Read-only check: does this user have at least one manual recrawl left?
+ * Tolerates a User loaded before the `recrawls` field existed (treated as 0).
+ * @param {Object} user - User document/plain object with `subscription`
+ * @param {number} [amount=1]
+ * @returns {boolean}
+ */
+export function hasRecrawls(user, amount = 1) {
+  const { limit = 0, used = 0 } = user.subscription?.recrawls || {};
+  return (limit - used) >= amount;
+}
+
+/**
+ * Atomically reserve `amount` manual recrawls. Same single-document $expr
+ * guard as deductCredits(), so two simultaneous Start Recrawl clicks can
+ * never consume more than the remaining allowance.
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {number} [amount=1]
+ * @returns {Promise<Object>} updated User document
+ * @throws {Error} code === 'INSUFFICIENT_RECRAWLS' if the balance is too low
+ */
+export async function deductRecrawls(userId, amount = 1) {
+  const user = await User.findOneAndUpdate(
+    {
+      _id: userId,
+      $expr: {
+        $gte: [
+          {
+            $subtract: [
+              { $ifNull: ['$subscription.recrawls.limit', 0] },
+              { $ifNull: ['$subscription.recrawls.used', 0] },
+            ],
+          },
+          amount,
+        ],
+      },
+    },
+    { $inc: { 'subscription.recrawls.used': amount } },
+    { new: true }
+  );
+
+  if (!user) {
+    const error = new Error(`Not enough manual recrawls to deduct ${amount}`);
+    error.code = 'INSUFFICIENT_RECRAWLS';
+    throw error;
+  }
+
+  return user;
+}
+
+/**
+ * Compensating action when a recrawl never actually started after its
+ * reservation succeeded (job creation threw). Not used for pipeline
+ * failures after a successful start — see projectAuditService.js.
+ * @param {string|import('mongoose').Types.ObjectId} userId
+ * @param {number} [amount=1]
+ * @returns {Promise<Object>} updated User document
+ */
+export async function refundRecrawls(userId, amount = 1) {
+  return User.findOneAndUpdate(
+    { _id: userId, 'subscription.recrawls.used': { $gte: amount } },
+    { $inc: { 'subscription.recrawls.used': -amount } },
     { new: true }
   );
 }
@@ -240,10 +314,12 @@ export async function reallocateQuotaForPlanChange(userId, newPlanLimits) {
  * any auth-response formatting both build on top of this instead of
  * recomputing it.
  * @param {Object} user - User document/plain object with `subscription`
- * @returns {{credits:{limit:number,used:number,remaining:number}, pages:{limit:number,used:number,remaining:number}}}
+ * @returns {{credits:{limit:number,used:number,remaining:number}, pages:{limit:number,used:number,remaining:number}, recrawls:{limit:number,used:number,remaining:number}}}
  */
 export function summarizeQuota(user) {
-  const { credits, pages } = user.subscription;
+  const { credits, pages, recrawls } = user.subscription;
+  const recrawlLimit = recrawls?.limit ?? 0;
+  const recrawlUsed = recrawls?.used ?? 0;
 
   return {
     credits: {
@@ -255,6 +331,11 @@ export function summarizeQuota(user) {
       limit: pages.limit,
       used: pages.used,
       remaining: pages.limit - pages.used,
+    },
+    recrawls: {
+      limit: recrawlLimit,
+      used: recrawlUsed,
+      remaining: Math.max(0, recrawlLimit - recrawlUsed),
     },
   };
 }

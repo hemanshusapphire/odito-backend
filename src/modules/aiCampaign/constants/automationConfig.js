@@ -44,7 +44,7 @@ export const MAX_RULES_PER_POLICY = 10;
 export const MAX_ACTIONS_RECORDED_PER_RUN = 100; // audit-trail cap on the actions[] array itself, independent of the execution limit above
 
 // ── Scheduler ──────────────────────────────────────────────────────────
-/** How often the scheduler scans for due policies — a polling cadence, not the automation interval itself (mirrors weeklyRecrawlScheduler.js's own daily-poll-vs-weekly-window split). */
+/** How often the scheduler scans for due policies — a polling cadence, not the automation interval itself (mirrors weeklyRecheckScheduler.js's own daily-poll-vs-weekly-window split). */
 export const AUTOMATION_SCHEDULER_CRON = process.env.AI_CAMPAIGN_AUTOMATION_SCHEDULER_CRON || '*/15 * * * *';
 /** Global kill switch (spec: "not exposed to normal project users") — same convention as every other scheduler kill switch in this codebase (WEEKLY_RECRAWL_ENABLED, STALE_LOCK_CLEANUP_ENABLED, etc.): an operator-only env var, default ON, requiring a redeploy to change — deliberately consistent with codebase norms rather than introducing a new persisted config collection this repo has never had. */
 export const AUTOMATION_SYSTEM_ENABLED = process.env.AI_CAMPAIGN_AUTOMATION_ENABLED !== 'false';

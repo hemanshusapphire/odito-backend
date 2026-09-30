@@ -5,7 +5,7 @@ import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 
 const SERVICE = 'DeletedProjectPurgeScheduler';
 
-// Daily, offset an hour after the Weekly Recrawl scheduler's default 03:00
+// Daily, offset an hour after the Weekly Recheck scheduler's default 03:00
 // slot so the two never contend for the same tick.
 const CRON_EXPRESSION = process.env.PROJECT_PURGE_CRON || '0 4 * * *';
 const ENABLED = process.env.PROJECT_PURGE_ENABLED !== 'false';

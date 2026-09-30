@@ -4,6 +4,11 @@ import Job from '../../jobs/model/Job.js';
 import { JobService } from '../../jobs/service/jobService.js';
 import JobDispatcher from '../../jobs/service/jobDispatcher.js';
 import auditProgressService from '../../jobs/service/auditProgressService.js';
+import User from '../../user/model/User.js';
+import AuditRun from '../../audit_history/model/AuditRun.js';
+import { hasRecrawls, deductRecrawls, refundRecrawls, summarizeQuota } from '../../../utils/creditService.js';
+import { canConsumeQuota } from '../../subscription/service/subscriptionLifecycle.js';
+import { RUN_SOURCES, consumesRecrawlCredit } from '../../jobs/runSources.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 
 // Get MongoDB connection to access collections directly
@@ -21,6 +26,10 @@ export const AUDIT_RESULT_CODES = {
   NOT_FOUND: 'NOT_FOUND',
   ACCESS_DENIED: 'ACCESS_DENIED',
   ALREADY_RUNNING: 'ALREADY_RUNNING',
+  // Manual Recrawl billing outcomes (see startProjectAudit): no allowance left,
+  // or the owner's subscription is not in a state that may consume quota.
+  INSUFFICIENT_RECRAWLS: 'INSUFFICIENT_RECRAWLS',
+  SUBSCRIPTION_NOT_ACTIVE: 'SUBSCRIPTION_NOT_ACTIVE',
 };
 
 // H3: every job type ANY of the three pipeline kinds (Full Audit, legacy
@@ -200,51 +209,132 @@ export const resetProjectCrawlData = async (projectId) => {
 };
 
 /**
+ * Maps the caller-supplied `source` to a run source. `source` accepts the
+ * explicit RUN_SOURCES values plus the two legacy aliases callers used before
+ * run sources existed: 'manual' (user Recrawl button) and 'scheduled' (the
+ * only remaining caller is System Admin "Start Audit" — the weekly scheduler
+ * no longer starts full audits).
+ *
+ * Deliberately rejects anything else — in particular 'weekly_recheck' and
+ * 'manual_recheck', which belong to projectVerificationService. A scheduler
+ * mistakenly calling this function therefore fails loudly instead of silently
+ * running (and billing) a full Recrawl.
+ */
+const resolveAuditSource = (source) => {
+  switch (source) {
+    case 'manual':
+    case RUN_SOURCES.MANUAL_RECRAWL:
+      return RUN_SOURCES.MANUAL_RECRAWL;
+    case 'scheduled':
+    case RUN_SOURCES.ADMIN_RECRAWL:
+      return RUN_SOURCES.ADMIN_RECRAWL;
+    default:
+      throw new Error(`startProjectAudit: invalid source '${source}' (full audits accept only manual_recrawl/admin_recrawl)`);
+  }
+};
+
+/**
+ * True when this project has never completed an audit — its first full audit
+ * (onboarding / Pre-Audit) was already paid for by the project-creation
+ * credit and must not also consume a manual recrawl. Decided from persisted
+ * state, never from a client-supplied flag.
+ */
+const isFirstAudit = async (project) => {
+  if (project.last_scraped_at) return false;
+  const priorRuns = await AuditRun.countDocuments({ projectId: project._id });
+  return priorRuns === 0;
+};
+
+/**
  * Start a full audit for a project. This is the ONE implementation of
- * "start a fresh audit" — both the manual Recrawl endpoint (startScraping)
- * and the Weekly Recrawl scheduler call this function. Do not duplicate any
+ * "start a fresh audit" — the manual Recrawl endpoint (startScraping) and the
+ * System Admin "Start Audit" action call this function. The Weekly Recheck
+ * scheduler does NOT: it runs the Quick Recheck pipeline
+ * (projectVerificationService.startProjectVerification). Do not duplicate any
  * of this logic elsewhere.
  *
  * Never throws for expected business outcomes (not found, access denied,
- * already running) — it returns a structured result instead so callers with
- * very different error-reporting needs (HTTP response vs. scheduler log
- * line) can each format it their own way.
+ * already running, no recrawl credit) — it returns a structured result
+ * instead so callers with very different error-reporting needs (HTTP response
+ * vs. log line) can each format it their own way.
  * It DOES throw for unexpected infra failures (job creation exceptions not
  * covered by a known error code) — callers must catch those.
  *
- * Credits are never checked or consumed here — project credits are spent
- * exclusively at project creation (see seoProjectController.js), not at
- * audit start, recrawl, or any other trigger of this function.
+ * Billing (manual Recrawl credit, User.subscription.recrawls):
+ *   - Only run source 'manual_recrawl' consumes exactly ONE credit.
+ *     A project's first audit ('initial_audit', decided from persisted state)
+ *     and admin-started audits ('admin_recrawl') are free.
+ *   - Ordering: lock claim → active-job guard → atomic credit reservation →
+ *     data reset → job creation. A duplicate click loses at the claim and never
+ *     touches credits; a user with no credit is rejected BEFORE any project
+ *     data is reset. The reservation is a single $expr-guarded update, so two
+ *     simultaneous requests can never consume more than the allowance.
+ *   - If the run fails to START (reset/job creation throws) the reservation is
+ *     refunded and the lock released, mirroring project creation's refund
+ *     precedent. Once jobs exist there is no automatic refund — pipeline
+ *     failures, worker crashes and page refreshes do not return the credit.
+ *   - Project credits (User.subscription.credits) are still spent only at
+ *     project creation (seoProjectController.js).
  *
  * @param {string} projectId
  * @param {Object} options
- * @param {'manual'|'scheduled'} options.source - who triggered this audit
- * @param {string|mongoose.Types.ObjectId} [options.requestingUserId] - required when source='manual'; must own the project
+ * @param {'manual'|'manual_recrawl'|'scheduled'|'admin_recrawl'} options.source - who triggered this audit
+ * @param {string|mongoose.Types.ObjectId} [options.requestingUserId] - required for manual runs; must own the project
  * @returns {Promise<{success:boolean, code:string, message?:string, data?:object, existing_job?:object}>}
  */
 export async function startProjectAudit(projectId, options = {}) {
   const {
-    source = 'manual',
+    source: requestedSource = RUN_SOURCES.MANUAL_RECRAWL,
     requestingUserId = null,
   } = options;
+
+  const baseSource = resolveAuditSource(requestedSource);
 
   const jobDispatcher = new JobDispatcher();
 
   const project = await SeoProject.findById(projectId);
   if (!project || project.is_deleted) {
-    // A trashed project must behave as not-found for both the manual Recrawl
-    // button and the Weekly Recrawl scheduler (Project Trash & Restore,
-    // Phase 1) — getProjectsNeedingScrape() already excludes it from the
-    // scheduler's candidate list, this is defense-in-depth for any other caller.
+    // A trashed project must behave as not-found for the manual Recrawl
+    // button and System Admin "Start Audit" (Project Trash & Restore,
+    // Phase 1) — defense-in-depth for any caller.
     return { success: false, code: AUDIT_RESULT_CODES.NOT_FOUND, message: 'Project not found' };
   }
 
   // Ownership check only applies when a specific user requested this run.
-  // Scheduled runs act on behalf of the project's own owner — there is no
+  // Admin runs act on behalf of the project's own owner — there is no
   // separate "requester" to validate against.
-  if (source === 'manual') {
+  if (baseSource === RUN_SOURCES.MANUAL_RECRAWL) {
     if (!requestingUserId || project.user_id.toString() !== requestingUserId.toString()) {
       return { success: false, code: AUDIT_RESULT_CODES.ACCESS_DENIED, message: 'Access denied: You do not own this project' };
+    }
+  }
+
+  // Resolve the effective run source. A manual request against a project that
+  // has never completed an audit is that project's initial audit (free).
+  const source = (baseSource === RUN_SOURCES.MANUAL_RECRAWL && await isFirstAudit(project))
+    ? RUN_SOURCES.INITIAL_AUDIT
+    : baseSource;
+  const billed = consumesRecrawlCredit(source);
+
+  // Cheap fast-fail for billed runs, BEFORE the lock is touched: subscription
+  // state and remaining allowance from a fresh read. Not the authoritative
+  // gate — that is the atomic deductRecrawls() below.
+  if (billed) {
+    const owner = await User.findById(project.user_id).select('subscription').lean();
+    if (!owner || !canConsumeQuota(owner.subscription?.status)) {
+      return {
+        success: false,
+        code: AUDIT_RESULT_CODES.SUBSCRIPTION_NOT_ACTIVE,
+        message: `Your subscription is ${owner?.subscription?.status || 'inactive'}. Resolve this via Billing Portal to run a recrawl.`,
+      };
+    }
+    if (!hasRecrawls(owner)) {
+      return {
+        success: false,
+        code: AUDIT_RESULT_CODES.INSUFFICIENT_RECRAWLS,
+        message: 'No manual recrawls remaining. Upgrade your plan or wait for your next billing period.',
+        data: { recrawls: summarizeQuota(owner).recrawls },
+      };
     }
   }
 
@@ -256,8 +346,8 @@ export async function startProjectAudit(projectId, options = {}) {
   const runId = new mongoose.Types.ObjectId();
 
   // 🔒 ATOMIC IDEMPOTENCY GUARD: Prevent duplicate audit starts from concurrent
-  // triggers (double-clicks, refreshes, websocket reconnects, AND a scheduled
-  // run landing on a project a user just recrawled manually). Uses atomic
+  // triggers (double-clicks, refreshes, websocket reconnects, AND a Weekly
+  // Recheck landing on a project a user just recrawled manually). Uses atomic
   // findOneAndUpdate so only one caller can transition crawl_status out of
   // 'running'. Unchanged from the pre-existing manual-recrawl guard.
   const claimedProject = await SeoProject.findOneAndUpdate(
@@ -271,7 +361,8 @@ export async function startProjectAudit(projectId, options = {}) {
     {
       crawl_status: 'running',
       audit_started_at: new Date(),
-      current_run_id: runId
+      current_run_id: runId,
+      current_run_source: source
     },
     { new: true }
   );
@@ -303,18 +394,44 @@ export async function startProjectAudit(projectId, options = {}) {
     };
   }
 
-  // CRITICAL: Reset all previous crawl data before starting new crawl
-  // This ensures new crawls rewrite existing data instead of creating duplicates
-  await resetProjectCrawlData(projectId);
+  const releaseLock = () =>
+    SeoProject.findByIdAndUpdate(projectId, { crawl_status: project.crawl_status || 'pending' });
+
+  // 💳 Authoritative, atomic manual-recrawl reservation — AFTER the lock claim
+  // (a duplicate click never reaches here) and BEFORE any data is reset (a
+  // user with no allowance never has their project partially wiped). Guarded
+  // by $expr in deductRecrawls(), so simultaneous requests cannot over-consume.
+  let recrawlsAfter = null;
+  if (billed) {
+    try {
+      const updatedOwner = await deductRecrawls(project.user_id, 1);
+      recrawlsAfter = summarizeQuota(updatedOwner).recrawls;
+    } catch (creditError) {
+      await releaseLock();
+      if (creditError.code === 'INSUFFICIENT_RECRAWLS') {
+        return {
+          success: false,
+          code: AUDIT_RESULT_CODES.INSUFFICIENT_RECRAWLS,
+          message: 'No manual recrawls remaining. Upgrade your plan or wait for your next billing period.',
+        };
+      }
+      throw creditError;
+    }
+  }
 
   let linkDiscoveryJob, domainPerformanceJob, technicalDomainJob;
   try {
+    // CRITICAL: Reset all previous crawl data before starting new crawl
+    // This ensures new crawls rewrite existing data instead of creating duplicates
+    await resetProjectCrawlData(projectId);
+
     linkDiscoveryJob = await jobService.createJob({
       user_id: project.user_id,
       seo_project_id: projectId,
       jobType: 'LINK_DISCOVERY',
       input_data: {
-        main_url: project.main_url
+        main_url: project.main_url,
+        run_source: source
       },
       priority: 1, // Highest priority
       run_id: runId
@@ -325,7 +442,8 @@ export async function startProjectAudit(projectId, options = {}) {
       seo_project_id: projectId,
       jobType: 'DOMAIN_PERFORMANCE',
       input_data: {
-        main_url: project.main_url
+        main_url: project.main_url,
+        run_source: source
       },
       priority: 2,
       run_id: runId
@@ -349,14 +467,24 @@ export async function startProjectAudit(projectId, options = {}) {
       jobType: 'TECHNICAL_DOMAIN',
       input_data: {
         domain: technicalDomain,
-        main_url: project.main_url
+        main_url: project.main_url,
+        run_source: source
       },
       priority: 1,
       run_id: runId
     });
   } catch (jobCreationError) {
-    LoggerUtil.error('Job creation failed, releasing project lock', jobCreationError, { project_id: projectId, source });
-    await SeoProject.findByIdAndUpdate(projectId, { crawl_status: project.crawl_status || 'pending' });
+    // The run never started: release the lock and hand the reserved credit
+    // back (the same compensating pattern project creation uses).
+    LoggerUtil.error('Audit start failed before any job was dispatched, releasing project lock', jobCreationError, { project_id: projectId, source });
+    await releaseLock();
+    if (billed) {
+      try {
+        await refundRecrawls(project.user_id, 1);
+      } catch (refundError) {
+        LoggerUtil.error('Failed to refund manual recrawl after start failure', refundError, { project_id: projectId, user_id: project.user_id });
+      }
+    }
     throw jobCreationError;
   }
 
@@ -384,7 +512,8 @@ export async function startProjectAudit(projectId, options = {}) {
     job_type: linkDiscoveryJob.jobType,
     project_id: projectId,
     main_url: project.main_url,
-    user_id: project.user_id
+    user_id: project.user_id,
+    run_source: source
   });
 
   auditProgressService.emitStarted(domainPerformanceJob._id.toString(), {
@@ -428,7 +557,12 @@ export async function startProjectAudit(projectId, options = {}) {
         }
       ],
       project_id: projectId,
-      main_url: project.main_url
+      main_url: project.main_url,
+      run_source: source,
+      recrawl_credit_consumed: billed,
+      // Post-reservation balance (null when nothing was billed) so the UI can
+      // update its counter without a second round trip.
+      recrawls: recrawlsAfter
     }
   };
 }

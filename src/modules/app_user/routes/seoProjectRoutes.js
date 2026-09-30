@@ -68,7 +68,7 @@ router.get('/projects/:id/scraping-summary', validateProjectAccess(), getProject
 // every user's projects due for a scrape (cross-user data leak). The Weekly
 // Recrawl scheduler no longer calls this over HTTP at all — it calls
 // SeoProject.getProjectsNeedingScrape() directly in-process (see
-// jobs/service/weeklyRecrawlScheduler.js). This route is kept only for
+// jobs/service/weeklyRecheckScheduler.js). This route is kept only for
 // admin/ops visibility, now gated accordingly.
 router.get('/projects-needing-scrape', requireAdmin(), getProjectsNeedingScrape);
 

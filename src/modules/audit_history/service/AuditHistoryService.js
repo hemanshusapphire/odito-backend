@@ -276,6 +276,7 @@ class AuditHistoryService {
 
       startedAt:    project.audit_started_at,
       completedAt:  new Date(), // time both terminals resolved
+      source:       project.current_run_source ?? null,
 
       websiteScore,
       websiteGrade: project.website_grade  ?? null,

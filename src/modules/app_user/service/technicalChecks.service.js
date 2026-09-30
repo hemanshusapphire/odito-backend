@@ -1,6 +1,7 @@
 import { NotFoundError, AccessDeniedError } from '../../../utils/ErrorUtil.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 import mongoose from 'mongoose';
+import { resolveIssueDifficulty } from '../../../config/issueMetadata.js';
 
 /**
  * Technical Checks Service
@@ -294,15 +295,10 @@ export class TechnicalChecksService {
       impact_percentage = 50; // Warning level impact
     }
 
-    // Calculate difficulty based on status
-    let difficulty;
-    if (status === 'Critical') {
-      difficulty = 'hard';
-    } else if (status === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'ssl_certificate',
@@ -311,6 +307,12 @@ export class TechnicalChecksService {
       severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none',
       affected_pages: affectedPages,
       impact_percentage,
+      // Domain-level check: there's no "% of pages affected" here (SSL is a
+      // whole-site property), so impact_percentage is a fixed severity-tier
+      // weight (100/50/0), not a computed ratio. Flagged explicitly so the
+      // frontend never captions it as "% of pages affected" the way the
+      // page-level checks below correctly can.
+      impact_basis: 'severity_tier',
       difficulty,
       message,
       sslStatus
@@ -338,15 +340,10 @@ export class TechnicalChecksService {
       ? Math.round(((stats.pagesWithMissingHeaders / pageAggregations.totalPages) * 100) * 10) / 10
       : 0;
 
-    // Calculate difficulty based on status (same logic as on-page issues)
-    let difficulty;
-    if (status === 'Critical') {
-      difficulty = 'hard';
-    } else if (status === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'security_headers',
@@ -355,6 +352,10 @@ export class TechnicalChecksService {
       severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none',
       affected_pages: stats.pagesWithMissingHeaders,
       impact_percentage,
+      // Page-level check: impact_percentage is a real computed ratio
+      // (affected pages / total pages analyzed), safe to caption as
+      // "% of pages affected" — unlike the domain-level checks above.
+      impact_basis: 'pages_affected_ratio',
       difficulty,
       message
     };
@@ -381,15 +382,10 @@ export class TechnicalChecksService {
       ? Math.round(((stats.pagesWithoutCanonical / pageAggregations.totalPages) * 100) * 10) / 10
       : 0;
 
-    // Calculate difficulty based on status
-    let difficulty;
-    if (status === 'Critical') {
-      difficulty = 'hard';
-    } else if (status === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'canonical_tags',
@@ -398,6 +394,10 @@ export class TechnicalChecksService {
       severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none',
       affected_pages: stats.pagesWithoutCanonical,
       impact_percentage,
+      // Page-level check: impact_percentage is a real computed ratio
+      // (affected pages / total pages analyzed), safe to caption as
+      // "% of pages affected" — unlike the domain-level checks above.
+      impact_basis: 'pages_affected_ratio',
       difficulty,
       message
     };
@@ -429,15 +429,10 @@ export class TechnicalChecksService {
       impact_percentage = 30; // Access issues have moderate impact
     }
 
-    // Calculate difficulty based on status
-    let difficulty;
-    if (checkStatus === 'Critical') {
-      difficulty = 'hard';
-    } else if (checkStatus === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: checkStatus === 'Critical' ? 'high' : checkStatus === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'robots_txt',
@@ -446,6 +441,8 @@ export class TechnicalChecksService {
       severity: checkStatus === 'Critical' ? 'high' : checkStatus === 'Warning' ? 'medium' : 'none',
       affected_pages: affectedPages,
       impact_percentage,
+      // Domain-level check — see the identical note on ssl_certificate above.
+      impact_basis: 'severity_tier',
       difficulty,
       message
     };
@@ -472,15 +469,10 @@ export class TechnicalChecksService {
       ? Math.round(((stats.noindexPages / pageAggregations.totalPages) * 100) * 10) / 10
       : 0;
 
-    // Calculate difficulty based on status
-    let difficulty;
-    if (status === 'Critical') {
-      difficulty = 'hard';
-    } else if (status === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'noindex_tags',
@@ -489,6 +481,10 @@ export class TechnicalChecksService {
       severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none',
       affected_pages: stats.noindexPages,
       impact_percentage,
+      // Page-level check: impact_percentage is a real computed ratio
+      // (affected pages / total pages analyzed), safe to caption as
+      // "% of pages affected" — unlike the domain-level checks above.
+      impact_basis: 'pages_affected_ratio',
       difficulty,
       message
     };
@@ -516,15 +512,10 @@ export class TechnicalChecksService {
       ? Math.round(((affectedPages / pageAggregations.totalPages) * 100) * 10) / 10
       : 0;
 
-    // Calculate difficulty based on status
-    let difficulty;
-    if (status === 'Critical') {
-      difficulty = 'hard';
-    } else if (status === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'h1_tags',
@@ -533,6 +524,10 @@ export class TechnicalChecksService {
       severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none',
       affected_pages: affectedPages,
       impact_percentage,
+      // Page-level check: impact_percentage is a real computed ratio
+      // (affected pages / total pages analyzed), safe to caption as
+      // "% of pages affected" — unlike the domain-level checks above.
+      impact_basis: 'pages_affected_ratio',
       difficulty,
       message
     };
@@ -562,15 +557,10 @@ export class TechnicalChecksService {
       ? Math.round(((affectedPages / pageAggregations.totalPages) * 100) * 10) / 10
       : 0;
 
-    // Calculate difficulty based on status
-    let difficulty;
-    if (status === 'Critical') {
-      difficulty = 'hard';
-    } else if (status === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'structured_data',
@@ -579,6 +569,10 @@ export class TechnicalChecksService {
       severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none',
       affected_pages: affectedPages,
       impact_percentage,
+      // Page-level check: impact_percentage is a real computed ratio
+      // (affected pages / total pages analyzed), safe to caption as
+      // "% of pages affected" — unlike the domain-level checks above.
+      impact_basis: 'pages_affected_ratio',
       difficulty,
       message
     };
@@ -605,15 +599,10 @@ export class TechnicalChecksService {
       ? Math.round(((stats.pagesWithoutViewport / pageAggregations.totalPages) * 100) * 10) / 10
       : 0;
 
-    // Calculate difficulty based on status
-    let difficulty;
-    if (status === 'Critical') {
-      difficulty = 'hard';
-    } else if (status === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'mobile_friendliness',
@@ -622,6 +611,10 @@ export class TechnicalChecksService {
       severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none',
       affected_pages: stats.pagesWithoutViewport,
       impact_percentage,
+      // Page-level check: impact_percentage is a real computed ratio
+      // (affected pages / total pages analyzed), safe to caption as
+      // "% of pages affected" — unlike the domain-level checks above.
+      impact_basis: 'pages_affected_ratio',
       difficulty,
       message
     };
@@ -654,15 +647,10 @@ export class TechnicalChecksService {
       impact_percentage = 40; // Access issues have moderate impact
     }
 
-    // Calculate difficulty based on status
-    let difficulty;
-    if (checkStatus === 'Critical') {
-      difficulty = 'hard';
-    } else if (checkStatus === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: checkStatus === 'Critical' ? 'high' : checkStatus === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'xml_sitemap',
@@ -671,6 +659,8 @@ export class TechnicalChecksService {
       severity: checkStatus === 'Critical' ? 'high' : checkStatus === 'Warning' ? 'medium' : 'none',
       affected_pages: affectedPages,
       impact_percentage,
+      // Domain-level check — see the identical note on ssl_certificate above.
+      impact_basis: 'severity_tier',
       difficulty,
       message
     };
@@ -697,15 +687,10 @@ export class TechnicalChecksService {
       ? Math.round(((stats.pagesMissingOGTags / pageAggregations.totalPages) * 100) * 10) / 10
       : 0;
 
-    // Calculate difficulty based on status
-    let difficulty;
-    if (status === 'Critical') {
-      difficulty = 'hard';
-    } else if (status === 'Warning') {
-      difficulty = 'medium';
-    } else {
-      difficulty = 'easy';
-    }
+    // Difficulty: single shared resolver (issueMetadata.js) — previously an
+    // identical if/else was hand-duplicated in every one of this file's 10
+    // check functions.
+    const difficulty = resolveIssueDifficulty({ severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none' });
 
     return {
       id: 'og_social_tags',
@@ -714,6 +699,10 @@ export class TechnicalChecksService {
       severity: status === 'Critical' ? 'high' : status === 'Warning' ? 'medium' : 'none',
       affected_pages: stats.pagesMissingOGTags,
       impact_percentage,
+      // Page-level check: impact_percentage is a real computed ratio
+      // (affected pages / total pages analyzed), safe to caption as
+      // "% of pages affected" — unlike the domain-level checks above.
+      impact_basis: 'pages_affected_ratio',
       difficulty,
       message
     };

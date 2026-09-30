@@ -963,12 +963,16 @@ const getIssueCounts = async (req, res) => {
     }
 
     const result = await IssueCountsService.getIssueCounts(projectId);
-    
+
     res.status(200).json(result);
 
   } catch (error) {
     LoggerUtil.error('Error getting issue counts', error, { projectId: req.params.id });
-    return res.status(500).json(ResponseUtil.error('Failed to get issue counts', 500));
+    // A failed aggregation must surface as an explicit error, never as a
+    // fake "0 issues" success response (that used to happen inside the
+    // service itself — see IssueCountsService.getIssueCounts).
+    const statusCode = error.statusCode || 500;
+    return res.status(statusCode).json(ResponseUtil.error(error.message || 'Failed to get issue counts', statusCode));
   }
 };
 
