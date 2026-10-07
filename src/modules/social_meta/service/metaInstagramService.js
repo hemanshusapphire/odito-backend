@@ -126,7 +126,11 @@ export async function discoverInstagramForPage({ projectId, pageId }) {
   // linked IG Business Account; inventing one here would be a fabricated
   // credential Meta was never asked for.
   igAccount.accessToken = pageAccessToken;
-  igAccount.tokenExpiresAt = null;
+  // Same token => same real expiry/verification facts as its Page row.
+  igAccount.tokenExpiresAt = fbAccount.tokenExpiresAt || null;
+  igAccount.dataAccessExpiresAt = fbAccount.dataAccessExpiresAt || null;
+  igAccount.lastVerifiedAt = fbAccount.lastVerifiedAt || null;
+  igAccount.statusReason = null;
   igAccount.scopes = fbAccount.scopes;
   igAccount.status = 'active';
   igAccount.metadata = {

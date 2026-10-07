@@ -11,6 +11,7 @@ import instagramInsightsService from './instagramInsightsService.js';
 import { getActiveInstagramAccount } from './facebookAccountService.js';
 import { resolveRange, resolveRangeWindow } from './dateRangeUtil.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
+import { markAccountExpired } from './metaTokenService.js';
 
 /**
  * InstagramOverviewService — orchestration for the Social Overview
@@ -68,6 +69,7 @@ export async function getInstagramOverview({ projectId, range }) {
   if (!accountInfoResult.success) {
     LoggerUtil.info('INSTAGRAM_DATA_FETCH_ERROR', { projectId, igAccountId, endpoint: 'account_info', errorType: accountInfoResult.error?.code });
     if (accountInfoResult.error?.code === 'INSTAGRAM_TOKEN_INVALID') {
+      await markAccountExpired(account);
       return { connected: false, reason: 'TOKEN_EXPIRED' };
     }
     return { connected: false, reason: 'FETCH_FAILED' };

@@ -7,6 +7,7 @@ import crypto from 'crypto';
 dotenv.config();
 
 import SeoProject from '../../app_user/model/SeoProject.js';
+import { installDebugTokenStub } from '../testSupport/metaDebugTokenStub.js';
 import SocialAccount from '../model/SocialAccount.js';
 import metaPageService from '../service/metaPageService.js';
 import { discoverInstagramForPage } from '../service/metaInstagramService.js';
@@ -38,7 +39,11 @@ import PendingMetaConnection, { PENDING_TTL_MS } from '../model/PendingMetaConne
 
 let mongoAvailable = false;
 
+// selectMetaPage now asks Meta (debug_token) about the Page token it is about
+// to store; stub only that endpoint so these tests stay offline/deterministic.
+let restoreDebugToken = () => {};
 before(async () => {
+  restoreDebugToken = installDebugTokenStub();
   try {
     await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 1500 });
     mongoAvailable = true;
@@ -48,6 +53,7 @@ before(async () => {
 });
 
 after(async () => {
+  restoreDebugToken();
   if (mongoAvailable) await mongoose.connection.close();
 });
 

@@ -58,7 +58,10 @@ const businessProfileReviewSchema = new mongoose.Schema({
   // 💬 Business reply (optional)
   reply: {
     comment: { type: String, default: null },
-    update_time: { type: Date, default: null }
+    update_time: { type: Date, default: null },
+    // Google's moderation state for the reply: PENDING | APPROVED | REJECTED
+    // (null for replies synced before this field existed).
+    state: { type: String, default: null }
   },
 
   // 🔄 Incremental sync bookkeeping
@@ -148,20 +151,45 @@ businessProfileReviewSchema.statics.markStaleAsDeleted = async function(projectI
   return result.modifiedCount;
 };
 
+const REVIEW_SORTS = {
+  newest: { review_create_time: -1 },
+  oldest: { review_create_time: 1 },
+  highest: { star_rating: -1, review_create_time: -1 },
+  lowest: { star_rating: 1, review_create_time: -1 }
+};
+
 /**
- * Paginated, optionally-searched review list for the Reviews Drawer.
+ * Paginated review list (Reviews Drawer + Reviews page).
+ *
+ * Optional filters, all backward compatible (omitted = previous behaviour):
+ *  - search:  text search over reviewer name + comment
+ *  - rating:  exact star rating 1-5
+ *  - replied: true = has a business reply, false = no reply
+ *  - sort:    newest | oldest | highest | lowest. With an active search and no
+ *             explicit sort, results stay ranked by text relevance.
  */
-businessProfileReviewSchema.statics.getPaginated = async function(projectId, { page = 1, limit = 20, search = '' } = {}) {
+businessProfileReviewSchema.statics.getPaginated = async function(projectId, { page = 1, limit = 20, search = '', rating, replied, sort } = {}) {
   const query = { project_id: projectId, is_deleted: false };
-  if (search && search.trim()) {
+  const hasSearch = !!(search && search.trim());
+  if (hasSearch) {
     query.$text = { $search: search.trim() };
+  }
+  if (Number.isInteger(rating) && rating >= 1 && rating <= 5) {
+    query.star_rating = rating;
+  }
+  if (replied === true) {
+    query['reply.comment'] = { $nin: [null, ''] };
+  } else if (replied === false) {
+    query['reply.comment'] = { $in: [null, ''] };
   }
 
   const skip = (page - 1) * limit;
+  const sortSpec = REVIEW_SORTS[sort]
+    || (hasSearch ? { score: { $meta: 'textScore' } } : REVIEW_SORTS.newest);
 
   const [reviews, total] = await Promise.all([
     this.find(query)
-      .sort(search ? { score: { $meta: 'textScore' } } : { review_create_time: -1 })
+      .sort(sortSpec)
       .skip(skip)
       .limit(limit)
       .lean(),
@@ -186,29 +214,36 @@ businessProfileReviewSchema.statics.getPaginated = async function(projectId, { p
  * future trend graph feature.
  */
 businessProfileReviewSchema.statics.getStats = async function(projectId) {
-  const result = await this.aggregate([
+  // Grouped by star rating (max 5 buckets) instead of pushing every rating
+  // into an array, so cost doesn't grow with the review count.
+  const groups = await this.aggregate([
     { $match: { project_id: new mongoose.Types.ObjectId(projectId), is_deleted: false } },
     {
       $group: {
-        _id: null,
+        _id: '$star_rating',
         count: { $sum: 1 },
-        avgRating: { $avg: '$star_rating' },
-        distribution: {
-          $push: '$star_rating'
-        }
+        replied: { $sum: { $cond: [{ $gt: [{ $strLenCP: { $ifNull: ['$reply.comment', ''] } }, 0] }, 1, 0] } }
       }
     }
   ]);
 
-  if (!result[0]) return { count: 0, avgRating: 0, distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 } };
-
   const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-  for (const r of result[0].distribution) distribution[r] = (distribution[r] || 0) + 1;
+  let count = 0;
+  let ratingSum = 0;
+  let repliedCount = 0;
+  for (const g of groups) {
+    if (!distribution.hasOwnProperty(g._id)) continue;
+    distribution[g._id] = g.count;
+    count += g.count;
+    ratingSum += g._id * g.count;
+    repliedCount += g.replied;
+  }
 
   return {
-    count: result[0].count,
-    avgRating: Math.round(result[0].avgRating * 10) / 10,
-    distribution
+    count,
+    avgRating: count ? Math.round((ratingSum / count) * 10) / 10 : 0,
+    distribution,
+    repliedCount
   };
 };
 

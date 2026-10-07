@@ -145,6 +145,49 @@ export async function exchangeCodeForToken({ code, redirectUri }) {
 }
 
 /**
+ * Exchanges the SHORT-lived user token the authorization-code exchange
+ * returns (valid ~1–2 hours) for a LONG-lived one (~60 days) using Meta's
+ * documented `grant_type=fb_exchange_token` on the same /oauth/access_token
+ * endpoint (same Graph host + version as exchangeCodeForToken above, so it
+ * honors META_GRAPH_API_VERSION identically).
+ *
+ * This is what makes the Page tokens obtained next durable: per Meta's
+ * documentation a Page access token fetched via /me/accounts with a
+ * long-lived user token does not expire, whereas one fetched with a
+ * short-lived user token is itself short-lived — which would silently break
+ * every post scheduled more than an hour or two ahead.
+ *
+ * Returns the same normalized { success, status, data, message } shape as
+ * exchangeCodeForToken; data.access_token / data.expires_in are the
+ * caller's responsibility to never log or return to the frontend. Only
+ * success/failure is logged here.
+ */
+export async function exchangeForLongLivedToken(shortLivedToken) {
+  LoggerUtil.service('MetaOAuth', 'long_lived_exchange', 'started');
+
+  const result = await metaApiService.requestAbsolute({
+    method: 'GET',
+    url: `${graphApiBaseUrl()}/oauth/access_token`,
+    params: {
+      grant_type: 'fb_exchange_token',
+      client_id: process.env.META_APP_ID,
+      client_secret: process.env.META_APP_SECRET,
+      fb_exchange_token: shortLivedToken,
+    },
+    context: 'meta_long_lived_exchange',
+  });
+
+  // A 200 without an access_token is as unusable as an error: report it as
+  // a failure so no caller can persist an undefined/empty token.
+  const usable = result.success && typeof result.data?.access_token === 'string' && result.data.access_token !== '';
+  LoggerUtil.service('MetaOAuth', 'long_lived_exchange', usable ? 'completed' : 'failed');
+  if (result.success && !usable) {
+    return { success: false, kind: 'http', status: result.status, data: null, message: 'Meta returned no long-lived access token' };
+  }
+  return result;
+}
+
+/**
  * Fetches the ACTUALLY GRANTED permissions for a Meta user access token
  * via GET /me/permissions — requesting a scope in the authorization URL
  * does not guarantee Meta granted it (the user can decline individual
@@ -181,4 +224,4 @@ export async function fetchGrantedScopes(userAccessToken) {
   return granted;
 }
 
-export default { META_OAUTH_SCOPES, buildAuthorizationUrl, exchangeCodeForToken, fetchGrantedScopes };
+export default { META_OAUTH_SCOPES, buildAuthorizationUrl, exchangeCodeForToken, exchangeForLongLivedToken, fetchGrantedScopes };

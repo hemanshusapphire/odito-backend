@@ -1,6 +1,8 @@
 import metaApiService from '../metaApiService.js';
 import { isPubliclyReachableUrl } from '../media/mediaStorageService.js';
 import { LoggerUtil } from '../../../../utils/LoggerUtil.js';
+import { classifyMetaFailure, isAuthenticationFailure } from '../metaErrorClassifier.js';
+import { getPublishConfig } from '../socialPublishConfig.js';
 
 /**
  * InstagramAdapter — real Meta Graph API two-step publish flow: create a
@@ -45,12 +47,14 @@ async function waitForContainerReady(creationId, pageAccessToken) {
     const statusCode = statusResult.data?.status_code;
     if (statusCode === 'FINISHED') return { ready: true };
     if (statusCode === 'ERROR') {
-      return { ready: false, error: { code: 'INSTAGRAM_PUBLISH_FAILED', message: 'Meta failed to process this media.' } };
+      return { ready: false, error: { code: 'INSTAGRAM_PUBLISH_FAILED', message: 'Meta failed to process this media.', category: 'PERMANENT', retryable: false, outcome: 'not_published', accountAction: 'none', requiresReconnect: false } };
     }
     // IN_PROGRESS, EXPIRED, or an unrecognized value — wait and retry.
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs()));
   }
-  return { ready: false, error: { code: 'INSTAGRAM_PROCESSING_TIMEOUT', message: 'Meta is still processing this media — try publishing again in a moment.' } };
+  // media_publish was never called, so nothing can have been published: a
+  // definite, retryable failure (a retry makes a fresh container).
+  return { ready: false, error: { code: 'INSTAGRAM_PROCESSING_TIMEOUT', message: 'Meta is still processing this media — try publishing again in a moment.', category: 'TRANSIENT', retryable: true, outcome: 'not_published', accountAction: 'none', requiresReconnect: false } };
 }
 
 export async function publish({ account, content, media }) {
@@ -87,6 +91,7 @@ export async function publish({ account, content, media }) {
       : { image_url: item.url, caption: content || '' },
     accessToken: pageAccessToken,
     context: 'instagram_create_media_container',
+    timeoutMs: getPublishConfig().publishTimeoutMs,
   });
 
   if (!containerResult.success) {
@@ -110,6 +115,7 @@ export async function publish({ account, content, media }) {
     params: { creation_id: creationId },
     accessToken: pageAccessToken,
     context: 'instagram_publish_media',
+    timeoutMs: getPublishConfig().publishTimeoutMs,
   });
 
   if (!publishResult.success) {
@@ -119,43 +125,72 @@ export async function publish({ account, content, media }) {
   const externalPostId = publishResult.data?.id || null;
   if (!externalPostId) {
     LoggerUtil.service('InstagramAdapter', 'publish', 'malformed_publish_response', {});
-    return { success: false, externalPostId: null, error: { code: 'INSTAGRAM_PUBLISH_FAILED', message: 'Meta accepted the publish request but returned no media ID.' } };
+    // media_publish answered OK without an id: the post may exist — UNKNOWN.
+    return { success: false, externalPostId: null, error: { code: 'PUBLISH_OUTCOME_UNKNOWN', message: 'Meta accepted the publish request but returned no media ID, so Odito cannot confirm whether it was published.', category: 'UNKNOWN_OUTCOME', retryable: true, outcome: 'unknown', accountAction: 'none', requiresReconnect: false } };
   }
 
   LoggerUtil.service('InstagramAdapter', 'publish', 'completed', { igAccountId });
   return { success: true, externalPostId, error: null };
 }
 
+/**
+ * Classification lives in metaErrorClassifier.js. Only the LAST call
+ * (`publish_container`, i.e. media_publish) creates the real post, so only a
+ * lost response there is an UNKNOWN outcome; a timeout while creating the
+ * (unpublished) container or polling its status cannot have published
+ * anything and is a plain retryable transient failure.
+ */
 function normalizeFailure(result, step) {
-  LoggerUtil.service('InstagramAdapter', step, 'failed', { status: result.status });
-
-  // Same real-world pattern confirmed live for Facebook (see
-  // facebookAdapter.js's normalizeFailure) — a Page token missing
-  // instagram_content_publish is an OAuthException naming the missing
-  // permission, but not necessarily via 401/403. Classify by Meta's own
-  // type/message first so this is never mistaken for a plain
-  // invalid/expired token.
-  const metaError = result.data?.error;
-  if (metaError?.type === 'OAuthException' && /permission/i.test(metaError.message || '')) {
-    return { code: 'INSTAGRAM_PERMISSION_MISSING', message: 'This Instagram connection is missing publishing permission — disconnect and reconnect it, making sure to approve posting permission when Facebook asks.' };
-  }
-  // Live-confirmed real Meta error (OAuthException code 9004, "Only photo
-  // or video can be accepted as media type") for a container creation call
-  // whose media URL Meta could not use. The isPubliclyReachableUrl() check
-  // above now catches the localhost/private-URL case before Meta is ever
-  // called; this branch only fires for a URL that WAS publicly reachable
-  // but that Meta still rejected — a genuinely invalid/corrupt file, an
-  // unsupported format, or a URL that 404s/times out from Meta's side.
-  if (metaError?.type === 'OAuthException' && (metaError.code === 9004 || /media type|could not process|invalid image|invalid video/i.test(metaError.message || ''))) {
-    return { code: 'INSTAGRAM_MEDIA_INVALID', message: 'Instagram could not process this media — the file may be corrupt, in an unsupported format, or the URL may not be reachable from Instagram.' };
-  }
-  if (result.status === 401 || result.status === 403) {
-    return { code: 'INSTAGRAM_TOKEN_INVALID', message: 'Meta denied this request — the Instagram connection may need to be reconnected.' };
-  }
-  if (result.status === 429) {
-    return { code: 'INSTAGRAM_RATE_LIMITED', message: 'Meta is rate-limiting requests for this account right now. Try again shortly.' };
-  }
-  return { code: 'INSTAGRAM_PUBLISH_FAILED', message: 'Meta rejected this post.' };
+  const c = classifyMetaFailure(result, { platform: 'instagram', finalPublishStep: step === 'publish_container' });
+  LoggerUtil.service('InstagramAdapter', step, 'failed', { status: result.status, category: c.category, code: c.code, outcome: c.outcome });
+  return {
+    code: c.code,
+    message: c.message,
+    category: c.category,
+    retryable: c.retryable,
+    outcome: c.outcome,
+    accountAction: c.accountAction,
+    requiresReconnect: c.requiresReconnect,
+  };
 }
 
-export default { publish };
+/**
+ * Looks for an Instagram media item matching an attempt whose outcome is
+ * unknown (media_publish was sent but no usable answer came back). Same
+ * contract as facebookAdapter.reconcile: reconciliation by FINGERPRINT (no
+ * idempotency key exists) — a media item posted at/after the attempt began
+ * whose caption equals the attempted content. 'not_found' is only returned
+ * when the lookup succeeded, covered the attempt window, and the caption is
+ * a usable fingerprint (non-empty); otherwise 'unknown', and the caller must
+ * NOT re-publish.
+ */
+const RECONCILE_LIMIT = 25;
+const RECONCILE_CLOCK_SKEW_MS = 2 * 60 * 1000;
+
+export async function reconcile({ account, content, since, excludeIds = null }) {
+  const text = (content || '').trim();
+  if (!text) return { status: 'unknown', reason: 'NO_FINGERPRINT' };
+  if (!(since instanceof Date) || Number.isNaN(since.getTime())) return { status: 'unknown', reason: 'NO_ATTEMPT_TIME' };
+
+  const igAccountId = account.instagramBusinessAccountId || account.platformAccountId;
+  const result = await metaApiService.request({
+    method: 'GET',
+    path: `/${igAccountId}/media`,
+    params: { fields: 'id,caption,timestamp', limit: RECONCILE_LIMIT },
+    accessToken: account.accessToken,
+    context: 'instagram_reconcile_media',
+  });
+  if (!result.success) {
+    return { status: 'unknown', reason: 'LOOKUP_FAILED', authFailure: isAuthenticationFailure(result) };
+  }
+
+  const items = Array.isArray(result.data?.data) ? result.data.data : [];
+  const earliest = since.getTime() - RECONCILE_CLOCK_SKEW_MS;
+  const match = items.find((m) => m?.id && !excludeIds?.has(m.id) && typeof m.caption === 'string' && m.caption.trim() === text && new Date(m.timestamp).getTime() >= earliest);
+  if (match) return { status: 'found', externalPostId: match.id };
+
+  const windowCovered = items.length < RECONCILE_LIMIT || items.some((m) => new Date(m.timestamp).getTime() < earliest);
+  return windowCovered ? { status: 'not_found' } : { status: 'unknown', reason: 'WINDOW_NOT_COVERED' };
+}
+
+export default { publish, reconcile };

@@ -74,6 +74,24 @@ function normalizeResponse(response) {
   };
 }
 
+// Node/axios error codes that can only occur BEFORE a request body is on
+// the wire (DNS failure, refused connection) — Meta provably never saw the
+// request. Every other transport failure (timeout awaiting the response,
+// ECONNRESET, EPIPE, socket hang up, unrecognized codes) is deliberately
+// NOT in this set: the request may well have reached Meta and been acted on
+// even though no response made it back, so callers must treat those as an
+// UNKNOWN outcome rather than a definite failure (see metaErrorClassifier.js).
+const REQUEST_NEVER_SENT_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ERR_INVALID_URL']);
+
+/**
+ * Failure `kind` is how callers tell "Meta answered with an error" (definite)
+ * apart from "no answer arrived" (the request may or may not have been
+ * processed):
+ *   'http'            — Meta responded (any status); `status`/`data` are set
+ *   'timeout'         — request sent, no response before the deadline
+ *   'network_unsent'  — failed before the request could be sent
+ *   'network_unknown' — transport failed after/while sending (e.g. reset)
+ */
 function normalizeError(error, context) {
   if (error.response) {
     const metaError = error.response.data?.error;
@@ -92,6 +110,7 @@ function normalizeError(error, context) {
     }
     return {
       success: false,
+      kind: 'http',
       status: error.response.status,
       data: error.response.data || null,
       message: metaError?.message || 'Meta API request failed',
@@ -100,11 +119,18 @@ function normalizeError(error, context) {
 
   if (error.code === 'ECONNABORTED' || /timeout/i.test(error.message || '')) {
     LoggerUtil.error('[META_API] Graph API request timed out', {}, { context });
-    return { success: false, status: null, data: null, message: 'Meta API request timed out' };
+    return { success: false, kind: 'timeout', status: null, data: null, message: 'Meta API request timed out', networkCode: error.code || null };
   }
 
-  LoggerUtil.error('[META_API] Graph API network error', { message: error.message }, { context });
-  return { success: false, status: null, data: null, message: 'Could not reach Meta API' };
+  LoggerUtil.error('[META_API] Graph API network error', { message: error.message, code: error.code || null }, { context });
+  return {
+    success: false,
+    kind: REQUEST_NEVER_SENT_CODES.has(error.code) ? 'network_unsent' : 'network_unknown',
+    status: null,
+    data: null,
+    message: 'Could not reach Meta API',
+    networkCode: error.code || null,
+  };
 }
 
 /**

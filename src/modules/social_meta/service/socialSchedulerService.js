@@ -1,5 +1,7 @@
 import { schedule } from 'node-cron';
 import { executeDuePublications } from './socialPublishingService.js';
+import { recoverStalePublications, reconcileUnknownOutcomes } from './socialPublishRecoveryService.js';
+import { getSocialSchedulerState } from '../../../config/env.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 
 const SERVICE = 'SocialSchedulerService';
@@ -11,17 +13,71 @@ const DEFAULT_CRON_EXPRESSION = '* * * * *';
 
 let task = null;
 
-export async function runOnce() {
+// Observability: the last tick's outcome, readable by a health endpoint /
+// ops script without parsing logs. In-memory and per-process by design (each
+// PM2 instance reports its own); never used for any publish decision.
+const runtimeStatus = {
+  enabled: false,
+  disabledReason: null,
+  running: false,
+  cronExpression: null,
+  lastRunAt: null,
+  lastRunDurationMs: null,
+  lastRunError: null,
+  lastSummary: null,
+};
+
+/** Snapshot of this process's scheduler state (safe to expose; no secrets). */
+export function getSchedulerStatus() {
+  return { ...runtimeStatus };
+}
+
+/**
+ * One scheduler tick. Order matters:
+ *   1. recoverStalePublications — resolve rows orphaned in 'publishing' by a
+ *      crash/restart (reconcile with Meta; never blind re-publish),
+ *   2. reconcileUnknownOutcomes — re-check publishes whose response was lost,
+ *   3. executeDuePublications  — fail anything too late (SCHEDULE_MISSED), then
+ *      publish what is due. The atomic claim inside publishNow, not this
+ *      sequencing, is what makes concurrent PM2 instances safe.
+ * `projectId` (optional, never passed by the cron) scopes the tick to one
+ * project for ops/"run now" use. Each stage is isolated: a failure in one is logged and never prevents the
+ * next, and nothing here can throw out of the tick (the API process must
+ * never crash because Mongo/Meta hiccupped).
+ */
+export async function runOnce({ projectId = null } = {}) {
   const startedAt = Date.now();
   LoggerUtil.service(SERVICE, 'run', 'started');
-  let summary;
+  const summary = { stale: null, unknownOutcomes: null, processed: 0, succeeded: 0, failed: 0, skipped: 0, missed: 0, results: [] };
+  let firstError = null;
+
   try {
-    summary = await executeDuePublications();
+    summary.stale = await recoverStalePublications({ projectId });
   } catch (error) {
-    LoggerUtil.error(`${SERVICE}: run failed`, error);
-    return { processed: 0, succeeded: 0, failed: 0, results: [] };
+    firstError = firstError || error;
+    LoggerUtil.error(`${SERVICE}: stale-publication recovery failed`, error);
   }
-  LoggerUtil.service(SERVICE, 'run', 'completed', { durationMs: Date.now() - startedAt, ...summary, results: undefined });
+
+  try {
+    summary.unknownOutcomes = await reconcileUnknownOutcomes({ projectId });
+  } catch (error) {
+    firstError = firstError || error;
+    LoggerUtil.error(`${SERVICE}: unknown-outcome reconciliation failed`, error);
+  }
+
+  try {
+    Object.assign(summary, await executeDuePublications({ projectId }));
+  } catch (error) {
+    firstError = firstError || error;
+    LoggerUtil.error(`${SERVICE}: run failed`, error);
+  }
+
+  runtimeStatus.lastRunAt = new Date().toISOString();
+  runtimeStatus.lastRunDurationMs = Date.now() - startedAt;
+  runtimeStatus.lastRunError = firstError ? firstError.message : null;
+  runtimeStatus.lastSummary = { ...summary, results: undefined };
+
+  LoggerUtil.service(SERVICE, 'run', firstError ? 'completed_with_errors' : 'completed', { durationMs: runtimeStatus.lastRunDurationMs, ...summary, results: undefined });
   return summary;
 }
 
@@ -41,24 +97,28 @@ export async function runOnce() {
  * disabled no matter what .env actually says (confirmed: this was exactly
  * the bug — a real due 'scheduled' post sat untouched in production
  * because this line never saw the real value). Reading process.env inside
- * this function instead means it's read only once startSocialScheduler()
- * is actually CALLED (server.js's startServer(), long after
- * dotenv.config() has already run), so it correctly reflects the real
- * configured value.
+ * this function instead means it's read only once startSocialScheduler() is
+ * actually CALLED (server.js's startServer(), long after dotenv.config() has
+ * already run), so it correctly reflects the real configured value.
  *
- * Deliberately OPT-IN (default OFF unless SOCIAL_SCHEDULER_ENABLED is
- * exactly "true"), unlike this codebase's other schedulers
- * (weeklyRecheckScheduler.js, staleLockScheduler.js — both default ON,
- * `!== 'false'`). Those only ever touch Odito's own database. This one
- * makes REAL, irreversible posts to a real, external Facebook/Instagram
- * account the moment it runs — the user must explicitly set
- * SOCIAL_SCHEDULER_ENABLED=true after connecting real accounts and
- * confirming they want scheduled posts to actually go out automatically.
+ * Deliberately OPT-IN: ONLY the exact string "true" enables it (see
+ * config/env.js getSocialSchedulerState — the single definition of that
+ * rule). Unlike this codebase's other schedulers (weeklyRecheckScheduler.js,
+ * staleLockScheduler.js — both default ON, `!== 'false'`), which only ever
+ * touch Odito's own database, this one makes REAL, irreversible posts to a
+ * real, external Facebook/Instagram account the moment it runs — the
+ * operator must explicitly set SOCIAL_SCHEDULER_ENABLED=true. When it is
+ * disabled the reason is logged at WARN on boot and exposed through
+ * getSchedulerStatus(), so "scheduled posts silently never go out" is
+ * observable rather than a mystery.
  */
 export function startSocialScheduler() {
-  const enabled = process.env.SOCIAL_SCHEDULER_ENABLED === 'true';
-  if (!enabled) {
-    LoggerUtil.service(SERVICE, 'init', 'disabled', { reason: 'SOCIAL_SCHEDULER_ENABLED is not "true" — scheduled posts will NOT be automatically published until this is set' });
+  const state = getSocialSchedulerState();
+  runtimeStatus.enabled = state.enabled;
+  runtimeStatus.disabledReason = state.reason;
+
+  if (!state.enabled) {
+    LoggerUtil.warn(`${SERVICE}: DISABLED — scheduled posts will NOT be automatically published until this is enabled`, { reason: state.reason });
     return null;
   }
   if (task) {
@@ -78,6 +138,8 @@ export function startSocialScheduler() {
     { noOverlap: true },
   );
 
+  runtimeStatus.running = true;
+  runtimeStatus.cronExpression = cronExpression;
   LoggerUtil.service(SERVICE, 'init', 'scheduled', { cronExpression });
   return task;
 }
@@ -86,6 +148,7 @@ export function stopSocialScheduler() {
   if (task) {
     task.stop();
     task = null;
+    runtimeStatus.running = false;
     LoggerUtil.service(SERVICE, 'stop', 'completed');
   }
 }

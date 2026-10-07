@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { ResponseUtil } from '../../../utils/ResponseUtil.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 import GoogleConnection from '../model/GoogleConnection.js';
@@ -18,8 +19,15 @@ import {
 import {
   checkReviewsCapability,
   fetchBusinessMetadata,
-  fetchAllReviews
+  fetchAllReviews,
+  replyToReview,
+  ReviewReplyError,
+  MAX_REPLY_BYTES
 } from '../../../services/businessProfileReviewService.js';
+import { getReviewAnalytics, DEFAULT_RANGE, RANGE_PRESETS } from '../../../services/businessProfileReviewAnalyticsService.js';
+import { isValidTimezone } from '../../../services/businessProfileReviewMetrics.js';
+import { captureReviewSnapshot, resolveSnapshotTimezone } from '../../../services/businessProfileReviewSnapshotService.js';
+import User from '../../user/model/User.js';
 import {
   checkMediaCapability,
   fetchAllMedia
@@ -865,13 +873,20 @@ export const getBusinessProfileRatingController = async (req, res) => {
       }));
     }
 
+    // Distribution / replied count come from the locally synced reviews
+    // (Google only exposes the average + total), used by the Reviews page.
+    const stats = await BusinessProfileReview.getStats(projectId);
+
     return res.json(ResponseUtil.success({
       available: true,
       status: 'available',
       reason: null,
       averageRating: metadata.average_rating,
       totalReviewCount: metadata.total_review_count,
-      lastSyncedAt: metadata.reviews_last_synced_at
+      lastSyncedAt: metadata.reviews_last_synced_at,
+      syncedReviewCount: stats.count,
+      repliedCount: stats.repliedCount,
+      distribution: stats.distribution
     }));
 
   } catch (error) {
@@ -895,6 +910,11 @@ export const getBusinessProfileReviewsController = async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
   const search = typeof req.query.search === 'string' ? req.query.search.slice(0, 200) : '';
+  // Optional filters (Reviews page); invalid values are ignored, not errors.
+  const ratingParam = parseInt(req.query.rating, 10);
+  const rating = ratingParam >= 1 && ratingParam <= 5 ? ratingParam : undefined;
+  const replied = req.query.replied === 'true' ? true : req.query.replied === 'false' ? false : undefined;
+  const sort = ['newest', 'oldest', 'highest', 'lowest'].includes(req.query.sort) ? req.query.sort : undefined;
 
   try {
     const project = await SeoProject.findById(projectId);
@@ -914,7 +934,7 @@ export const getBusinessProfileReviewsController = async (req, res) => {
       }));
     }
 
-    const result = await BusinessProfileReview.getPaginated(projectId, { page, limit, search });
+    const result = await BusinessProfileReview.getPaginated(projectId, { page, limit, search, rating, replied, sort });
 
     return res.json(ResponseUtil.success({
       available: true,
@@ -1219,6 +1239,316 @@ export const syncBusinessProfileMediaController = async (req, res) => {
   }
 };
 
+/**
+ * GET /projects/:projectId/business-profile/reviews/analytics?range=90d&tz=Asia/Kolkata
+ *
+ * Aggregated review analytics from the synced reviews (no Google call).
+ * Chain: JWT (route) -> project owned by user -> THIS user's business_profile
+ * GoogleConnection for the project with a selected location -> reviews
+ * capability -> aggregation scoped to project + that location. The location
+ * always comes from the stored connection, never from the client. A connection
+ * in `expired` state still serves analytics (stored data, no Google access).
+ */
+export const getBusinessProfileReviewAnalyticsController = async (req, res) => {
+  const { projectId } = req.params;
+  const userId = req.user._id;
+
+  const rangeKey = req.query.range === undefined ? DEFAULT_RANGE : String(req.query.range);
+  if (!RANGE_PRESETS[rangeKey]) {
+    return res.status(400).json({
+      success: false, code: 'INVALID_RANGE',
+      message: `range must be one of: ${Object.keys(RANGE_PRESETS).join(', ')}`
+    });
+  }
+  const timezone = isValidTimezone(req.query.tz) ? req.query.tz : 'UTC';
+
+  if (!mongoose.isValidObjectId(projectId)) {
+    return res.status(404).json(ResponseUtil.error('Project not found', 404));
+  }
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    if (project.user_id.toString() !== userId.toString()) {
+      return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
+    }
+
+    const connection = await GoogleConnection
+      .findOne({ user_id: userId, project_id: projectId, purpose: 'business_profile' })
+      .select('business_location_id')
+      .lean();
+    if (!connection?.business_location_id) {
+      return res.status(400).json({
+        success: false, code: 'NOT_CONNECTED',
+        message: 'No Business Profile location is connected for this project.'
+      });
+    }
+
+    const metadata = await BusinessProfileMetadata.findOne({ project_id: projectId });
+    if (!metadata || metadata.reviews_capability?.status !== 'available') {
+      return res.json(ResponseUtil.success({
+        available: false,
+        status: metadata?.reviews_capability?.status || 'unknown',
+        reason: metadata?.reviews_capability?.reason || 'Not yet synced.'
+      }));
+    }
+
+    // The MoM/YoY comparison reads snapshots, which are cut in the OWNER's zone
+    // (same resolution the snapshot scheduler uses), not in the viewer's.
+    const owner = await User.findById(project.user_id).select('timezone').lean();
+
+    const analytics = await getReviewAnalytics({
+      projectId,
+      locationId: connection.business_location_id,
+      rangeKey,
+      timezone,
+      snapshotTimezone: resolveSnapshotTimezone(owner?.timezone)
+    });
+
+    return res.json(ResponseUtil.success({ available: true, ...analytics }));
+
+  } catch (error) {
+    LoggerUtil.error('Error building review analytics', error, { projectId, rangeKey });
+    return res.status(500).json(ResponseUtil.error('Failed to load review analytics', 500));
+  }
+};
+
+/**
+ * POST /projects/:projectId/business-profile/reviews/analytics/snapshot
+ *
+ * Creates (or refreshes) TODAY's historical review snapshot for this project's
+ * connected location - the manual/initial trigger for the same service the
+ * daily scheduler uses. Takes NO body: the location comes from the stored
+ * connection and the day from the owner's timezone, never from the client, so
+ * the endpoint cannot be pointed at another location or backdated.
+ * Chain: JWT -> project owned by user -> THIS user's business_profile
+ * connection with a selected location -> capture. Does not call Google and
+ * never changes the connection (a snapshot failure is not an OAuth failure).
+ */
+export const snapshotBusinessProfileReviewsController = async (req, res) => {
+  const { projectId } = req.params;
+  const userId = req.user._id;
+
+  if (!mongoose.isValidObjectId(projectId)) {
+    return res.status(404).json(ResponseUtil.error('Project not found', 404));
+  }
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return res.status(404).json(ResponseUtil.error('Project not found', 404));
+    if (project.user_id.toString() !== userId.toString()) {
+      return res.status(403).json(ResponseUtil.accessDenied('Access denied'));
+    }
+
+    const connection = await GoogleConnection
+      .findOne({ user_id: userId, project_id: projectId, purpose: 'business_profile' })
+      .select('_id business_account_id business_location_id')
+      .lean();
+    if (!connection?.business_location_id) {
+      return res.status(400).json({
+        success: false, code: 'NOT_CONNECTED',
+        message: 'No Business Profile location is connected for this project.'
+      });
+    }
+
+    const owner = await User.findById(project.user_id).select('timezone').lean();
+    const { snapshot, created } = await captureReviewSnapshot({
+      projectId,
+      locationId: connection.business_location_id,
+      userId,
+      connectionId: connection._id,
+      accountId: connection.business_account_id,
+      timezone: resolveSnapshotTimezone(owner?.timezone)
+    });
+
+    // Internal ids stay server-side.
+    const { user_id, connection_id, __v, ...publicSnapshot } = snapshot; // eslint-disable-line no-unused-vars
+    return res.status(created ? 201 : 200).json(
+      ResponseUtil.success({ snapshot: publicSnapshot, created }, created ? 'Snapshot created' : 'Snapshot updated')
+    );
+
+  } catch (error) {
+    LoggerUtil.error('Error creating review snapshot', error, { projectId });
+    return res.status(500).json({ success: false, code: 'SNAPSHOT_FAILED', message: 'Unable to create snapshot.' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// Review reply (REAL write to Google Business Profile)
+// ─────────────────────────────────────────────────────────────────────────
+
+// Control characters other than \n and \t are never valid in a reply.
+const REPLY_CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+const REVIEW_ID_PATTERN = /^[A-Za-z0-9_-]{1,300}$/;
+
+// Duplicate-submit guard: one in-flight reply per project+review. In-process
+// (the backend runs as one instance); the preflight GET in replyToReview plus
+// the stored reply make a second attempt after completion an ALREADY_REPLIED
+// no-op even across processes.
+const inFlightReplies = new Set();
+
+function replyFail(res, httpStatus, code, message, extra = {}) {
+  return res.status(httpStatus).json({ success: false, message, code, ...extra });
+}
+
+/** Audit trail for this external write. Never receives tokens or reply text. */
+function auditReviewReply({ projectId, reviewId, locationId, userId, success, googleStatus = null, googleCode = null, code = null }) {
+  LoggerUtil.info('[AUDIT] REVIEW_REPLY', {
+    action: 'REVIEW_REPLY',
+    projectId: String(projectId),
+    reviewId,
+    locationId: locationId || null,
+    userId: String(userId),
+    success,
+    errorCode: code,
+    googleStatus,
+    googleErrorCode: googleCode,
+    timestamp: new Date().toISOString()
+  });
+}
+
+function validateReplyText(raw) {
+  if (typeof raw !== 'string') return { error: 'Reply text is required.' };
+  const text = raw.replace(/\r\n?/g, '\n').trim();
+  if (!text) return { error: 'Reply cannot be empty.' };
+  if (REPLY_CONTROL_CHARS.test(text)) return { error: 'Reply contains unsupported characters.' };
+  if (Buffer.byteLength(text, 'utf8') > MAX_REPLY_BYTES) {
+    return { error: 'Reply is too long. Please shorten it.' };
+  }
+  return { text };
+}
+
+/**
+ * POST /projects/:projectId/business-profile/reviews/:reviewId/reply
+ * Body: { reply: string }
+ *
+ * Authorization chain: JWT (route `auth`) -> project owned by user ->
+ * ACTIVE business_profile GoogleConnection of THIS user+project with a
+ * selected account/location -> the review exists in this project AND carries
+ * that same account/location (a reviewId alone is never trusted; no ids come
+ * from the client except the review's own id) -> Google token (refresh
+ * failure never changes connection status) -> preflight GET -> PUT reply.
+ * The local copy is updated only from Google's successful response.
+ */
+export const replyToBusinessProfileReviewController = async (req, res) => {
+  const { projectId, reviewId } = req.params;
+  const userId = req.user._id;
+  const lockKey = `${projectId}:${reviewId}`;
+  let locationId = null;
+
+  if (!mongoose.isValidObjectId(projectId)) {
+    return replyFail(res, 404, 'PROJECT_NOT_FOUND', 'Project not found');
+  }
+  if (!REVIEW_ID_PATTERN.test(reviewId)) {
+    return replyFail(res, 400, 'INVALID_REVIEW_ID', 'Invalid review');
+  }
+  const validated = validateReplyText(req.body?.reply);
+  if (validated.error) {
+    return replyFail(res, 400, 'INVALID_REPLY', validated.error);
+  }
+
+  if (inFlightReplies.has(lockKey)) {
+    return replyFail(res, 409, 'REPLY_IN_PROGRESS', 'A reply to this review is already being sent.');
+  }
+  inFlightReplies.add(lockKey);
+
+  try {
+    const project = await SeoProject.findById(projectId);
+    if (!project) return replyFail(res, 404, 'PROJECT_NOT_FOUND', 'Project not found');
+    if (project.user_id.toString() !== userId.toString()) {
+      return replyFail(res, 403, 'ACCESS_DENIED', 'Access denied');
+    }
+
+    const googleConnection = await GoogleConnection.findActiveConnection(userId, projectId, 'business_profile');
+    if (!googleConnection) {
+      return replyFail(res, 400, 'NOT_CONNECTED', 'Google Business Profile is not connected for this project.');
+    }
+    const accountId = googleConnection.business_account_id;
+    locationId = googleConnection.business_location_id;
+    if (!accountId || !locationId) {
+      return replyFail(res, 400, 'NO_LOCATION_SELECTED', 'No Business Profile location is selected for this project.');
+    }
+
+    // The review must be one of THIS project's reviews for THIS connected location.
+    const review = await BusinessProfileReview.findOne({
+      project_id: projectId,
+      google_review_id: reviewId,
+      is_deleted: false
+    });
+    if (!review) return replyFail(res, 404, 'REVIEW_NOT_FOUND', 'Review not found');
+    if (review.business_account_id !== accountId || review.business_location_id !== locationId) {
+      auditReviewReply({ projectId, reviewId, locationId, userId, success: false, code: 'REVIEW_LOCATION_MISMATCH' });
+      return replyFail(res, 404, 'REVIEW_NOT_FOUND', 'Review not found');
+    }
+    if (review.reply?.comment) {
+      return replyFail(res, 409, 'ALREADY_REPLIED', 'This review already has a reply.', { data: { review: review.toObject() } });
+    }
+
+    let reply;
+    try {
+      reply = await replyToReview(googleConnection, accountId, locationId, reviewId, validated.text);
+    } catch (error) {
+      if (!(error instanceof ReviewReplyError)) throw error;
+
+      let reviewPayload;
+      if (error.code === 'ALREADY_REPLIED' && error.existingReply) {
+        // Replied directly on Google since our last sync - bring the local copy in line.
+        review.reply = error.existingReply;
+        await review.save();
+        reviewPayload = review.toObject();
+      }
+      auditReviewReply({
+        projectId, reviewId, locationId, userId, success: false,
+        code: error.code, googleStatus: error.googleStatus, googleCode: error.googleCode
+      });
+      LoggerUtil.warn('Review reply failed', {
+        projectId, reviewId, code: error.code, googleStatus: error.googleStatus, googleCode: error.googleCode
+      });
+      return replyFail(res, error.httpStatus, error.code, error.message, {
+        retryable: error.retryable,
+        ...(reviewPayload && { data: { review: reviewPayload } })
+      });
+    }
+
+    if (reply.state === 'REJECTED') {
+      auditReviewReply({ projectId, reviewId, locationId, userId, success: false, googleStatus: reply.googleStatus, code: 'REPLY_REJECTED' });
+      return replyFail(res, 422, 'REPLY_REJECTED', 'Google did not accept this reply because it may violate their content policy.');
+    }
+
+    // Google accepted the reply. Persist exactly what Google returned.
+    let updatedReview = null;
+    let localSyncFailed = false;
+    try {
+      review.reply = { comment: reply.comment, update_time: reply.update_time, state: reply.state };
+      await review.save();
+      updatedReview = review.toObject();
+    } catch (saveError) {
+      // The reply IS live on Google; the next sync reconciles the local copy.
+      localSyncFailed = true;
+      LoggerUtil.error('Reply posted to Google but local save failed', saveError, { projectId, reviewId });
+    }
+
+    auditReviewReply({ projectId, reviewId, locationId, userId, success: true, googleStatus: reply.googleStatus });
+
+    return res.json(ResponseUtil.success({
+      review: updatedReview,
+      google: {
+        status: reply.googleStatus,
+        replyState: reply.state,
+        updateTime: reply.update_time
+      },
+      localSyncFailed
+    }, 'Reply posted to Google'));
+
+  } catch (error) {
+    auditReviewReply({ projectId, reviewId, locationId, userId, success: false, code: 'INTERNAL_ERROR' });
+    LoggerUtil.error('Unexpected error posting review reply', error, { projectId, reviewId });
+    return replyFail(res, 500, 'INTERNAL_ERROR', 'Unable to post reply.');
+  } finally {
+    inFlightReplies.delete(lockKey);
+  }
+};
+
 export default {
   syncBusinessProfileData,
   getBusinessProfileSyncStatus,
@@ -1226,6 +1556,9 @@ export default {
   getBusinessProfileRatingController,
   getBusinessProfileReviewsController,
   syncBusinessProfileReviewsController,
+  replyToBusinessProfileReviewController,
+  getBusinessProfileReviewAnalyticsController,
+  snapshotBusinessProfileReviewsController,
   getBusinessProfileAccountsController,
   getBusinessProfileLocationsController,
   selectBusinessProfile,

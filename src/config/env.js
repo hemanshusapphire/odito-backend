@@ -106,12 +106,14 @@ export const validateEnvironment = () => {
   // audio/video/PDF reports used by features unrelated to social
   // publishing, so refusing to boot at all over this one feature's
   // requirement would be disproportionate.
-  if (process.env.NODE_ENV === 'production' && process.env.BACKEND_URL && !isPubliclyReachableUrl(`${process.env.BACKEND_URL}/storage/social_media/probe`)) {
-    console.warn('⚠️  PRODUCTION WARNING: BACKEND_URL is not a public HTTPS origin:');
-    console.warn(`   - BACKEND_URL=${process.env.BACKEND_URL}`);
+  const mediaOrigin = (process.env.PUBLIC_MEDIA_BASE_URL || '').trim().replace(/\/+$/, '') || process.env.BACKEND_URL;
+  if (process.env.NODE_ENV === 'production' && mediaOrigin && !isPubliclyReachableUrl(`${mediaOrigin}/storage/social_media/probe`)) {
+    const originVar = process.env.PUBLIC_MEDIA_BASE_URL ? 'PUBLIC_MEDIA_BASE_URL' : 'BACKEND_URL';
+    console.warn(`⚠️  PRODUCTION WARNING: ${originVar} is not a public HTTPS origin:`);
+    console.warn(`   - ${originVar}=${mediaOrigin}`);
     console.warn('   Facebook/Instagram media (image/video) publishing will fail for every attempt —');
     console.warn('   Meta\'s servers cannot fetch media from a localhost/private/non-HTTPS URL.');
-    console.warn('   Text-only publishing is unaffected. Set BACKEND_URL to your real public HTTPS domain to fix this.');
+    console.warn('   Text-only publishing is unaffected. Set BACKEND_URL (or PUBLIC_MEDIA_BASE_URL) to a public HTTPS origin that serves /storage/social_media to fix this.');
   }
 
   return {
@@ -226,6 +228,52 @@ export const getServiceUrls = () => {
     videoWorker: getEnvVar('VIDEO_WORKER_URL'),
     frontend: getEnvVar('CORS_ORIGIN')
   };
+};
+
+/**
+ * The public frontend origin used for browser redirects (e.g. the Meta OAuth
+ * callback sending the user back to the app). Sourced from CORS_ORIGIN — the
+ * same single source of truth getServiceUrls().frontend uses.
+ *
+ * MUST be called at request time, never captured in a module-level constant:
+ * ES modules evaluate every import before the importing file's own body, so
+ * a top-level `const X = process.env.CORS_ORIGIN` in a controller can run
+ * before dotenv has populated process.env and then be frozen forever (the
+ * Meta OAuth controller shipped exactly this bug: with env supplied by .env,
+ * every post-OAuth redirect went to http://localhost:3000).
+ *
+ * If CORS_ORIGIN lists several origins (comma-separated) the first is the
+ * canonical frontend. Outside production a missing value falls back to the
+ * local dev server; IN PRODUCTION a missing value is a configuration error
+ * and throws — redirecting real users to localhost is never acceptable.
+ */
+export const getFrontendUrl = () => {
+  const raw = process.env.CORS_ORIGIN;
+  const first = typeof raw === 'string' ? raw.split(',')[0].trim() : '';
+  if (first) return first.replace(/\/+$/, '');
+  if (isProduction()) {
+    throw new Error('CORS_ORIGIN is not set — cannot determine the frontend URL in production');
+  }
+  return 'http://localhost:3000';
+};
+
+/**
+ * Whether the social publishing scheduler is enabled. Explicit opt-in: ONLY
+ * the exact string "true" enables it (it makes real, irreversible posts to
+ * external accounts). Anything else — unset, "false", "TRUE", "1" — is
+ * disabled, and getSocialSchedulerState() reports WHY so a disabled
+ * scheduler is observable rather than silent.
+ */
+export const getSocialSchedulerState = () => {
+  const raw = process.env.SOCIAL_SCHEDULER_ENABLED;
+  const enabled = raw === 'true';
+  let reason = null;
+  if (!enabled) {
+    reason = raw === undefined || raw === ''
+      ? 'SOCIAL_SCHEDULER_ENABLED is not set (default: disabled)'
+      : `SOCIAL_SCHEDULER_ENABLED is "${raw}" — only the exact value "true" enables it`;
+  }
+  return { enabled, reason };
 };
 
 /**

@@ -88,6 +88,7 @@ import { startVerificationBatchRecoveryScheduler } from './src/modules/verificat
 import { startSocialScheduler } from './src/modules/social_meta/service/socialSchedulerService.js';
 import { startBulkImportRecoveryScheduler } from './src/modules/social_meta/service/bulkImport/bulkImportRecoveryScheduler.js';
 import { startAutomationScheduler } from './src/modules/aiCampaign/service/automation/automationScheduler.js';
+import { startReviewSnapshotScheduler } from './src/services/businessProfileReviewSnapshotScheduler.js';
 import { handleStripeWebhook } from './src/modules/subscription/controller/subscriptionController.js';
 import auth from './src/modules/user/middleware/auth.js';
 import { requireAdmin } from './src/middleware/auth.middleware.js';
@@ -297,6 +298,13 @@ const startServer = async () => {
   // disabled, so this being on is not sufficient for anything to happen —
   // a user must also explicitly enable each policy.
   startAutomationScheduler();
+
+  // Google Business Profile review analytics - historical snapshots: hourly
+  // tick that records ONE snapshot per connected location per local day (the
+  // first tick after that owner's local midnight). Idempotent (unique index +
+  // upsert), never calls Google, never touches connection status. Opt-out via
+  // REVIEW_SNAPSHOT_ENABLED=false.
+  startReviewSnapshotScheduler();
 
 
   /**

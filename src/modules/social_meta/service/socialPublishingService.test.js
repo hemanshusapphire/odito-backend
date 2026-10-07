@@ -13,6 +13,7 @@ import {
   listPublications, getPublishingCounts, getPublication, createPublication, createBulkPublications, updatePublication,
   deletePublication, schedulePublication, cancelPublication, publishNow, executeDuePublications,
 } from './socialPublishingService.js';
+import '../testSupport/stubPermalinkLookup.js';
 
 /**
  * Real MongoDB, no mocking library — same conventions as the rest of this
@@ -38,14 +39,30 @@ after(async () => {
   if (mongoAvailable) await mongoose.connection.close();
 });
 
-async function withMockedFacebookAdapter(publish, fn) {
-  const original = adapters.facebook.publish;
+async function withMockedFacebookAdapter(publish, fn, { reconcile } = {}) {
+  const originalPublish = adapters.facebook.publish;
+  const originalReconcile = adapters.facebook.reconcile;
   adapters.facebook.publish = publish;
+  // Reconciliation would otherwise hit the real Graph API with a fake token.
+  adapters.facebook.reconcile = reconcile || (async () => ({ status: 'unknown', reason: 'TEST_STUB' }));
   try {
     return await fn();
   } finally {
-    adapters.facebook.publish = original;
+    adapters.facebook.publish = originalPublish;
+    adapters.facebook.reconcile = originalReconcile;
   }
+}
+
+/**
+ * Seeds a publication that is DUE now. createPublication() (correctly) rejects
+ * a past scheduledAt, so — like real time passing — create it for the future
+ * and then move its scheduledAt back.
+ */
+async function createDuePublication(projectId, userId, fields, { minutesAgo = 1 } = {}) {
+  const created = await createPublication(projectId, userId, { ...fields, scheduledAt: new Date(Date.now() + 3600_000).toISOString() });
+  assert.equal(created.success, true, 'seed: createPublication');
+  await SocialPublication.updateOne({ _id: created.publication.id }, { $set: { scheduledAt: new Date(Date.now() - minutesAgo * 60_000) } });
+  return created;
 }
 
 describe('socialPublishingService', () => {
@@ -114,10 +131,10 @@ describe('socialPublishingService', () => {
     if (!mongoAvailable) return t.skip('local MongoDB not reachable');
     // 11:30 AM in a fixed +05:30 offset (India) is 06:00:00.000Z.
     const result = await createPublication(project._id.toString(), userId, {
-      platform: 'facebook', socialAccountId: account._id.toString(), content: 'IST offset', scheduledAt: '2026-08-22T11:30:00+05:30', timezone: 'Asia/Kolkata',
+      platform: 'facebook', socialAccountId: account._id.toString(), content: 'IST offset', scheduledAt: '2099-08-22T11:30:00+05:30', timezone: 'Asia/Kolkata',
     });
     assert.equal(result.success, true);
-    assert.equal(result.publication.scheduledAt.toISOString(), '2026-08-22T06:00:00.000Z');
+    assert.equal(result.publication.scheduledAt.toISOString(), '2099-08-22T06:00:00.000Z');
     assert.equal(result.publication.timezone, 'Asia/Kolkata');
   });
 
@@ -672,10 +689,10 @@ describe('socialPublishingService', () => {
 
   test('18: executeDuePublications publishes only posts whose scheduledAt has arrived, never future ones', async (t) => {
     if (!mongoAvailable) return t.skip('local MongoDB not reachable');
-    const due = await createPublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content: 'Due now', scheduledAt: new Date(Date.now() - 60_000).toISOString() });
+    const due = await createDuePublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content: 'Due now' });
     const future = await createPublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content: 'Future', scheduledAt: new Date(Date.now() + 3600_000).toISOString() });
 
-    const summary = await withMockedFacebookAdapter(async () => ({ success: true, externalPostId: 'due_post_1', error: null }), () => executeDuePublications());
+    const summary = await withMockedFacebookAdapter(async () => ({ success: true, externalPostId: 'due_post_1', error: null }), () => executeDuePublications({ projectId: project._id }));
 
     assert.equal(summary.processed, 1);
     assert.equal(summary.succeeded, 1);
@@ -692,15 +709,15 @@ describe('socialPublishingService', () => {
       platformAccountName: 'Second Page', accountType: 'page', pageId: 'pg_pub2', accessToken: 'real-token', status: 'active',
       scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts'],
     });
-    const failing = await createPublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content: 'Boom', scheduledAt: new Date(Date.now() - 60_000).toISOString() });
-    const ok = await createPublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account2._id.toString(), content: 'Fine', scheduledAt: new Date(Date.now() - 60_000).toISOString() });
+    const failing = await createDuePublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account._id.toString(), content: 'Boom' });
+    const ok = await createDuePublication(project._id.toString(), userId, { platform: 'facebook', socialAccountId: account2._id.toString(), content: 'Fine' });
 
     let call = 0;
     const summary = await withMockedFacebookAdapter(async () => {
       call += 1;
       if (call === 1) throw new Error('unexpected adapter crash');
       return { success: true, externalPostId: 'ok_post_1', error: null };
-    }, () => executeDuePublications());
+    }, () => executeDuePublications({ projectId: project._id }));
 
     assert.equal(summary.processed, 2);
     assert.equal(summary.succeeded, 1);

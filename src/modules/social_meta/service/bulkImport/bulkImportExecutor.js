@@ -196,6 +196,11 @@ async function importOneRow({ row, projectId, userId, batchOid, mode, resolveAcc
       timezone,
       importBatchId: batchOid,
       importRowNumber: row.rowNumber,
+      // `publish` rows are stamped now+1s so the scheduler picks them up on
+      // its next tick; by the time createPublication validates that instant
+      // it may already be past, which must not reject them. (`schedule` rows
+      // were already required to be in the future above, and still are.)
+      allowPastSchedule: effectiveAction === 'publish',
     });
   } catch (err) {
     if (err && err.code === 11000) {

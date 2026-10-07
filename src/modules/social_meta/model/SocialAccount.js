@@ -173,6 +173,29 @@ const socialAccountSchema = new mongoose.Schema({
     type: Date,
     default: null,
   },
+  // Last time Meta itself confirmed (via the debug_token endpoint — see
+  // metaTokenService.js) whether this connection's token is still valid.
+  // null = never verified; distinct from lastSyncedAt (which tracks content
+  // syncs). Never a token.
+  lastVerifiedAt: {
+    type: Date,
+    default: null,
+  },
+  // Meta separately expires a user's *data access* (≈90 days after they
+  // last authorized the app) even when the access token itself never
+  // expires. When it passes, calls start failing with the token-invalid
+  // family of errors, so it is tracked alongside tokenExpiresAt.
+  dataAccessExpiresAt: {
+    type: Date,
+    default: null,
+  },
+  // Stable, machine-readable reason the last time `status` left 'active'
+  // (e.g. 'META_TOKEN_INVALID', 'USER_DISCONNECTED') — safe to expose, never
+  // Meta's raw message. null while active.
+  statusReason: {
+    type: String,
+    default: null,
+  },
 }, {
   timestamps: { createdAt: 'createdAt', updatedAt: 'updatedAt' },
 });

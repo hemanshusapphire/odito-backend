@@ -145,10 +145,11 @@ describe('facebookAdapter.publish — failure mapping', () => {
     assert.equal(result.error.code, 'FACEBOOK_RATE_LIMITED');
   });
 
-  test('a malformed success response (no id at all) is treated as a failure, never fabricated success', async () => {
+  test('a malformed success response (no id at all) is never a fabricated success — it is an UNKNOWN outcome (Meta said OK, so the post may exist)', async () => {
     const result = await withMockedRequest(async () => ({ success: true, status: 200, data: {} }), () => publish({ account, content: 'x', media: [] }));
     assert.equal(result.success, false);
-    assert.equal(result.error.code, 'FACEBOOK_PUBLISH_FAILED');
+    assert.equal(result.error.code, 'PUBLISH_OUTCOME_UNKNOWN');
+    assert.equal(result.error.outcome, 'unknown');
   });
 
   test('a Meta "wrong media type" OAuthException maps to FACEBOOK_MEDIA_INVALID, not the generic fallback', async () => {

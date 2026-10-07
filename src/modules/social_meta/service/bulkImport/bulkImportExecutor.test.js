@@ -14,6 +14,7 @@ import adapters from '../platformAdapters/index.js';
 import { executeDuePublications } from '../socialPublishingService.js';
 import { importValidatedBatch } from './bulkImportExecutor.js';
 import { getServiceUrls } from '../../../../config/env.js';
+import '../../testSupport/stubPermalinkLookup.js';
 
 /**
  * Bulk Upload — Phase 3 executor. Real MongoDB, no mocking library
@@ -179,7 +180,7 @@ describe('bulkImportExecutor.importValidatedBatch', () => {
     adapters.facebook.publish = async () => ({ success: true, externalPostId: 'fb_from_bulk_1', error: null });
     try {
       await new Promise((r) => setTimeout(r, 1100)); // let scheduledAt (now+1s) fall due
-      await executeDuePublications();
+      await executeDuePublications({ projectId: project._id });
     } finally {
       adapters.facebook.publish = original;
     }

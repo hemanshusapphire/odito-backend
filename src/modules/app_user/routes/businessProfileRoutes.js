@@ -8,6 +8,9 @@ import {
   getBusinessProfileRatingController,
   getBusinessProfileReviewsController,
   syncBusinessProfileReviewsController,
+  replyToBusinessProfileReviewController,
+  getBusinessProfileReviewAnalyticsController,
+  snapshotBusinessProfileReviewsController,
   selectBusinessProfile,
   getBusinessProfileDetailsController,
   getBusinessProfileTrendsController,
@@ -15,6 +18,7 @@ import {
   syncBusinessProfileMediaController
 } from '../controller/businessProfileController.js';
 import auth from '../../user/middleware/auth.js';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 const router = express.Router();
 
@@ -189,6 +193,9 @@ router.get('/:projectId/business-profile/rating',
  * - page: Page number (default: 1)
  * - limit: Items per page (default: 20, max: 100)
  * - search: Free-text search over reviewer name + comment
+ * - rating: Exact star rating filter (1-5)
+ * - replied: "true" (has business reply) | "false" (no reply)
+ * - sort: newest (default) | oldest | highest | lowest
  *
  * Response: {
  *   success: true,
@@ -200,6 +207,83 @@ router.get('/:projectId/business-profile/rating',
 router.get('/:projectId/business-profile/reviews',
   auth,
   getBusinessProfileReviewsController
+);
+
+/**
+ * GET /projects/:projectId/business-profile/reviews/analytics
+ *
+ * Aggregated review analytics (insight cards, rating distribution/trends,
+ * glance, response rate, text/no-text distribution, sentiment + timeline) in
+ * ONE response, from the synced reviews. Registered before any
+ * /reviews/:reviewId route so "analytics" is never read as a review id.
+ *
+ * Query: range = 7d | 30d | 90d (default) | 6m | 12m ; tz = IANA timezone (default UTC)
+ */
+router.get('/:projectId/business-profile/reviews/analytics',
+  auth,
+  getBusinessProfileReviewAnalyticsController
+);
+
+// Each manual snapshot runs one aggregation: per-user cap (in-process store).
+const snapshotRateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.user?._id ? `u:${String(req.user._id)}` : ipKeyGenerator(req.ip)),
+  handler: (req, res) => res.status(429).json({
+    success: false,
+    code: 'RATE_LIMITED',
+    message: 'Too many snapshot requests. Please wait a few minutes and try again.'
+  })
+});
+
+/**
+ * POST /projects/:projectId/business-profile/reviews/analytics/snapshot
+ *
+ * Create/refresh TODAY's historical review snapshot (manual + initial trigger;
+ * the daily scheduler uses the same service). No body: location and day are
+ * derived server-side from the stored connection. 201 = created, 200 = the
+ * day's existing snapshot was updated.
+ */
+router.post('/:projectId/business-profile/reviews/analytics/snapshot',
+  auth,
+  snapshotRateLimiter,
+  snapshotBusinessProfileReviewsController
+);
+
+// Abuse/accident protection for the Google write: per authenticated user,
+// in-process store (single instance - same approach as aiCampaignRateLimiter).
+const replyRateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.user?._id ? `u:${String(req.user._id)}` : ipKeyGenerator(req.ip)),
+  handler: (req, res) => res.status(429).json({
+    success: false,
+    code: 'RATE_LIMITED',
+    message: 'Too many replies in a short time. Please wait a few minutes and try again.'
+  })
+});
+
+/**
+ * POST /projects/:projectId/business-profile/reviews/:reviewId/reply
+ *
+ * REAL write to Google Business Profile (v4 reviews.updateReply). Posts the
+ * reply for ONE review of the project's connected location.
+ *
+ * Body: { reply: string }  (trimmed, non-empty, <= 4096 bytes)
+ * Success: { success, data: { review, google: { status, replyState, updateTime }, localSyncFailed } }
+ * Failure: { success:false, code, message, retryable? } - codes: INVALID_REPLY,
+ *   REPLY_IN_PROGRESS, ALREADY_REPLIED, REVIEW_NOT_FOUND, GOOGLE_AUTH_FAILED,
+ *   GOOGLE_PERMISSION_DENIED, GOOGLE_RATE_LIMITED, GOOGLE_UNAVAILABLE,
+ *   GOOGLE_REJECTED, REPLY_REJECTED, RATE_LIMITED
+ */
+router.post('/:projectId/business-profile/reviews/:reviewId/reply',
+  auth,
+  replyRateLimiter,
+  replyToBusinessProfileReviewController
 );
 
 /**

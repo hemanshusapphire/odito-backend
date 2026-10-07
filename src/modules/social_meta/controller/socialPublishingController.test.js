@@ -14,6 +14,7 @@ import {
   listPublicationsHandler, createPublicationHandler, getPublicationHandler, publishPublicationHandler,
   deletePublicationHandler,
 } from './socialPublishingController.js';
+import '../testSupport/stubPermalinkLookup.js';
 
 let mongoAvailable = false;
 
@@ -182,7 +183,7 @@ describe('socialPublishingController — real MongoDB, project ownership, :publi
 
       // A real due-publication tick, run immediately after creation, must
       // NOT touch this post — it is 7 minutes away from being due.
-      const summary = await executeDuePublications();
+      const summary = await executeDuePublications({ projectId: project._id });
       assert.equal(summary.results.some((r) => r.id === publicationId), false, 'a not-yet-due post must not appear in this tick\'s results at all');
       assert.equal(adapterCalled, false, 'the adapter must still never have been called after a due-publication tick, since this post is not due');
 

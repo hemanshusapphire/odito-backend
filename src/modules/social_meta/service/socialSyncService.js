@@ -11,6 +11,7 @@ import instagramMediaService from './instagramMediaService.js';
 import { mapFacebookPost, mapInstagramMedia } from './socialPostMapper.js';
 import { getActiveFacebookAccount, getActiveInstagramAccount } from './facebookAccountService.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
+import { markAccountExpired } from './metaTokenService.js';
 
 /**
  * SocialSyncService — orchestration for the Feeds page: for every
@@ -69,14 +70,16 @@ async function upsertPost(projectId, mapped) {
   );
 }
 
-/** A confirmed 401/403 from Meta marks the connection as needing reauthorization; any other failure is left for the next sync attempt, never crashing this one. */
+/**
+ * A Meta-confirmed dead token (code 190 family, or a bare 401/403 — see
+ * metaErrorClassifier.isAuthenticationFailure) marks the connection as
+ * needing reauthorization; any other failure is left for the next sync
+ * attempt, never crashing this one. Goes through metaTokenService so the
+ * linked Instagram/Facebook rows sharing the same token are expired too.
+ */
 async function markReauthIfTokenInvalid(account, errorCode) {
   if (!TOKEN_INVALID_CODES.has(errorCode)) return;
-  // Reuses the SocialAccount STATUSES enum's already-defined 'expired'
-  // value (previously unused) as "needs reauthorization" — a real, Meta-
-  // confirmed signal, not a guess, and requires no schema/enum change.
-  account.status = 'expired';
-  await account.save();
+  await markAccountExpired(account);
 }
 
 async function syncFacebookAccount(account) {

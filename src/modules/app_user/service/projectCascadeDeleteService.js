@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { unlink } from 'fs/promises';
 import path from 'path';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
+import mediaStorageService from '../../social_meta/service/media/mediaStorageService.js';
 
 const SERVICE = 'ProjectCascadeDelete';
 
@@ -84,6 +85,21 @@ const CASCADE_REGISTRY = [
   { category: 'integrations', collection: 'google_ads_ads', field: 'project_id' },
   { category: 'integrations', collection: 'google_ads_conversion_actions', field: 'project_id' },
   { category: 'integrations', collection: 'google_ads_budget_alerts', field: 'project_id' },
+
+  // 8c. Social Media AI — user-entered business profile and generated AI strategies.
+  // Only the collections added by those two features are registered here; the other
+  // social_meta collections (accounts, publications, ...) are deliberately NOT
+  // changed by this entry.
+  { category: 'social', collection: 'socialbusinessprofiles', field: 'project_id' },
+  { category: 'social', collection: 'social_ai_strategies', field: 'project_id' },
+  { category: 'social', collection: 'social_content_generations', field: 'project_id' },
+  { category: 'social', collection: 'social_design_generations', field: 'project_id' },
+  // Product Catalog (SocialProduct). The files its images point at are removed by purgeProjectCatalogMedia() BEFORE this
+  // registry runs (it needs the documents to know which files exist); services are embedded in socialbusinessprofiles.
+  { category: 'social', collection: 'social_products', field: 'project_id' },
+  // Content Calendar: the run records and their planned items (planning metadata only; no files).
+  { category: 'social', collection: 'social_content_calendars', field: 'project_id' },
+  { category: 'social', collection: 'social_content_calendar_items', field: 'project_id' },
 
   // 9. Jobs (8 = screenshot metadata, handled separately below — it needs
   // file cleanup before its documents can be deleted)
@@ -220,6 +236,37 @@ async function purgeProjectVideos(projectId, projectIdObj) {
 }
 
 /**
+ * Part 2c — catalog media cleanup. Product images and the user's brand logo are files in the shared social media
+ * storage (storage/social_media/<projectId>/); their documents only hold a reference. This reads the storage keys
+ * and unlinks the files (ENOENT-safe, and only keys that belong to THIS project are accepted by deleteByKey) so a
+ * purged project leaves no catalog file behind. The documents themselves are removed by the registry loop, which
+ * must run AFTER this. Post media (SocialPublication) is deliberately not touched here.
+ */
+async function purgeProjectCatalogMedia(projectId, projectIdObj) {
+  const db = getDb();
+  const keys = [];
+  try {
+    const products = await db.collection('social_products').find({ project_id: projectIdObj }, { projection: { 'images.storageKey': 1 } }).toArray();
+    for (const doc of products) for (const img of doc.images || []) if (img?.storageKey) keys.push(img.storageKey);
+    const profiles = await db.collection('socialbusinessprofiles').find({ project_id: projectIdObj }, { projection: { 'brand.logo.storageKey': 1 } }).toArray();
+    for (const doc of profiles) if (doc.brand?.logo?.storageKey) keys.push(doc.brand.logo.storageKey);
+  } catch (error) {
+    LoggerUtil.error(`${SERVICE}: failed to read catalog media references`, error, { projectId });
+  }
+
+  let filesDeleted = 0;
+  let filesMissing = 0;
+  for (const key of keys) {
+    // deleteByKey never throws; false = already gone, malformed, or not this project's file
+    if (await mediaStorageService.deleteByKey(key, { projectId })) filesDeleted += 1;
+    else filesMissing += 1;
+  }
+  const counts = { filesDeleted, filesMissing };
+  LoggerUtil.info(`${SERVICE}: catalog media cleanup complete`, { projectId, counts });
+  return counts;
+}
+
+/**
  * The single source of truth for permanently deleting a project — called by
  * both the manual permanent-delete endpoint and the daily purge scheduler.
  *
@@ -238,7 +285,7 @@ async function purgeProjectVideos(projectId, projectIdObj) {
  * is a caller bug, not a partial-failure case.
  *
  * @param {string} projectId
- * @returns {Promise<{projectId:string, durationMs:number, collectionCounts:object, screenshotCounts:object, videoCounts:object, failures:object[], projectDeleted:boolean}>}
+ * @returns {Promise<{projectId:string, durationMs:number, collectionCounts:object, screenshotCounts:object, videoCounts:object, catalogMediaCounts:object, failures:object[], projectDeleted:boolean}>}
  */
 export async function deleteProjectCascade(projectId) {
   const projectIdObj = new mongoose.Types.ObjectId(projectId);
@@ -249,6 +296,9 @@ export async function deleteProjectCascade(projectId) {
 
   const collectionCounts = {};
   const failures = [];
+
+  // 0. Catalog media files first: they are found through the product / profile documents the registry deletes below.
+  const catalogMediaCounts = await purgeProjectCatalogMedia(projectId, projectIdObj);
 
   // 1–7, 9: registry-driven collections (screenshot metadata, category 8,
   // is handled by purgeProjectScreenshots below since it needs file I/O
@@ -285,6 +335,7 @@ export async function deleteProjectCascade(projectId) {
     collectionCounts,
     screenshotCounts,
     videoCounts,
+    catalogMediaCounts,
     failures,
     projectDeleted,
   };
@@ -295,6 +346,7 @@ export async function deleteProjectCascade(projectId) {
     collectionCounts,
     screenshotCounts,
     videoCounts,
+    catalogMediaCounts,
     failureCount: failures.length,
     projectDeleted,
   });

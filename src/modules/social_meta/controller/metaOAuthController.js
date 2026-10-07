@@ -1,5 +1,7 @@
 import { signOAuthState, verifyOAuthState } from '../../../utils/oauthState.js';
-import { buildAuthorizationUrl, exchangeCodeForToken, fetchGrantedScopes } from '../service/metaOAuthService.js';
+import { buildAuthorizationUrl, exchangeCodeForToken, exchangeForLongLivedToken, fetchGrantedScopes } from '../service/metaOAuthService.js';
+import { inspectToken } from '../service/metaTokenService.js';
+import { getFrontendUrl } from '../../../config/env.js';
 import { getUserPages } from '../service/metaPageService.js';
 import { discoverInstagramForPage } from '../service/metaInstagramService.js';
 import { persistDiscoveredFacebookPages, enrichPagesWithConnectionState } from '../service/facebookAccountService.js';
@@ -42,18 +44,36 @@ const STATE_TTL_SECONDS = 10 * 60; // must match oauthState.js's STATE_TOKEN_TTL
 const RETURN_TARGETS = {
   social: '/app/social',
   profile: '/app/settings/profile',
+  // Social Media AI module's Connect Accounts screen — it runs the same
+  // Meta OAuth flow and then opens the Page selector there.
+  'social-media': '/app/social-media/connect-accounts',
 };
 const DEFAULT_RETURN_PATH = '/app/social';
 
-const FRONTEND_URL = process.env.CORS_ORIGIN || 'http://localhost:3000';
 
 function metaRedirectUri() {
   return process.env.META_REDIRECT_URI;
 }
 
+/**
+ * The frontend origin is resolved PER CALL via config/env.js's
+ * getFrontendUrl() — never captured at import time. A module-level
+ * `process.env.CORS_ORIGIN` here used to be evaluated before dotenv ran, so
+ * with env supplied by .env every post-OAuth redirect went to
+ * http://localhost:3000. In production a missing CORS_ORIGIN throws (no
+ * silent localhost fallback), which this turns into a 500 rather than
+ * redirecting a real user to localhost.
+ */
 function redirectToSocialPage(res, { connected, error, returnTo } = {}) {
+  let frontendUrl;
+  try {
+    frontendUrl = getFrontendUrl();
+  } catch (configError) {
+    LoggerUtil.error('[META_OAUTH] Frontend URL is not configured', { message: configError.message }, {});
+    return res.status(500).send('Server configuration error: the frontend URL is not configured.');
+  }
   const path = RETURN_TARGETS[returnTo] || DEFAULT_RETURN_PATH;
-  const url = new URL(path, FRONTEND_URL);
+  const url = new URL(path, frontendUrl);
   if (connected) url.searchParams.set('meta_connected', '1');
   if (error) url.searchParams.set('meta_error', error);
   return res.redirect(url.toString());
@@ -216,6 +236,19 @@ export async function handleMetaCallback(req, res) {
       return redirectToSocialPage(res, { error: 'connection_failed', returnTo });
     }
 
+    // Trade the short-lived (~1–2h) user token for a long-lived (~60d) one
+    // BEFORE anything is discovered or persisted: Page tokens fetched later
+    // with a long-lived user token don't expire, while ones fetched with a
+    // short-lived token do — which would break any post scheduled further
+    // out than an hour or two. A failed exchange fails the whole connection
+    // (never silently continues with the short-lived token).
+    const longLived = await exchangeForLongLivedToken(exchangeResult.data.access_token);
+    if (!longLived.success) {
+      LoggerUtil.service('MetaOAuth', 'callback', 'long_lived_exchange_failed', { projectId });
+      return redirectToSocialPage(res, { error: 'connection_failed', returnTo });
+    }
+    const userAccessToken = longLived.data.access_token;
+
     // The exchange succeeded — hold the USER access token server-side only
     // (Section 2: never the redirect URL, frontend JSON, or React state)
     // until the user finishes Page selection. Upserting on the
@@ -225,7 +258,7 @@ export async function handleMetaCallback(req, res) {
     // deliberately — a fresh token may carry different permissions than
     // whatever was cached before, so Page List must re-discover rather
     // than trust an old cache.
-    const expiresInSeconds = Number(exchangeResult.data?.expires_in);
+    const expiresInSeconds = Number(longLived.data?.expires_in);
     const tokenExpiresAt = Number.isFinite(expiresInSeconds) && expiresInSeconds > 0
       ? new Date(Date.now() + expiresInSeconds * 1000)
       : null;
@@ -236,7 +269,7 @@ export async function handleMetaCallback(req, res) {
     // comment). Falls back to an empty array on failure, never to
     // META_OAUTH_SCOPES — an empty/partial grant must never be silently
     // treated as a full one.
-    const grantedScopes = await fetchGrantedScopes(exchangeResult.data.access_token);
+    const grantedScopes = await fetchGrantedScopes(userAccessToken);
 
     await PendingMetaConnection.findOneAndUpdate(
       { user_id: userId, project_id: projectId },
@@ -244,7 +277,7 @@ export async function handleMetaCallback(req, res) {
         $set: {
           user_id: userId,
           project_id: projectId,
-          userAccessToken: exchangeResult.data.access_token,
+          userAccessToken,
           tokenExpiresAt,
           scopes: grantedScopes,
           pages: [],
@@ -381,6 +414,21 @@ export async function selectMetaPage(req, res) {
       );
     }
 
+    // Ask Meta (debug_token) about the Page token we're about to store: this
+    // is where the REAL expiry is learned (a Page token derived from a
+    // long-lived user token reports expires_at 0 = never) and where a token
+    // Meta already considers dead is refused instead of being persisted as
+    // "connected". If the check itself can't complete (Meta unreachable) the
+    // connection still proceeds — an outage must not block connecting — and
+    // lastVerifiedAt simply stays null until a later verification.
+    const inspection = await inspectToken(pageAccessToken);
+    if (inspection.success && !inspection.valid) {
+      LoggerUtil.service('MetaPageSelect', 'select', 'page_token_invalid', { projectId, pageId, reason: inspection.reason });
+      return res.status(502).json(
+        ResponseUtil.error('Meta did not provide valid access for that Page.', 502, { code: 'META_PAGE_ACCESS_DENIED' }),
+      );
+    }
+
     // Switch Account feature: persist EVERY Page this OAuth grant
     // discovered (not just the one clicked) — the others become instantly
     // switchable later without a second OAuth round-trip. The clicked
@@ -393,6 +441,7 @@ export async function selectMetaPage(req, res) {
       projectId,
       pages: pending.pages,
       selectedPageId: selectedPage.id,
+      inspection: inspection.success ? inspection : null,
       // The scopes ACTUALLY granted for this connection (fetched from
       // Meta at callback time — see handleMetaCallback), never the
       // requested META_OAUTH_SCOPES list.

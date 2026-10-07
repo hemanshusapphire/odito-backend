@@ -7,6 +7,7 @@
 // cover) for a fake token.
 import metaApiService from './metaApiService.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
+import { isAuthenticationFailure } from './metaErrorClassifier.js';
 
 /**
  * FacebookPageDataService — the Graph-API-only layer for a connected
@@ -166,7 +167,7 @@ function normalizeFailure(result, operation) {
   // FACEBOOK_DATA_FETCH_FAILED code, hiding the actual, actionable Meta
   // error underneath it.
   LoggerUtil.service('FacebookData', operation, 'failed', { status: result.status, metaCode: metaError?.code, metaType: metaError?.type });
-  if (result.status === 401 || result.status === 403) {
+  if (isAuthenticationFailure(result)) {
     return { success: false, error: { code: 'FACEBOOK_TOKEN_INVALID', message: 'Meta denied access to this Page' } };
   }
   // Meta's own request-complexity limit — confirmed live against a real
@@ -186,7 +187,7 @@ function normalizeFailure(result, operation) {
 
 function normalizeInsightsFailure(result) {
   LoggerUtil.service('FacebookData', 'get_page_insights', 'failed', { status: result.status });
-  if (result.status === 401 || result.status === 403) {
+  if (isAuthenticationFailure(result)) {
     return { success: false, metrics: {}, error: { code: 'FACEBOOK_TOKEN_INVALID', message: 'Meta denied access to Page insights' } };
   }
   // Meta returns 400 for both "unknown metric for this API version" and

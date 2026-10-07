@@ -13,6 +13,7 @@ import SocialPublication from '../../model/SocialPublication.js';
 import adapters from '../platformAdapters/index.js';
 import { importValidatedBatch } from './bulkImportExecutor.js';
 import { BULK_IMPORT_EVENTS } from './bulkImportEvents.js';
+import '../../testSupport/stubPermalinkLookup.js';
 
 /**
  * Bulk Upload — Phase 5. Executor real-time events + crash / claim-loss /

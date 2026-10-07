@@ -1,6 +1,8 @@
 import metaApiService from '../metaApiService.js';
 import { isPubliclyReachableUrl } from '../media/mediaStorageService.js';
 import { LoggerUtil } from '../../../../utils/LoggerUtil.js';
+import { classifyMetaFailure, isAuthenticationFailure } from '../metaErrorClassifier.js';
+import { getPublishConfig } from '../socialPublishConfig.js';
 
 /**
  * FacebookAdapter — the ONLY place that turns a SocialPublication into a
@@ -38,6 +40,7 @@ export async function publish({ account, content, media }) {
       params: { message: content.trim() },
       accessToken: pageAccessToken,
       context: 'facebook_publish_post',
+      timeoutMs: getPublishConfig().publishTimeoutMs,
     });
     return finalizeResult(result, ['id']);
   }
@@ -59,6 +62,7 @@ export async function publish({ account, content, media }) {
       params: { file_url: item.url, description: content || '' },
       accessToken: pageAccessToken,
       context: 'facebook_publish_video',
+      timeoutMs: getPublishConfig().publishTimeoutMs,
     });
     return finalizeResult(result, ['id']);
   }
@@ -74,6 +78,7 @@ export async function publish({ account, content, media }) {
     params: { url: item.url, caption: content || '', published: true },
     accessToken: pageAccessToken,
     context: 'facebook_publish_photo',
+    timeoutMs: getPublishConfig().publishTimeoutMs,
   });
   return finalizeResult(result, ['post_id', 'id']);
 }
@@ -92,7 +97,10 @@ function finalizeResult(result, idKeys) {
   }
   if (!externalPostId) {
     LoggerUtil.service('FacebookAdapter', 'publish', 'malformed_response', {});
-    return { success: false, externalPostId: null, error: { code: 'FACEBOOK_PUBLISH_FAILED', message: 'Meta accepted the request but returned no post ID.' } };
+    // Meta said "OK" but gave no id: the post may well exist — an UNKNOWN
+    // outcome, not a definite failure, so it must be reconciled before any
+    // retry rather than blindly re-sent.
+    return { success: false, externalPostId: null, error: { code: 'PUBLISH_OUTCOME_UNKNOWN', message: 'Meta accepted the request but returned no post ID, so Odito cannot confirm whether it was published.', category: 'UNKNOWN_OUTCOME', retryable: true, outcome: 'unknown', accountAction: 'none', requiresReconnect: false } };
   }
 
   LoggerUtil.service('FacebookAdapter', 'publish', 'completed', {});
@@ -145,54 +153,145 @@ export async function remove({ account, externalPostId }) {
 }
 
 function normalizeDeleteFailure(result) {
-  LoggerUtil.service('FacebookAdapter', 'delete', 'failed', { status: result.status });
+  const c = classifyMetaFailure(result, { platform: 'facebook' });
+  LoggerUtil.service('FacebookAdapter', 'delete', 'failed', { status: result.status, category: c.category, code: c.code });
 
-  const metaError = result.data?.error;
-  if (metaError?.type === 'OAuthException' && /permission/i.test(metaError.message || '')) {
+  if (c.code === 'FACEBOOK_PERMISSION_MISSING') {
     return { code: 'FACEBOOK_PERMISSION_MISSING', message: 'This Facebook Page is connected but missing posting permission — reconnect it, then try deleting again. The post was NOT deleted.' };
   }
-  if (result.status === 401 || result.status === 403) {
+  if (c.code === 'FACEBOOK_TOKEN_INVALID') {
     return { code: 'FACEBOOK_TOKEN_INVALID', message: 'Meta denied this request — the Page connection may need to be reconnected. The post was NOT deleted.' };
   }
-  if (result.status === 429) {
+  if (c.code === 'FACEBOOK_RATE_LIMITED') {
     return { code: 'FACEBOOK_RATE_LIMITED', message: 'Meta is rate-limiting requests for this Page right now. Try again shortly. The post was NOT deleted.' };
   }
   return { code: 'FACEBOOK_DELETE_FAILED', message: 'Meta refused to delete this post. The post still exists on Facebook and the Odito record was NOT deleted.' };
 }
 
+/**
+ * Turns a failed publish call into the adapter's error shape. All
+ * classification lives in metaErrorClassifier.js; this only attaches the
+ * result to the code/message contract the publishing service and UI already
+ * consume. Every Facebook publish call (/feed, /photos, /videos) is the
+ * FINAL, post-creating step, so a lost response there is an UNKNOWN outcome
+ * (outcome:'unknown'), never a plain failure.
+ */
 function normalizeFailure(result) {
-  LoggerUtil.service('FacebookAdapter', 'publish', 'failed', { status: result.status });
-
-  // Live-verified against the real Graph API: a Page token missing
-  // pages_manage_posts is rejected as OAuthException code 200 with a 403
-  // on /feed and /photos, but as OAuthException code 100 ("No permission
-  // to publish the video") with a 400 on /videos — the SAME underlying
-  // cause, two different HTTP statuses. Classifying by Meta's own
-  // type/message (not just the HTTP status) catches both with one clear,
-  // actionable message, instead of "reconnect" (true but incomplete: the
-  // Page must also be re-authorized to actually grant posting permission
-  // this time) or, worse, the generic fallback below.
-  const metaError = result.data?.error;
-  if (metaError?.type === 'OAuthException' && /permission/i.test(metaError.message || '')) {
-    return { code: 'FACEBOOK_PERMISSION_MISSING', message: 'This Facebook Page is connected but missing posting permission — disconnect and reconnect it, making sure to approve posting permission when Facebook asks.' };
-  }
-  // Not yet live-confirmed for Facebook specifically (Instagram's
-  // equivalent — OAuthException code 9004 — was confirmed live; see
-  // instagramAdapter.js's normalizeFailure), but /photos and /videos use
-  // the identical URL-fetch mechanism, so the same failure family is
-  // expected here. isPubliclyReachableUrl() above already catches the
-  // localhost/private-URL case before Meta is ever called; this only
-  // fires for a URL that WAS public but that Meta still rejected.
-  if (metaError?.type === 'OAuthException' && /media type|could not process|invalid image|invalid video/i.test(metaError.message || '')) {
-    return { code: 'FACEBOOK_MEDIA_INVALID', message: 'Facebook could not process this media — the file may be corrupt, in an unsupported format, or the URL may not be reachable from Facebook.' };
-  }
-  if (result.status === 401 || result.status === 403) {
-    return { code: 'FACEBOOK_TOKEN_INVALID', message: 'Meta denied this request — the Page connection may need to be reconnected.' };
-  }
-  if (result.status === 429) {
-    return { code: 'FACEBOOK_RATE_LIMITED', message: 'Meta is rate-limiting requests for this Page right now. Try again shortly.' };
-  }
-  return { code: 'FACEBOOK_PUBLISH_FAILED', message: 'Meta rejected this post.' };
+  const c = classifyMetaFailure(result, { platform: 'facebook', finalPublishStep: true });
+  LoggerUtil.service('FacebookAdapter', 'publish', 'failed', { status: result.status, category: c.category, code: c.code, outcome: c.outcome });
+  return toAdapterError(c);
 }
 
-export default { publish, remove };
+function toAdapterError(c) {
+  return {
+    code: c.code,
+    message: c.message,
+    category: c.category,
+    retryable: c.retryable,
+    outcome: c.outcome,
+    accountAction: c.accountAction,
+    requiresReconnect: c.requiresReconnect,
+  };
+}
+
+/**
+ * Looks for a Page post that matches an attempt whose outcome is unknown
+ * (the publish request was sent but no usable answer came back).
+ *
+ * There is no idempotency key for a Graph publish call, so this is
+ * reconciliation by FINGERPRINT: a post on the Page created at/after the
+ * attempt started whose text equals the attempted content. Returns
+ *   { status:'found', externalPostId }     — a matching post exists
+ *   { status:'not_found' }                 — CONFIDENTLY not published: the
+ *        lookup succeeded, covered the attempt window, and the attempt had a
+ *        reliable fingerprint (non-empty text, not a video — a video's
+ *        description does not reliably surface as the post `message`)
+ *   { status:'unknown', reason }           — anything else (empty/unfingerprintable
+ *        content, video, lookup failed, window not covered). The caller must
+ *        NOT re-publish on 'unknown'.
+ * A lookup that fails with a dead-token error is reported via
+ * `authFailure:true` so the caller can expire the account.
+ */
+const RECONCILE_LIMIT = 25;
+const RECONCILE_CLOCK_SKEW_MS = 2 * 60 * 1000;
+
+export async function reconcile({ account, content, media, since, excludeIds = null }) {
+  const text = (content || '').trim();
+  const isVideo = Array.isArray(media) && media.some((m) => m?.type === 'video');
+  if (!text) return { status: 'unknown', reason: 'NO_FINGERPRINT' };
+  if (!(since instanceof Date) || Number.isNaN(since.getTime())) return { status: 'unknown', reason: 'NO_ATTEMPT_TIME' };
+
+  const pageId = account.pageId || account.platformAccountId;
+  const result = await metaApiService.request({
+    method: 'GET',
+    path: `/${pageId}/posts`,
+    params: { fields: 'id,message,created_time', limit: RECONCILE_LIMIT },
+    accessToken: account.accessToken,
+    context: 'facebook_reconcile_posts',
+  });
+  if (!result.success) {
+    return { status: 'unknown', reason: 'LOOKUP_FAILED', authFailure: isAuthenticationFailure(result) };
+  }
+
+  const posts = Array.isArray(result.data?.data) ? result.data.data : [];
+  const earliest = since.getTime() - RECONCILE_CLOCK_SKEW_MS;
+  // excludeIds: posts already recorded against ANOTHER Odito publication must
+  // never be claimed as this attempt's post (two identical posts, one real).
+  const match = posts.find((p) => p?.id && !excludeIds?.has(p.id) && typeof p.message === 'string' && p.message.trim() === text && new Date(p.created_time).getTime() >= earliest);
+  if (match) return { status: 'found', externalPostId: match.id };
+
+  const windowCovered = posts.length < RECONCILE_LIMIT
+    || posts.some((p) => new Date(p.created_time).getTime() < earliest);
+  if (!windowCovered) return { status: 'unknown', reason: 'WINDOW_NOT_COVERED' };
+  if (isVideo) return { status: 'unknown', reason: 'VIDEO_NOT_FINGERPRINTABLE' };
+  return { status: 'not_found' };
+}
+
+/** A Facebook post id looks like "<pageId>_<postId>" (text/feed) or a bare numeric id (photo/video). Anything else is never sent to Graph. */
+const FACEBOOK_POST_ID_RE = /^\d{5,30}(_\d{5,30})?$/;
+const FACEBOOK_HOST_RE = /(^|\.)facebook\.com$/i;
+const PERMALINK_LOOKUP_TIMEOUT_MS = 5_000;
+
+/** The permalink only if it is a plain https facebook.com URL: no credentials, no token parameter, bounded length. */
+export function validateFacebookPermalink(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 500) return null;
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.protocol !== 'https:' || !FACEBOOK_HOST_RE.test(url.hostname)) return null;
+  if (url.username || url.password || url.searchParams.has('access_token')) return null;
+  return url.toString();
+}
+
+/**
+ * Reads the canonical permalink of a post that Odito has ALREADY confirmed as published: one
+ * `GET /{externalPostId}?fields=permalink_url` with the same Page token. Never throws and never reports an error to the
+ * caller as a failure of the publish - the result is { permalink, code }: a validated URL, or null with a SAFE code
+ * (HTTP_<status> | TIMEOUT | NETWORK | NO_PERMALINK | INVALID_PERMALINK | INVALID_POST_ID). Nothing from the Graph response
+ * other than the validated URL is returned or logged here.
+ */
+export async function getPermalink({ account, externalPostId }) {
+  if (typeof externalPostId !== 'string' || !FACEBOOK_POST_ID_RE.test(externalPostId)) return { permalink: null, code: 'INVALID_POST_ID' };
+  let result;
+  try {
+    result = await metaApiService.request({
+      method: 'GET',
+      path: `/${externalPostId}`,
+      params: { fields: 'permalink_url' },
+      accessToken: account.accessToken, // decrypted via the schema's own getter, never accepted as a parameter
+      context: 'facebook_permalink',
+      timeoutMs: PERMALINK_LOOKUP_TIMEOUT_MS,
+    });
+  } catch {
+    return { permalink: null, code: 'NETWORK' };
+  }
+  if (!result || !result.success) {
+    const code = result?.kind === 'http' ? `HTTP_${result.status}` : result?.kind === 'timeout' ? 'TIMEOUT' : 'NETWORK';
+    return { permalink: null, code };
+  }
+  const raw = result.data?.permalink_url;
+  if (raw === undefined || raw === null || raw === '') return { permalink: null, code: 'NO_PERMALINK' };
+  const permalink = validateFacebookPermalink(raw);
+  return permalink ? { permalink, code: null } : { permalink: null, code: 'INVALID_PERMALINK' };
+}
+
+export default { publish, remove, reconcile, getPermalink };

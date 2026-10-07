@@ -69,6 +69,7 @@
     "natural": "^6.10.4",
     "node-cache": "^5.1.2",
     "node-cron": "^4.2.1",
+    "openai": "^7.27.0",
     "papaparse": "^5.7.0",
     "puppeteer": "^21.11.0",
     "puppeteer-cluster": "^0.23.0",

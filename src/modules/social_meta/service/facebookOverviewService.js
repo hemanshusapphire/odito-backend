@@ -9,6 +9,7 @@ import facebookPageDataService from './facebookPageDataService.js';
 import facebookInsightsService from './facebookInsightsService.js';
 import { resolveRange, resolveRangeWindow } from './dateRangeUtil.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
+import { markAccountExpired } from './metaTokenService.js';
 
 /**
  * FacebookOverviewService — orchestration: load the project's ACTIVE
@@ -52,6 +53,10 @@ export async function getFacebookOverview({ projectId, range }) {
   if (!infoResult.success) {
     LoggerUtil.info('FACEBOOK_DATA_FETCH_ERROR', { projectId, pageId, endpoint: 'page_info', errorType: infoResult.error?.code, message: infoResult.error?.message });
     if (infoResult.error?.code === 'FACEBOOK_TOKEN_INVALID') {
+      // Meta confirmed the token is dead (code 190 / 401 / 403): record it,
+      // so the status API reports "reconnect required" instead of leaving
+      // the account 'active' forever.
+      await markAccountExpired(account);
       return { connected: false, reason: 'TOKEN_EXPIRED' };
     }
     return { connected: false, reason: 'FETCH_FAILED' };

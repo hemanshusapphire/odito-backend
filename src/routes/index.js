@@ -48,6 +48,12 @@ import instagramRoutes from '../modules/social_meta/routes/instagramRoutes.js';
 import feedRoutes from '../modules/social_meta/routes/feedRoutes.js';
 import socialPublishingRoutes from '../modules/social_meta/routes/socialPublishingRoutes.js';
 import socialMediaRoutes from '../modules/social_meta/routes/socialMediaRoutes.js';
+import socialBusinessProfileRoutes from '../modules/social_meta/routes/socialBusinessProfileRoutes.js';
+import socialProductRoutes from '../modules/social_meta/routes/socialProductRoutes.js';
+import socialAIStrategyRoutes from '../modules/social_meta/routes/socialAIStrategyRoutes.js';
+import socialContentCalendarRoutes from '../modules/social_meta/routes/socialContentCalendarRoutes.js';
+import socialAIContentRoutes from '../modules/social_meta/routes/socialAIContentRoutes.js';
+import socialAIDesignRoutes from '../modules/social_meta/routes/socialAIDesignRoutes.js';
 const router = express.Router();
 
 router.use('/auth', authRoutes);
@@ -188,5 +194,26 @@ router.use('/social/publishing', socialPublishingRoutes);
 // Media upload for social posts (image/video -> a public HTTPS URL usable
 // by the Facebook/Instagram Graph API adapters) — see mediaStorageService.js.
 router.use('/social/media', socialMediaRoutes);
+
+// Social Media AI business profile: the user-entered half (SocialBusinessProfile) layered on top of the
+// existing GBP / project data by socialBusinessProfileResolver.js. No second copy of any Google data.
+router.use('/social/business-profile', socialBusinessProfileRoutes);
+
+// Social Media AI product catalog: user-entered, project-scoped products with images (SocialProduct). Part of the
+// resolved business profile for product businesses. Images reuse the shared media validation + storage.
+router.use('/social/products', socialProductRoutes);
+
+// Social Media AI strategy: generated from the resolved business profile (never from a second copy of it).
+// Read-only; generation is asynchronous and project-scoped. See modules/social_meta/service/aiStrategy/.
+router.use('/social/ai-strategy', socialAIStrategyRoutes);
+
+// Social Media AI content calendar: the PLAN generated from the stored strategy + the user's posts per week, platforms
+// and dates (SocialContentCalendar / SocialContentCalendarItem). Planning only: it never writes captions or publishes.
+router.use('/social/content-calendar', socialContentCalendarRoutes);
+
+// Social Media AI content: ONE AI-written post -> a real SocialPublication draft that enters the existing
+// content approval workflow. Writes from the stored strategy snapshot; never schedules or publishes.
+router.use('/social/ai-content', socialAIContentRoutes);
+router.use('/social/ai-design', socialAIDesignRoutes);
 
 export default router;

@@ -1,3 +1,5 @@
+import axios from 'axios';
+import { getAccessTokenWithoutStatusChange } from './googleApiService.js';
 import {
   GBP_BUSINESS_INFO_API,
   GBP_LEGACY_API,
@@ -204,6 +206,120 @@ export async function fetchAllReviews(googleConnection, accountId, locationId) {
   return { reviews: allReviews, averageRating, totalReviewCount, pagesFetched: page };
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Review reply (WRITE) - PUT accounts/{a}/locations/{l}/reviews/{id}/reply
+// Same v4 host and same `business.manage` scope the reviews READ already uses.
+// Google: "only valid if the specified location is verified"; comment max 4096
+// bytes; the response ReviewReply carries reviewReplyState PENDING|APPROVED|REJECTED.
+// ─────────────────────────────────────────────────────────────────────────
+
+export const MAX_REPLY_BYTES = 4096;
+const REPLY_TIMEOUT_MS = 20000;
+
+/** Safe, user-facing failure. Never carries tokens or raw Google bodies. */
+export class ReviewReplyError extends Error {
+  constructor(code, httpStatus, message, extra = {}) {
+    super(message);
+    this.name = 'ReviewReplyError';
+    this.code = code;
+    this.httpStatus = httpStatus;
+    this.retryable = !!extra.retryable;
+    this.googleStatus = extra.googleStatus ?? null;   // HTTP status Google answered with
+    this.googleCode = extra.googleCode ?? null;       // e.g. PERMISSION_DENIED / INVALID_ARGUMENT
+    this.existingReply = extra.existingReply ?? null; // set for ALREADY_REPLIED
+  }
+}
+
+function classifyReplyError(error) {
+  const googleStatus = error.response?.status;
+  const googleError = error.response?.data?.error;
+  const googleCode = googleError?.status || googleError?.details?.find((d) => d.reason)?.reason || null;
+  const extra = { googleStatus, googleCode };
+
+  if (!error.response) {
+    // timeout / DNS / connection reset - nothing reached Google or no answer came back
+    return new ReviewReplyError('GOOGLE_UNAVAILABLE', 503, 'Could not reach Google. Please try again.', { ...extra, retryable: true });
+  }
+  if (googleStatus === 401) {
+    return new ReviewReplyError('GOOGLE_AUTH_FAILED', 502, 'Your Google Business Profile connection may need to be re-authorized.', extra);
+  }
+  if (googleStatus === 403) {
+    return new ReviewReplyError('GOOGLE_PERMISSION_DENIED', 502, 'Your Google account does not have permission to reply to this review.', extra);
+  }
+  if (googleStatus === 404) {
+    return new ReviewReplyError('REVIEW_NOT_FOUND', 404, 'This review no longer exists on Google.', extra);
+  }
+  if (googleStatus === 429) {
+    return new ReviewReplyError('GOOGLE_RATE_LIMITED', 429, 'Google is limiting requests right now. Please wait a moment and try again.', { ...extra, retryable: true });
+  }
+  if (googleStatus >= 500) {
+    return new ReviewReplyError('GOOGLE_UNAVAILABLE', 503, 'Google is temporarily unavailable. Please try again.', { ...extra, retryable: true });
+  }
+  return new ReviewReplyError('GOOGLE_REJECTED', 422, 'Google rejected this reply.', extra);
+}
+
+function reviewResourcePath(accountId, locationId, reviewId) {
+  const e = encodeURIComponent;
+  return `accounts/${e(accountId)}/locations/${e(locationId)}/reviews/${e(reviewId)}`;
+}
+
+/**
+ * Post a reply to ONE review through the official Google API.
+ *
+ * Steps: token (refresh failure never changes connection status) ->
+ * preflight GET (review exists, belongs to this account/location, has no
+ * reply yet - so a reply made directly on Google is never silently
+ * overwritten) -> PUT reply. Returns Google's own ReviewReply.
+ * Throws ReviewReplyError for every failure.
+ */
+export async function replyToReview(googleConnection, accountId, locationId, reviewId, comment) {
+  let accessToken;
+  try {
+    accessToken = await getAccessTokenWithoutStatusChange(googleConnection);
+  } catch {
+    throw new ReviewReplyError('GOOGLE_AUTH_FAILED', 502, 'Your Google Business Profile connection may need to be re-authorized.');
+  }
+
+  const client = axios.create({
+    baseURL: GBP_LEGACY_API,
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    timeout: REPLY_TIMEOUT_MS
+  });
+  const path = reviewResourcePath(accountId, locationId, reviewId);
+
+  // Preflight (read-only)
+  let existing;
+  try {
+    existing = (await client.get(path)).data;
+  } catch (error) {
+    throw classifyReplyError(error);
+  }
+  if (existing?.reviewReply?.comment) {
+    throw new ReviewReplyError('ALREADY_REPLIED', 409, 'This review already has a reply.', {
+      existingReply: {
+        comment: existing.reviewReply.comment,
+        update_time: existing.reviewReply.updateTime ? new Date(existing.reviewReply.updateTime) : null,
+        state: existing.reviewReply.reviewReplyState || null
+      }
+    });
+  }
+
+  // The write. This is the ONLY place a reply is sent to Google.
+  try {
+    const res = await client.put(`${path}/reply`, { comment });
+    const reply = res.data || {};
+    return {
+      comment: reply.comment ?? comment,
+      update_time: reply.updateTime ? new Date(reply.updateTime) : new Date(),
+      state: reply.reviewReplyState || null,
+      policyViolation: reply.policyViolation || null,
+      googleStatus: res.status
+    };
+  } catch (error) {
+    throw classifyReplyError(error);
+  }
+}
+
 function normalizeReview(googleReview) {
   // googleReview.name = "accounts/{a}/locations/{l}/reviews/{reviewId}" -
   // preserve verbatim (google_resource_name) rather than reconstructing it
@@ -224,8 +340,9 @@ function normalizeReview(googleReview) {
     review_update_time: googleReview.updateTime ? new Date(googleReview.updateTime) : new Date(),
     reply: googleReview.reviewReply ? {
       comment: googleReview.reviewReply.comment || null,
-      update_time: googleReview.reviewReply.updateTime ? new Date(googleReview.reviewReply.updateTime) : null
-    } : { comment: null, update_time: null }
+      update_time: googleReview.reviewReply.updateTime ? new Date(googleReview.reviewReply.updateTime) : null,
+      state: googleReview.reviewReply.reviewReplyState || null
+    } : { comment: null, update_time: null, state: null }
   };
 }
 

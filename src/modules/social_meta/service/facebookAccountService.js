@@ -95,6 +95,29 @@ export async function getActiveInstagramAccount(projectId) {
   });
 }
 
+/**
+ * Expired-connection lookups for the status API. getActiveFacebookAccount /
+ * getActiveInstagramAccount deliberately return only status:'active' rows,
+ * so a connection whose token Meta killed would otherwise look identical to
+ * "never connected" — with no way for the UI to say "reconnect required".
+ *
+ * If the project's explicitly-active Page is the one that expired, THAT is
+ * the connection state to report (not some other still-active Page that
+ * getActiveFacebookAccount's "most recent" fallback would silently promote).
+ */
+export async function getExpiredFacebookAccount(projectId) {
+  const flagged = await SocialAccount.findOne({ project_id: projectId, platform: 'facebook', isActive: true, status: 'expired' });
+  if (flagged) return flagged;
+  const anyActive = await SocialAccount.exists({ project_id: projectId, platform: 'facebook', status: 'active' });
+  if (anyActive) return null;
+  return SocialAccount.findOne({ project_id: projectId, platform: 'facebook', status: 'expired' }).sort({ updatedAt: -1 });
+}
+
+export async function getExpiredInstagramAccount(projectId, pageId) {
+  if (!pageId) return null;
+  return SocialAccount.findOne({ project_id: projectId, platform: 'instagram', pageId, status: 'expired' });
+}
+
 const SWITCH_ERROR = {
   NOT_FOUND: 'SOCIAL_ACCOUNT_NOT_FOUND',
   WRONG_PROJECT: 'SOCIAL_ACCOUNT_NOT_FOUND', // deliberately the same code as NOT_FOUND — see setActiveFacebookAccount's own comment
@@ -161,8 +184,9 @@ export async function setActiveFacebookAccount({ projectId, socialAccountId }) {
  * connection that aren't part of THIS batch are left completely
  * untouched — union, not replace.
  */
-export async function persistDiscoveredFacebookPages({ userId, projectId, pages, selectedPageId, scopes }) {
+export async function persistDiscoveredFacebookPages({ userId, projectId, pages, selectedPageId, scopes, inspection = null }) {
   const savedAccounts = [];
+  const verifiedAt = inspection?.valid ? new Date() : null;
 
   for (const page of pages) {
     if (!page.accessToken) continue; // Meta occasionally omits access_token for a task-restricted Page — nothing safe to persist for it.
@@ -183,7 +207,18 @@ export async function persistDiscoveredFacebookPages({ userId, projectId, pages,
     // schema's `set: encryptToken` transform runs — see the same note at
     // every other Page-token write site in this module.
     account.accessToken = page.accessToken;
-    account.tokenExpiresAt = null;
+    // REAL expiry, not an assumption: only the Page token Meta was actually
+    // asked about (the selected one — see selectMetaPage's debug_token
+    // call) has a verified expiry; null there means Meta reported "never
+    // expires" (typical for a Page token minted from a long-lived user
+    // token). Every OTHER Page in this grant is stored unverified
+    // (lastVerifiedAt null) until a later metaTokenService check, but they
+    // share the user's data-access window, so that date still applies.
+    const isInspected = !!verifiedAt && page.id === selectedPageId;
+    account.tokenExpiresAt = isInspected ? inspection.expiresAt : null;
+    account.dataAccessExpiresAt = inspection?.valid ? inspection.dataAccessExpiresAt : null;
+    account.lastVerifiedAt = isInspected ? verifiedAt : null;
+    account.statusReason = null;
     account.scopes = scopes;
     account.status = 'active';
     account.metadata = { category: page.category || null, picture: page.picture || null };
@@ -199,6 +234,28 @@ export async function persistDiscoveredFacebookPages({ userId, projectId, pages,
       }
     }
     savedAccounts.push(account);
+  }
+
+  // Instagram rows hold a COPY of their Page's token (see
+  // metaInstagramService.js). Without this, reconnecting a Page would leave
+  // its Instagram row holding the old, dead token (and still 'expired').
+  // Assigned through the document so the schema's encrypt setter runs;
+  // 'expired' rows are reactivated, 'revoked' ones (user-disconnected or
+  // unlinked on Meta) are deliberately left for Instagram discovery to decide.
+  for (const fbAccount of savedAccounts) {
+    const igRows = await SocialAccount.find({ project_id: projectId, platform: 'instagram', pageId: fbAccount.platformAccountId });
+    for (const ig of igRows) {
+      ig.accessToken = fbAccount.accessToken;
+      ig.tokenExpiresAt = fbAccount.tokenExpiresAt;
+      ig.dataAccessExpiresAt = fbAccount.dataAccessExpiresAt;
+      ig.lastVerifiedAt = fbAccount.lastVerifiedAt;
+      ig.scopes = fbAccount.scopes;
+      if (ig.status === 'expired') {
+        ig.status = 'active';
+        ig.statusReason = null;
+      }
+      await ig.save();
+    }
   }
 
   const activeResult = await setActiveFacebookAccount({ projectId, socialAccountId: savedAccounts.find((a) => a.platformAccountId === selectedPageId)._id.toString() });
@@ -246,6 +303,6 @@ export async function enrichPagesWithConnectionState({ projectId, pages }) {
 }
 
 export default {
-  listFacebookAccounts, getActiveFacebookAccount, getActiveInstagramAccount, setActiveFacebookAccount,
-  persistDiscoveredFacebookPages, enrichPagesWithConnectionState,
+  listFacebookAccounts, getActiveFacebookAccount, getActiveInstagramAccount, getExpiredFacebookAccount, getExpiredInstagramAccount,
+  setActiveFacebookAccount, persistDiscoveredFacebookPages, enrichPagesWithConnectionState,
 };

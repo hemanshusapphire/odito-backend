@@ -7,6 +7,7 @@ import crypto from 'crypto';
 dotenv.config();
 
 import SeoProject from '../../app_user/model/SeoProject.js';
+import { installDebugTokenStub } from '../testSupport/metaDebugTokenStub.js';
 import SocialAccount, { encryptToken, decryptToken } from '../model/SocialAccount.js';
 import PendingMetaConnection, { PENDING_TTL_MS } from '../model/PendingMetaConnection.js';
 import { getMetaPages, selectMetaPage } from './metaOAuthController.js';
@@ -31,7 +32,11 @@ import { getMetaPages, selectMetaPage } from './metaOAuthController.js';
 
 let mongoAvailable = false;
 
+// selectMetaPage now asks Meta (debug_token) about the Page token it is about
+// to store; stub only that endpoint so these tests stay offline/deterministic.
+let restoreDebugToken = () => {};
 before(async () => {
+  restoreDebugToken = installDebugTokenStub();
   try {
     await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 1500 });
     mongoAvailable = true;
@@ -41,6 +46,7 @@ before(async () => {
 });
 
 after(async () => {
+  restoreDebugToken();
   if (mongoAvailable) await mongoose.connection.close();
 });
 

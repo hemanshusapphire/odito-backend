@@ -5,6 +5,8 @@ import {
   listPublicationsHandler, getPublicationHandler, createPublicationHandler, updatePublicationHandler,
   deletePublicationHandler, schedulePublicationHandler, cancelPublicationHandler, publishPublicationHandler,
   bulkCreatePublicationsHandler,
+  submitContentHandler, approveContentHandler, requestContentChangesHandler, submitDesignHandler, approveDesignHandler,
+  requestDesignChangesHandler, approvalSummaryHandler, getApprovalSettingsHandler, updateApprovalSettingsHandler,
 } from '../controller/socialPublishingController.js';
 import {
   getBulkImportBatchHandler, getBulkImportRowsHandler,
@@ -47,11 +49,24 @@ router.get('/bulk-upload/:batchId/errors', auth, validateProjectAccess(), getBul
 router.get('/bulk-upload/:batchId', auth, validateProjectAccess(), getBulkImportBatchHandler);
 router.get('/bulk-upload/:batchId/rows', auth, validateProjectAccess(), getBulkImportRowsHandler);
 
+// Content approval workflow. The literal `/approvals/summary` and
+// `/approval-settings` paths are declared BEFORE `/:publicationId` so they are
+// never read as a publication id (`/approval-settings` is a single segment).
+router.get('/approvals/summary', auth, validateProjectAccess(), approvalSummaryHandler);
+router.get('/approval-settings', auth, validateProjectAccess(), getApprovalSettingsHandler);
+router.put('/approval-settings', auth, validateProjectAccess(), updateApprovalSettingsHandler);
+
 router.get('/:publicationId', auth, validateProjectAccess(), getPublicationHandler);
 router.patch('/:publicationId', auth, validateProjectAccess(), updatePublicationHandler);
 router.delete('/:publicationId', auth, validateProjectAccess(), deletePublicationHandler);
 router.post('/:publicationId/publish', auth, validateProjectAccess(), publishPublicationHandler);
 router.post('/:publicationId/cancel', auth, validateProjectAccess(), cancelPublicationHandler);
 router.post('/:publicationId/schedule', auth, validateProjectAccess(), schedulePublicationHandler);
+router.post('/:publicationId/content/submit', auth, validateProjectAccess(), submitContentHandler);
+router.post('/:publicationId/content/approve', auth, validateProjectAccess(), approveContentHandler);
+router.post('/:publicationId/content/request-changes', auth, validateProjectAccess(), requestContentChangesHandler);
+router.post('/:publicationId/design/submit', auth, validateProjectAccess(), submitDesignHandler);
+router.post('/:publicationId/design/approve', auth, validateProjectAccess(), approveDesignHandler);
+router.post('/:publicationId/design/request-changes', auth, validateProjectAccess(), requestDesignChangesHandler);
 
 export default router;

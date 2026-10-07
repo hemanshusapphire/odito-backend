@@ -1,5 +1,6 @@
 import SocialAccount, { isPublishingReady } from '../model/SocialAccount.js';
-import { getActiveFacebookAccount, getActiveInstagramAccount } from '../service/facebookAccountService.js';
+import { getActiveFacebookAccount, getActiveInstagramAccount, getExpiredFacebookAccount, getExpiredInstagramAccount } from '../service/facebookAccountService.js';
+import { verifyProjectAccounts } from '../service/metaTokenService.js';
 import { ResponseUtil } from '../../../utils/ResponseUtil.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
 
@@ -20,6 +21,24 @@ import { LoggerUtil } from '../../../utils/LoggerUtil.js';
  * uses, for one consistent contract the frontend only has to understand
  * once. Never returns a token — only safe display fields.
  */
+/**
+ * Safe shape for a connection whose token Meta confirmed is dead. Never a
+ * token; accountName is the same display data the connected shape already
+ * exposes, so the UI can say WHICH account needs reconnecting.
+ */
+function expiredState(account) {
+  return {
+    connected: false,
+    status: 'expired',
+    requiresReconnect: true,
+    reason: 'TOKEN_EXPIRED',
+    accountId: account.platformAccountId,
+    accountName: account.platformAccountName,
+    picture: account.metadata?.picture || account.metadata?.profilePicture || null,
+    lastVerifiedAt: account.lastVerifiedAt || null,
+  };
+}
+
 export async function getSocialAccountsStatus(req, res) {
   const userId = req.user._id.toString();
   const projectId = req.projectId;
@@ -29,7 +48,16 @@ export async function getSocialAccountsStatus(req, res) {
     // connected — see facebookAccountService.js) — never just "the first
     // one found", which would be ambiguous/wrong once more than one Page
     // is connected.
-    const facebookAccount = await getActiveFacebookAccount(projectId);
+    //
+    // An EXPIRED connection (Meta confirmed the token is dead — see
+    // metaTokenService.js) is reported explicitly as
+    // { connected:false, status:'expired', requiresReconnect:true } rather
+    // than being indistinguishable from "never connected", so the UI can
+    // say "reconnect required". If the project's explicitly-active Page is
+    // the expired one, that is what's reported — not another still-active
+    // Page silently promoted by the "most recent" fallback.
+    const expiredFacebook = await getExpiredFacebookAccount(projectId);
+    const facebookAccount = expiredFacebook ? null : await getActiveFacebookAccount(projectId);
     // Instagram is only ever discovered/linked through a specific
     // Facebook Page (see metaInstagramService.js) — "Instagram connected"
     // must mean "connected FOR THE CURRENTLY ACTIVE PAGE", never just
@@ -39,7 +67,10 @@ export async function getSocialAccountsStatus(req, res) {
     // return whichever Instagram row was discovered first, regardless of
     // which Page later became active — see instagramOverviewService.js's
     // header comment for the full root-cause writeup).
-    const instagramAccount = await getActiveInstagramAccount(projectId);
+    const instagramAccount = expiredFacebook ? null : await getActiveInstagramAccount(projectId);
+    const pageIdForExpiredInstagram = expiredFacebook?.platformAccountId
+      || (facebookAccount && !instagramAccount ? facebookAccount.platformAccountId : null);
+    const expiredInstagram = instagramAccount ? null : await getExpiredInstagramAccount(projectId, pageIdForExpiredInstagram);
 
     // Safe diagnostic — proves whether this lookup found the SAME
     // connection META_CONNECTION_PERSISTED logged at select time (same
@@ -59,11 +90,11 @@ export async function getSocialAccountsStatus(req, res) {
       // not Meta's own platformAccountId) — purely additive, existing
       // consumers of this endpoint already ignore fields they don't read.
       facebook: facebookAccount
-        ? { connected: true, socialAccountId: facebookAccount._id.toString(), accountId: facebookAccount.platformAccountId, accountName: facebookAccount.platformAccountName, connectedAt: facebookAccount.createdAt, publishingReady: isPublishingReady(facebookAccount) }
-        : { connected: false },
+        ? { connected: true, status: 'active', requiresReconnect: false, socialAccountId: facebookAccount._id.toString(), accountId: facebookAccount.platformAccountId, accountName: facebookAccount.platformAccountName, connectedAt: facebookAccount.createdAt, lastVerifiedAt: facebookAccount.lastVerifiedAt || null, picture: facebookAccount.metadata?.picture || null, category: facebookAccount.metadata?.category || null, accountType: facebookAccount.accountType, publishingReady: isPublishingReady(facebookAccount) }
+        : (expiredFacebook ? expiredState(expiredFacebook) : { connected: false }),
       instagram: instagramAccount
-        ? { connected: true, socialAccountId: instagramAccount._id.toString(), accountId: instagramAccount.platformAccountId, username: instagramAccount.metadata?.username || instagramAccount.platformAccountName, connectedAt: instagramAccount.createdAt, publishingReady: isPublishingReady(instagramAccount) }
-        : { connected: false, reason: 'NOT_CONNECTED' },
+        ? { connected: true, status: 'active', requiresReconnect: false, socialAccountId: instagramAccount._id.toString(), accountId: instagramAccount.platformAccountId, username: instagramAccount.metadata?.username || instagramAccount.platformAccountName, connectedAt: instagramAccount.createdAt, lastVerifiedAt: instagramAccount.lastVerifiedAt || null, picture: instagramAccount.metadata?.profilePicture || null, accountType: instagramAccount.accountType, publishingReady: isPublishingReady(instagramAccount) }
+        : (expiredInstagram ? expiredState(expiredInstagram) : { connected: false, reason: 'NOT_CONNECTED' }),
     }));
   } catch (error) {
     LoggerUtil.error('[SOCIAL_ACCOUNT_STATUS] Failed to load connection status', { message: error.message }, { projectId });
@@ -127,6 +158,7 @@ export async function disconnectSocialAccount(req, res) {
     const pageIds = [];
     for (const account of accounts) {
       account.status = 'revoked';
+      account.statusReason = 'USER_DISCONNECTED';
       account.isActive = false;
       await account.save();
       if (account.pageId) pageIds.push(account.pageId);
@@ -135,7 +167,7 @@ export async function disconnectSocialAccount(req, res) {
     if (platform === 'facebook' && pageIds.length > 0) {
       await SocialAccount.updateMany(
         { project_id: projectId, platform: 'instagram', pageId: { $in: pageIds }, status: 'active' },
-        { $set: { status: 'revoked' } },
+        { $set: { status: 'revoked', statusReason: 'USER_DISCONNECTED' } },
       );
     }
 
@@ -148,4 +180,22 @@ export async function disconnectSocialAccount(req, res) {
   }
 }
 
-export default { getSocialAccountsStatus, disconnectSocialAccount };
+/**
+ * POST /api/social/accounts/verify — body: { projectId }. Asks Meta
+ * (debug_token, via metaTokenService) whether each active connection's
+ * token is still valid, updates lastVerifiedAt/expiry, and flips any
+ * confirmed-dead connection to 'expired'. Safe health info only; one Meta
+ * call per distinct token (a Page and its linked Instagram share one).
+ */
+export async function verifySocialAccounts(req, res) {
+  const projectId = req.projectId;
+  try {
+    const accounts = await verifyProjectAccounts(projectId);
+    return res.json(ResponseUtil.success({ accounts }));
+  } catch (error) {
+    LoggerUtil.error('[SOCIAL_ACCOUNT_VERIFY] Failed to verify connections', { message: error.message }, { projectId });
+    return res.status(500).json(ResponseUtil.error('Failed to verify social connections', 500, { code: 'SOCIAL_VERIFY_FAILED' }));
+  }
+}
+
+export default { getSocialAccountsStatus, disconnectSocialAccount, verifySocialAccounts };

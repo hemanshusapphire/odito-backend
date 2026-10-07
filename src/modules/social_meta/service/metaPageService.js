@@ -6,6 +6,7 @@
 // none of which a fake token can ever produce from the real Meta API.
 import metaApiService from './metaApiService.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
+import { isAuthenticationFailure } from './metaErrorClassifier.js';
 
 /**
  * MetaPageService — Facebook Page discovery (GET /me/accounts) built on
@@ -104,7 +105,7 @@ export async function getUserPages(userAccessToken) {
 function normalizeFailure(result) {
   LoggerUtil.service('MetaPages', 'get_user_pages', 'failed', { status: result.status });
 
-  if (result.status === 401 || result.status === 403) {
+  if (isAuthenticationFailure(result)) {
     return { success: false, pages: [], error: { code: 'META_PAGE_ACCESS_DENIED', message: 'Meta access token is invalid or expired' } };
   }
   return { success: false, pages: [], error: { code: 'META_PAGES_FETCH_FAILED', message: 'Failed to retrieve Facebook Pages' } };
@@ -157,7 +158,7 @@ export async function getPageInstagramAccount(pageId, pageAccessToken) {
 
 function normalizeInstagramLinkFailure(result) {
   LoggerUtil.service('MetaInstagram', 'get_page_instagram_account', 'failed', { status: result.status });
-  if (result.status === 401 || result.status === 403) {
+  if (isAuthenticationFailure(result)) {
     return { success: false, instagramBusinessAccountId: null, error: { code: 'META_INSTAGRAM_ACCESS_DENIED', message: 'Meta denied access to this Page\'s Instagram account' } };
   }
   return { success: false, instagramBusinessAccountId: null, error: { code: 'META_INSTAGRAM_DISCOVERY_FAILED', message: 'Failed to look up the linked Instagram account' } };
@@ -208,7 +209,7 @@ export async function getInstagramProfile(instagramAccountId, pageAccessToken) {
 
 function normalizeInstagramProfileFailure(result) {
   LoggerUtil.service('MetaInstagram', 'get_instagram_profile', 'failed', { status: result.status });
-  if (result.status === 401 || result.status === 403) {
+  if (isAuthenticationFailure(result)) {
     return { success: false, profile: null, error: { code: 'META_INSTAGRAM_ACCESS_DENIED', message: 'Meta denied access to this Instagram profile' } };
   }
   return { success: false, profile: null, error: { code: 'META_INSTAGRAM_PROFILE_FAILED', message: 'Failed to retrieve the Instagram profile' } };

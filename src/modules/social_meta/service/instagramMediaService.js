@@ -5,6 +5,7 @@
 // never deterministically reproduce a specific response for a fake token.
 import metaApiService from './metaApiService.js';
 import { LoggerUtil } from '../../../utils/LoggerUtil.js';
+import { isAuthenticationFailure } from './metaErrorClassifier.js';
 
 /**
  * InstagramMediaService — the Graph-API-only layer for a connected
@@ -171,7 +172,7 @@ export async function getInstagramInsights(igAccountId, pageAccessToken, { metri
 
 function normalizeFailure(result, operation) {
   LoggerUtil.service('InstagramData', operation, 'failed', { status: result.status });
-  if (result.status === 401 || result.status === 403) {
+  if (isAuthenticationFailure(result)) {
     return { success: false, error: { code: 'INSTAGRAM_TOKEN_INVALID', message: 'Meta denied access to this Instagram account' } };
   }
   return { success: false, error: { code: 'INSTAGRAM_DATA_FETCH_FAILED', message: 'Failed to reach Meta for this Instagram account' } };
@@ -179,7 +180,7 @@ function normalizeFailure(result, operation) {
 
 function normalizeInsightsFailure(result) {
   LoggerUtil.service('InstagramData', 'get_insights', 'failed', { status: result.status });
-  if (result.status === 401 || result.status === 403) {
+  if (isAuthenticationFailure(result)) {
     return { success: false, values: [], totalValue: null, error: { code: 'INSTAGRAM_TOKEN_INVALID', message: 'Meta denied access to this Instagram account' } };
   }
   return { success: false, values: [], totalValue: null, error: { code: 'INSTAGRAM_INSIGHTS_UNAVAILABLE', message: 'Instagram insights are not available for this account' } };

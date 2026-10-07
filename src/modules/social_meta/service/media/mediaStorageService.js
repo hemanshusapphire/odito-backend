@@ -20,22 +20,61 @@ import { isPubliclyReachableUrl } from '../../../../utils/publicUrlCheck.js';
 
 const ROOT_DIR = path.resolve(process.cwd(), 'storage', 'social_media');
 
+const MEDIA_PATH = '/storage/social_media/';
+
+/**
+ * The origin Odito puts in the media URLs it generates. Computed lazily (not at module load) so it always reads the env at
+ * call time — same reasoning as authService.js's getAvatarUrlPrefix().
+ *
+ * Meta's Graph API FETCHES image_url / url / video_url from the public internet, so this origin must be public HTTPS in any
+ * environment that publishes media. PUBLIC_MEDIA_BASE_URL (optional) names a public origin that serves the SAME
+ * `/storage/social_media/<project>/<file>` paths - a reverse proxy, CDN or tunnel in front of this backend's storage - so the
+ * API itself can stay private; when it is not set, BACKEND_URL is used exactly as before. The origin is configuration only:
+ * a client can never supply or influence it.
+ */
+export function publicMediaOrigin() {
+  const configured = (process.env.PUBLIC_MEDIA_BASE_URL || '').trim().replace(/\/+$/, '');
+  return configured || getServiceUrls().backend;
+}
+
 function urlPrefix() {
-  // Computed lazily (not at module load) so it always reads BACKEND_URL
-  // from whatever env state exists at call time — same reasoning as
-  // authService.js's getAvatarUrlPrefix(). This is also what makes a media
-  // URL usable by Meta at all: Meta's Graph API fetches image_url/
-  // video_url from the public internet, so BACKEND_URL must be a real,
-  // publicly reachable HTTPS origin in any environment where a live Meta
-  // publish is expected to work (not the case for a local dev machine —
-  // see this phase's own "manual setup required" note).
-  const { backend } = getServiceUrls();
-  return `${backend}/storage/social_media/`;
+  return `${publicMediaOrigin()}${MEDIA_PATH}`;
+}
+
+/** Every prefix a URL this service issued can carry: today's public origin, and BACKEND_URL (what rows written before PUBLIC_MEDIA_BASE_URL was set carry). */
+function ownedPrefixes() {
+  return [...new Set([urlPrefix(), `${getServiceUrls().backend}${MEDIA_PATH}`])];
 }
 
 /** True only for a URL this service itself wrote — the sole gate before any delete is attempted. */
 export function isOwnedUrl(url) {
-  return typeof url === 'string' && url.startsWith(urlPrefix());
+  return typeof url === 'string' && ownedPrefixes().some((prefix) => url.startsWith(prefix));
+}
+
+const STORED_MEDIA_PATH_RE = /^[a-f0-9]{24}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp|mp4)$/i;
+
+/**
+ * Why a stored-media URL could NOT be handed to Meta, or null when it can. Everything is judged from the URL string and the
+ * server's own configuration - nothing is fetched (no SSRF surface):
+ *   NOT_OWNED     - not a URL this service issued (a client can never put an arbitrary URL on a post)
+ *   WRONG_ORIGIN  - not on the CURRENT public media origin (e.g. a row written under an old / private BACKEND_URL)
+ *   NOT_PUBLIC    - the origin is not public HTTPS (localhost, loopback, private/link-local address, http)
+ *   BAD_PATH      - not exactly <24-hex project id>/<uuid>.<jpg|png|webp|mp4>, no query string or fragment
+ */
+export function publishableMediaProblem(url) {
+  if (!isOwnedUrl(url)) return 'NOT_OWNED';
+  if (!url.startsWith(urlPrefix())) return 'WRONG_ORIGIN';
+  if (!isPubliclyReachableUrl(url)) return 'NOT_PUBLIC';
+  if (!STORED_MEDIA_PATH_RE.test(url.slice(urlPrefix().length))) return 'BAD_PATH';
+  return null;
+}
+
+/** True when the stored file this URL names actually exists under storage/social_media/ (a deleted or never-written file is not publishable). */
+export async function storedMediaExists(url) {
+  if (!isOwnedUrl(url)) return false;
+  const filePath = safeFilePath(url);
+  if (!filePath) return false;
+  try { await fs.access(filePath); return true; } catch { return false; }
 }
 
 // isPubliclyReachableUrl is re-exported from utils/publicUrlCheck.js (the
@@ -54,7 +93,9 @@ export { isPubliclyReachableUrl };
  * from user input.
  */
 function safeFilePath(url) {
-  const rel = url.slice(urlPrefix().length);
+  const prefix = ownedPrefixes().find((p) => url.startsWith(p));
+  if (!prefix) return null;
+  const rel = url.slice(prefix.length);
   const segments = rel.split('/');
   if (segments.length !== 2) return null;
   const [projectSegment, filename] = segments;
@@ -97,4 +138,49 @@ export async function deleteByUrl(url) {
   }
 }
 
-export default { upload, deleteByUrl, isOwnedUrl, isPubliclyReachableUrl };
+const STORAGE_KEY_RE = /^[a-f0-9]{24}\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp|mp4)$/i;
+
+/**
+ * Best-effort delete by the relative "<projectId>/<uuid>.<ext>" key upload() hands back (callers that persist the
+ * key use this instead of the URL, so a file is still removable after PUBLIC_MEDIA_BASE_URL / BACKEND_URL changed).
+ * The key must match exactly the shape upload() produces — anything else (a path, "..", another project's
+ * directory layout) is refused — and when `projectId` is given the key must belong to that project.
+ * Never throws; ENOENT is ignored.
+ */
+export async function deleteByKey(storageKey, { projectId = null } = {}) {
+  if (typeof storageKey !== 'string' || !STORAGE_KEY_RE.test(storageKey)) return false;
+  const [projectSegment, filename] = storageKey.split('/');
+  if (projectId && String(projectId).toLowerCase() !== projectSegment.toLowerCase()) return false;
+  try {
+    await fs.unlink(path.join(ROOT_DIR, projectSegment, filename));
+    return true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error('[MEDIA_STORAGE] Failed to delete media file:', error.message);
+    return false;
+  }
+}
+
+/** Largest stored file read back for processing (a logo or a product photo): bigger files are refused, never loaded. */
+const MAX_READ_BYTES = 12 * 1024 * 1024;
+
+/**
+ * Reads a stored file back by the relative "<projectId>/<uuid>.<ext>" key upload() produced - for the AI design step, which
+ * needs the REAL logo / product photo bytes. The key must match that exact shape and MUST belong to the given project (another
+ * project's file is never readable), and nothing is returned for a missing or oversized file. Never throws; null on any problem.
+ */
+export async function readByKey(storageKey, { projectId }) {
+  if (typeof storageKey !== 'string' || !STORAGE_KEY_RE.test(storageKey) || !projectId) return null;
+  const [projectSegment, filename] = storageKey.split('/');
+  if (String(projectId).toLowerCase() !== projectSegment.toLowerCase()) return null;
+  try {
+    const file = path.join(ROOT_DIR, projectSegment, filename);
+    const stat = await fs.stat(file);
+    if (!stat.isFile() || stat.size > MAX_READ_BYTES) return null;
+    return await fs.readFile(file);
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error('[MEDIA_STORAGE] Failed to read media file:', error.message);
+    return null;
+  }
+}
+
+export default { upload, deleteByUrl, deleteByKey, readByKey, isOwnedUrl, isPubliclyReachableUrl, publicMediaOrigin, publishableMediaProblem, storedMediaExists };

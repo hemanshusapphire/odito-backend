@@ -244,8 +244,47 @@ export async function getValidAccessToken(googleConnection) {
 }
 
 /**
+ * Same token lookup/refresh as getValidAccessToken, but a failed refresh does
+ * NOT mark the connection expired - it just throws an error tagged
+ * `code = 'GOOGLE_TOKEN_REFRESH_FAILED'`.
+ *
+ * For callers whose failure must not flip shared connection state (the review
+ * reply write: a refresh blip, timeout or Google outage shouldn't disconnect
+ * the whole Business Profile). getValidAccessToken itself is unchanged.
+ * Successful refreshes are still persisted, exactly as before.
+ *
+ * @param {Object} googleConnection - GoogleConnection document
+ * @returns {Promise<string>} - Valid access token
+ */
+export async function getAccessTokenWithoutStatusChange(googleConnection) {
+  if (!googleConnection?.refresh_token || !googleConnection._id) {
+    const err = new Error('GoogleConnection is missing credentials');
+    err.code = 'GOOGLE_TOKEN_REFRESH_FAILED';
+    throw err;
+  }
+
+  if (!isTokenExpired(googleConnection.token_expires_at) && googleConnection.access_token) {
+    return googleConnection.access_token;
+  }
+
+  try {
+    const newTokens = await refreshAccessToken(googleConnection.refresh_token);
+    await updateConnectionTokens(googleConnection._id.toString(), newTokens);
+    return newTokens.access_token;
+  } catch (error) {
+    console.error('[GOOGLE_API] Token refresh failed (connection status left unchanged)', {
+      connectionId: googleConnection._id.toString(),
+      error: error.message
+    });
+    const err = new Error('Failed to obtain a valid Google access token');
+    err.code = 'GOOGLE_TOKEN_REFRESH_FAILED';
+    throw err;
+  }
+}
+
+/**
  * Create OAuth2 client with valid access token
- * 
+ *
  * Utility function for Google API clients.
  * Automatically handles token refresh and client setup.
  * 
@@ -284,6 +323,7 @@ export function isValidConnection(googleConnection) {
 
 export default {
   getValidAccessToken,
+  getAccessTokenWithoutStatusChange,
   createAuthenticatedClient,
   isValidConnection
 };
