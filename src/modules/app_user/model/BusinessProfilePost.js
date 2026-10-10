@@ -141,38 +141,51 @@ businessProfilePostSchema.index(
 businessProfilePostSchema.statics.bulkUpsertPosts = async function(posts, userId, projectId, accountId, locationId, syncedAt) {
   if (!posts || !posts.length) return { upserted: 0, modified: 0 };
 
-  const bulkOps = posts.map(p => ({
-    updateOne: {
-      filter: { project_id: projectId, google_post_id: p.google_post_id },
-      update: {
-        $set: {
-          user_id: userId,
-          business_account_id: accountId,
-          business_location_id: locationId,
-          google_resource_name: p.google_resource_name,
-          language_code: p.language_code || 'en-US',
-          summary: p.summary || '',
-          topic_type: p.topic_type || 'STANDARD',
-          alert_type: p.alert_type || 'ALERT_TYPE_UNSPECIFIED',
-          call_to_action: p.call_to_action || { action_type: 'ACTION_TYPE_UNSPECIFIED', url: null },
-          event: p.event || null,
-          offer: p.offer || null,
-          media: p.media || [],
-          state: p.state || 'LIVE',
-          rejection_reason: p.rejection_reason || null,
-          search_url: p.search_url || null,
-          views_search: typeof p.views_search === 'number' ? p.views_search : 0,
-          actions_call_to_action: typeof p.actions_call_to_action === 'number' ? p.actions_call_to_action : 0,
-          metrics_last_synced_at: p.metrics_last_synced_at || syncedAt,
-          create_time: p.create_time || syncedAt,
-          update_time: p.update_time || syncedAt,
-          last_seen_at: syncedAt,
-          is_deleted: false
-        }
-      },
-      upsert: true
+  const bulkOps = posts.map((p) => {
+    const set = {
+      user_id: userId,
+      business_account_id: accountId,
+      business_location_id: locationId,
+      google_resource_name: p.google_resource_name,
+      language_code: p.language_code || 'en-US',
+      summary: p.summary || '',
+      topic_type: p.topic_type || 'STANDARD',
+      alert_type: p.alert_type || 'ALERT_TYPE_UNSPECIFIED',
+      call_to_action: p.call_to_action || { action_type: 'ACTION_TYPE_UNSPECIFIED', url: null },
+      event: p.event || null,
+      offer: p.offer || null,
+      media: p.media || [],
+      state: p.state || 'LIVE',
+      rejection_reason: p.rejection_reason || null,
+      search_url: p.search_url || null,
+      create_time: p.create_time || syncedAt,
+      update_time: p.update_time || syncedAt,
+      last_seen_at: syncedAt,
+      is_deleted: false
+    };
+
+    // Metrics are written ONLY when Google actually reported them. A sync (or an
+    // edit/create) that carries no metrics must neither wipe real numbers to 0
+    // nor stamp metrics_last_synced_at as if they had been measured; a brand-new
+    // post starts at 0 / "never measured" (metrics_last_synced_at stays null).
+    const hasMetrics = typeof p.views_search === 'number' || typeof p.actions_call_to_action === 'number';
+    const update = { $set: set };
+    if (hasMetrics) {
+      set.views_search = typeof p.views_search === 'number' ? p.views_search : 0;
+      set.actions_call_to_action = typeof p.actions_call_to_action === 'number' ? p.actions_call_to_action : 0;
+      set.metrics_last_synced_at = p.metrics_last_synced_at || syncedAt;
+    } else {
+      update.$setOnInsert = { views_search: 0, actions_call_to_action: 0, metrics_last_synced_at: null };
     }
-  }));
+
+    return {
+      updateOne: {
+        filter: { project_id: projectId, google_post_id: p.google_post_id },
+        update,
+        upsert: true
+      }
+    };
+  });
 
   const result = await this.bulkWrite(bulkOps, { ordered: false });
   return { upserted: result.upsertedCount, modified: result.modifiedCount };
@@ -265,7 +278,9 @@ businessProfilePostSchema.statics.getMetricsSummary = async function(projectId) 
           $sum: { $cond: [{ $eq: ['$state', 'LIVE'] }, 1, 0] }
         },
         totalViews: { $sum: '$views_search' },
-        totalActions: { $sum: '$actions_call_to_action' }
+        totalActions: { $sum: '$actions_call_to_action' },
+        // posts whose views/clicks were actually measured by Google (vs never measured)
+        postsWithMetrics: { $sum: { $cond: [{ $ne: [{ $ifNull: ['$metrics_last_synced_at', null] }, null] }, 1, 0] } }
       }
     }
   ]);
@@ -274,7 +289,8 @@ businessProfilePostSchema.statics.getMetricsSummary = async function(projectId) 
     totalPosts: summary?.totalPosts || 0,
     livePosts: summary?.livePosts || 0,
     totalViews: summary?.totalViews || 0,
-    totalActions: summary?.totalActions || 0
+    totalActions: summary?.totalActions || 0,
+    postsWithMetrics: summary?.postsWithMetrics || 0
   };
 };
 

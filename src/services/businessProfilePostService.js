@@ -157,65 +157,91 @@ export function normalizeGooglePost(item) {
   };
 }
 
-/**
- * Fetch insights/metrics for a batch of local posts from Google.
- * Endpoint: POST accounts/{accountId}/locations/{locationId}/localPosts:reportInsights
- */
-export async function fetchLocalPostInsights(googleConnection, accountId, locationId, localPostNames) {
-  if (!localPostNames || !localPostNames.length) return {};
+// Google caps a reportInsights call at 100 posts and the time range at 18 months.
+const INSIGHTS_BATCH_SIZE = 50;
+const INSIGHTS_WINDOW_DAYS = 540; // ~18 months, the most Google allows
 
-  const insightsMap = {};
-  try {
-    const client = await getAuthenticatedHttpClient(googleConnection, GBP_LEGACY_API);
-
-    // Google allows up to 10 local post names per reportInsights call
-    const batchSize = 10;
-    for (let i = 0; i < localPostNames.length; i += batchSize) {
-      const batch = localPostNames.slice(i, i + batchSize);
-      try {
-        const response = await withRetry(() =>
-          client.post(`accounts/${accountId}/locations/${locationId}/localPosts:reportInsights`, {
-            localPostNames: batch,
-            basicMetric: 'ALL'
-          })
-        );
-
-        const metricsList = response.data?.localPostMetrics || [];
-        for (const postMetric of metricsList) {
-          const name = postMetric.localPostName;
-          const postId = name ? name.split('/').pop() : null;
-          if (!postId) continue;
-
-          let viewsSearch = 0;
-          let actionsCta = 0;
-
-          for (const val of postMetric.metricValues || []) {
-            if (val.metric === 'LOCAL_POST_VIEWS_SEARCH') {
-              viewsSearch = Number(val.totalValue?.value) || 0;
-            } else if (val.metric === 'LOCAL_POST_ACTIONS_CALL_TO_ACTION') {
-              actionsCta = Number(val.totalValue?.value) || 0;
-            }
-          }
-
-          insightsMap[postId] = {
-            views_search: viewsSearch,
-            actions_call_to_action: actionsCta,
-            metrics_last_synced_at: new Date()
-          };
-        }
-      } catch (batchErr) {
-        // Individual batch failing is non-fatal - keep going
-        LoggerUtil.warn('Failed to fetch insights for local posts batch', {
-          batchCount: batch.length,
-          message: batchErr.message
-        });
-      }
+/** The documented ReportLocalPostInsightsRequest body (accounts.locations.localPosts:reportInsights). */
+export function buildInsightsRequest(localPostNames, now = new Date()) {
+  const start = new Date(now.getTime() - INSIGHTS_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  return {
+    localPostNames,
+    basicRequest: {
+      metricRequests: [{ metric: 'ALL', options: ['AGGREGATED_TOTAL'] }],
+      timeRange: { startTime: start.toISOString(), endTime: now.toISOString() }
     }
+  };
+}
+
+/** Safe, credential-free description of a Google failure for logs. */
+function describeGoogleError(error) {
+  return {
+    status: error.response?.status ?? null,
+    googleStatus: error.response?.data?.error?.status ?? null,
+    message: error.response?.data?.error?.message || error.message
+  };
+}
+
+/**
+ * Fetch insights/metrics for local posts from Google.
+ * Endpoint: POST accounts/{accountId}/locations/{locationId}/localPosts:reportInsights
+ *
+ * Returns what was actually measured AND whether anything failed, so a failed
+ * request is never mistaken for "0 views": posts missing from `insights` are
+ * UNKNOWN, not zero.
+ *
+ * @returns {Promise<{ insights: Object, requested: number, received: number, failedBatches: number, totalBatches: number }>}
+ */
+export async function fetchLocalPostInsightsReport(googleConnection, accountId, locationId, localPostNames, now = new Date()) {
+  const names = localPostNames || [];
+  const report = { insights: {}, requested: names.length, received: 0, failedBatches: 0, totalBatches: 0 };
+  if (!names.length) return report;
+
+  let client;
+  try {
+    client = await getAuthenticatedHttpClient(googleConnection, GBP_LEGACY_API);
   } catch (error) {
-    LoggerUtil.warn('Local post insights report failed', { message: error.message });
+    LoggerUtil.warn('Local post insights skipped: could not authenticate with Google', { message: error.message });
+    report.totalBatches = report.failedBatches = Math.ceil(names.length / INSIGHTS_BATCH_SIZE);
+    return report;
   }
 
-  return insightsMap;
+  for (let i = 0; i < names.length; i += INSIGHTS_BATCH_SIZE) {
+    const batch = names.slice(i, i + INSIGHTS_BATCH_SIZE);
+    report.totalBatches += 1;
+    try {
+      const response = await withRetry(() =>
+        client.post(`accounts/${accountId}/locations/${locationId}/localPosts:reportInsights`, buildInsightsRequest(batch, now))
+      );
+
+      for (const postMetric of response.data?.localPostMetrics || []) {
+        const postId = postMetric.localPostName ? postMetric.localPostName.split('/').pop() : null;
+        if (!postId) continue;
+
+        let viewsSearch = 0;
+        let actionsCta = 0;
+        for (const val of postMetric.metricValues || []) {
+          if (val.metric === 'LOCAL_POST_VIEWS_SEARCH') viewsSearch = Number(val.totalValue?.value) || 0;
+          else if (val.metric === 'LOCAL_POST_ACTIONS_CALL_TO_ACTION') actionsCta = Number(val.totalValue?.value) || 0;
+        }
+        report.insights[postId] = {
+          views_search: viewsSearch,
+          actions_call_to_action: actionsCta,
+          metrics_last_synced_at: new Date()
+        };
+        report.received += 1;
+      }
+    } catch (batchErr) {
+      report.failedBatches += 1;
+      LoggerUtil.warn('Failed to fetch insights for local posts batch', { batchCount: batch.length, ...describeGoogleError(batchErr) });
+    }
+  }
+  return report;
+}
+
+/** Back-compatible wrapper: just the per-post metrics map. */
+export async function fetchLocalPostInsights(googleConnection, accountId, locationId, localPostNames) {
+  return (await fetchLocalPostInsightsReport(googleConnection, accountId, locationId, localPostNames)).insights;
 }
 
 /**
@@ -250,10 +276,13 @@ export async function fetchAllPosts(googleConnection, accountId, locationId) {
     }
   } while (pageToken);
 
-  // If posts were fetched, enrich them with insight metrics
+  // Enrich with insight metrics. Posts Google did not report on keep NO metric
+  // fields, so the upsert leaves their stored numbers alone (unknown, not zero).
+  let insightsReport = { requested: 0, received: 0, failedBatches: 0, totalBatches: 0 };
   if (allPosts.length > 0) {
     const resourceNames = allPosts.map(p => p.google_resource_name).filter(Boolean);
-    const insights = await fetchLocalPostInsights(googleConnection, accountId, locationId, resourceNames);
+    const { insights, ...status } = await fetchLocalPostInsightsReport(googleConnection, accountId, locationId, resourceNames);
+    insightsReport = status;
 
     for (const post of allPosts) {
       const metric = insights[post.google_post_id];
@@ -265,7 +294,7 @@ export async function fetchAllPosts(googleConnection, accountId, locationId) {
     }
   }
 
-  return { posts: allPosts };
+  return { posts: allPosts, insights: insightsReport };
 }
 
 /**

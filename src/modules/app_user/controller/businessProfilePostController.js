@@ -434,7 +434,7 @@ export const syncBusinessProfilePostsController = async (req, res) => {
       }, 'Posts capability not available'));
     }
 
-    const { posts } = await fetchAllPosts(googleConnection, accountId, locationId);
+    const { posts, insights } = await fetchAllPosts(googleConnection, accountId, locationId);
     const syncedAt = new Date();
 
     const upsertResult = await BusinessProfilePost.bulkUpsertPosts(posts, userId, projectId, accountId, locationId, syncedAt);
@@ -445,13 +445,22 @@ export const syncBusinessProfilePostsController = async (req, res) => {
       totalFetched: posts.length,
       upserted: upsertResult.upserted,
       modified: upsertResult.modified,
-      staleDeleted: deletedCount
+      staleDeleted: deletedCount,
+      insightsRequested: insights.requested,
+      insightsReceived: insights.received,
+      insightsFailedBatches: insights.failedBatches
     });
+    if (insights.failedBatches > 0) {
+      LoggerUtil.warn('Posts synced but Google views/clicks could not be fetched for some posts', { projectId, ...insights });
+    }
 
     return res.json(ResponseUtil.success({
       postsCapability: 'available',
       postCount: posts.length,
-      syncedAt
+      syncedAt,
+      // false = Google refused some/all views/clicks requests; stored numbers were left untouched
+      metricsSynced: insights.failedBatches === 0,
+      insights
     }, 'Posts sync completed'));
 
   } catch (error) {
