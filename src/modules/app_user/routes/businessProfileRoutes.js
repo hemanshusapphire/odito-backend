@@ -17,6 +17,16 @@ import {
   getBusinessProfileMediaController,
   syncBusinessProfileMediaController
 } from '../controller/businessProfileController.js';
+import {
+  getBusinessProfilePostsController,
+  createBusinessProfilePostController,
+  updateBusinessProfilePostController,
+  deleteBusinessProfilePostController,
+  syncBusinessProfilePostsController,
+  uploadBusinessProfilePostMediaController,
+  deleteBusinessProfilePostMediaController
+} from '../controller/businessProfilePostController.js';
+import { handlePostImageUpload } from '../../../services/businessProfilePostMediaService.js';
 import auth from '../../user/middleware/auth.js';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
@@ -381,6 +391,94 @@ router.get('/:projectId/business-profile/media',
 router.post('/:projectId/business-profile/sync-media',
   auth,
   syncBusinessProfileMediaController
+);
+
+// Abuse/flood protection for Google Local Post mutations
+const postMutationRateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => (req.user?._id ? `u:${String(req.user._id)}` : ipKeyGenerator(req.ip)),
+  handler: (req, res) => res.status(429).json({
+    success: false,
+    code: 'RATE_LIMITED',
+    message: 'Too many post requests in a short time. Please wait a few minutes and try again.'
+  })
+});
+
+/**
+ * GET /projects/:projectId/business-profile/posts
+ *
+ * Paginated, searchable, filtered list of Google Business Profile local posts.
+ */
+router.get('/:projectId/business-profile/posts',
+  auth,
+  getBusinessProfilePostsController
+);
+
+/**
+ * POST /projects/:projectId/business-profile/posts
+ *
+ * Create and publish a new local post on Google Business Profile.
+ */
+router.post('/:projectId/business-profile/posts',
+  auth,
+  postMutationRateLimiter,
+  createBusinessProfilePostController
+);
+
+/**
+ * PATCH /projects/:projectId/business-profile/posts/:postId
+ *
+ * Edit an existing local post on Google Business Profile.
+ */
+router.patch('/:projectId/business-profile/posts/:postId',
+  auth,
+  postMutationRateLimiter,
+  updateBusinessProfilePostController
+);
+
+/**
+ * DELETE /projects/:projectId/business-profile/posts/:postId
+ *
+ * Delete an existing local post on Google Business Profile.
+ */
+router.delete('/:projectId/business-profile/posts/:postId',
+  auth,
+  postMutationRateLimiter,
+  deleteBusinessProfilePostController
+);
+
+/**
+ * POST /projects/:projectId/business-profile/sync-posts
+ *
+ * Standalone posts sync with Google Business Profile.
+ */
+router.post('/:projectId/business-profile/sync-posts',
+  auth,
+  syncBusinessProfilePostsController
+);
+
+/**
+ * POST /projects/:projectId/business-profile/posts/media
+ *
+ * Image upload endpoint for Google Business Profile posts.
+ */
+router.post('/:projectId/business-profile/posts/media',
+  auth,
+  handlePostImageUpload,
+  uploadBusinessProfilePostMediaController
+);
+
+/**
+ * DELETE /projects/:projectId/business-profile/posts/media
+ *
+ * Cleanup unreferenced uploaded post image.
+ */
+router.delete('/:projectId/business-profile/posts/media',
+  auth,
+  deleteBusinessProfilePostMediaController
 );
 
 export default router;

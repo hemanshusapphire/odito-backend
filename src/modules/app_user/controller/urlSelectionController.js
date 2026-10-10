@@ -55,7 +55,22 @@ export const getUrlPool = async (req, res) => {
     }).lean();
 
     if (!urlQualJob) {
-      return res.status(409).json(ResponseUtil.error('URL qualification has not completed for this run yet', 409));
+      // Distinguish "no such job" from "job exists but is still pending/
+      // running/failed" so the 409 is diagnosable from the log alone.
+      const latestJob = await Job.findOne({
+        project_id: projectId,
+        run_id: project.current_run_id,
+        jobType: JOB_TYPES.URL_QUALIFICATION
+      }).sort({ created_at: -1 }).select('_id status').lean();
+      LoggerUtil.warn('URL pool requested but no completed URL_QUALIFICATION job for this run', {
+        projectId: projectId.toString(),
+        runId: project.current_run_id.toString(),
+        latestJobId: latestJob?._id?.toString() ?? null,
+        latestJobStatus: latestJob?.status ?? 'none'
+      });
+      return res.status(409).json(ResponseUtil.error('URL qualification has not completed for this run yet', 409, {
+        job_status: latestJob?.status ?? 'none'
+      }));
     }
 
     const db = mongoose.connection.db;
@@ -66,6 +81,40 @@ export const getUrlPool = async (req, res) => {
       .find({ project_id: projectIdObj, job_id: urlQualJob._id })
       .sort({ probed_at: 1 })
       .toArray();
+
+    // The pool is written by the Python worker straight into Mongo, while the
+    // job's result_data arrives over HTTP — two independent paths. If the job
+    // says it discovered URLs but this read finds none, the pool is not
+    // visible to this process (e.g. the Python worker and this backend are
+    // pointed at different Mongo databases). That must not be rendered as a
+    // successful "0 of 0": fail loudly and log which lookup came back empty.
+    const reported = urlQualJob.result_data?.discoveredUrls ?? urlQualJob.result_data?.candidateUrls ?? 0;
+    if (poolDocs.length === 0 && reported > 0) {
+      const pool = db.collection('seo_audit_url_pool');
+      const [byProject, byJobIdAsString] = await Promise.all([
+        pool.countDocuments({ project_id: projectIdObj }),
+        pool.countDocuments({ job_id: urlQualJob._id.toString() })
+      ]);
+      LoggerUtil.error('URL pool is empty although URL_QUALIFICATION reported discovered URLs', new Error('URL_POOL_UNAVAILABLE'), {
+        projectId: projectId.toString(),
+        runId: project.current_run_id.toString(),
+        jobId: urlQualJob._id.toString(),
+        connectedDb: mongoose.connection.name,
+        reported: {
+          discoveredUrls: urlQualJob.result_data?.discoveredUrls ?? null,
+          qualifiedUrls: urlQualJob.result_data?.qualifiedUrls ?? null,
+          canonicalCount: urlQualJob.result_data?.canonicalCount ?? null
+        },
+        poolCounts: { byProjectAndJobId: 0, byProjectOnly: byProject, byJobIdAsString },
+        hint: byProject === 0
+          ? 'No pool docs for this project in the connected database; check that the Python worker (MONGODB_URI) and this backend (MONGO_URI) use the same database name'
+          : 'Pool docs exist for this project under a different job_id'
+      });
+      return res.status(503).json(ResponseUtil.error(
+        'The qualified URL list for this run is not available. Please try again shortly or contact support if it persists.', 503,
+        { code: 'URL_POOL_UNAVAILABLE', reported_discovered: reported }
+      ));
+    }
 
     // De-dupe by url, keeping the LATEST probed_at (the starvation-recovery
     // retry pass can insert a second record for the same URL with
@@ -128,6 +177,17 @@ export const getUrlPool = async (req, res) => {
       total_qualified: dedupedPool.filter(d => d.qualified).length,
       urls: paged,
       pagination: { page, limit, total: results.length },
+      // What the URL_QUALIFICATION job itself reported. canonical_count is
+      // CANONICAL_CAP-limited (the default crawl set used when no selection
+      // gate runs) — it is NOT the size of the selectable pool above.
+      qualification_summary: {
+        job_id: urlQualJob._id.toString(),
+        discovered: urlQualJob.result_data?.discoveredUrls ?? null,
+        qualified: urlQualJob.result_data?.qualifiedUrls ?? null,
+        low_priority: urlQualJob.result_data?.lowPriorityUrls ?? null,
+        rejected: urlQualJob.result_data?.rejectedUrls ?? null,
+        canonical_count: urlQualJob.result_data?.canonicalCount ?? null
+      },
       // null = no cap; only set when an admin has explicitly configured a
       // per-project override.
       selection_limit: project.url_selection_limit ?? null

@@ -32,6 +32,11 @@ import {
   checkMediaCapability,
   fetchAllMedia
 } from '../../../services/businessProfileMediaService.js';
+import BusinessProfilePost from '../model/BusinessProfilePost.js';
+import {
+  checkPostsCapability,
+  fetchAllPosts
+} from '../../../services/businessProfilePostService.js';
 
 /**
  * Business Profile Sync Controller
@@ -689,7 +694,7 @@ export const selectBusinessProfile = async (req, res) => {
  * own metadata-update step.
  */
 async function runReviewsAndMetadataSync(googleConnection, userId, projectId, accountId, locationId) {
-  const result = { metadataSynced: false, detailsSynced: false, reviewsCapability: null, reviewCount: 0, mediaCapability: null, mediaCount: 0, error: null };
+  const result = { metadataSynced: false, detailsSynced: false, reviewsCapability: null, reviewCount: 0, mediaCapability: null, mediaCount: 0, postsCapability: null, postCount: 0, error: null };
 
   try {
     const metadata = await fetchBusinessMetadata(googleConnection, locationId);
@@ -838,6 +843,28 @@ async function runReviewsAndMetadataSync(googleConnection, userId, projectId, ac
     }
   } else {
     LoggerUtil.info('Media sync skipped - capability unavailable', { projectId, status: mediaCapability.status, reason: mediaCapability.reason });
+  }
+
+  // Local Posts - same legacy v4 host and capability-gate pattern as reviews and media
+  const postsCapability = await checkPostsCapability(googleConnection, accountId, locationId);
+  result.postsCapability = postsCapability.status;
+
+  if (postsCapability.status === 'available') {
+    try {
+      const { posts } = await fetchAllPosts(googleConnection, accountId, locationId);
+      const postsSyncedAt = new Date();
+
+      await BusinessProfilePost.bulkUpsertPosts(posts, userId, projectId, accountId, locationId, postsSyncedAt);
+      const deletedPostsCount = await BusinessProfilePost.markStaleAsDeleted(projectId, postsSyncedAt);
+
+      result.postCount = posts.length;
+      LoggerUtil.info('Posts synced', { projectId, postCount: posts.length, deletedPostsCount });
+    } catch (postsError) {
+      LoggerUtil.error('Posts sync failed', postsError, { projectId });
+      result.error = result.error || postsError.message;
+    }
+  } else {
+    LoggerUtil.info('Posts sync skipped - capability unavailable', { projectId, status: postsCapability.status, reason: postsCapability.reason });
   }
 
   return result;
